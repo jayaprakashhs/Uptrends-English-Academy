@@ -66,23 +66,9 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, setCurre
           return;
         }
       } else {
-        // When Supabase environment variables are not yet injected into this dev instance:
-        // Provide clear feedback or check against authenticated session
-        if (email.toLowerCase().includes('admin') || email.toLowerCase().includes('uptrends')) {
-          const mockSuperAdmin = {
-            id: 'mock_super_admin_1',
-            email,
-            full_name: 'Academy Administrator',
-            role: 'super_admin' as const,
-            is_active: true,
-          };
-          onLoginSuccess(mockSuperAdmin);
-          return;
-        } else {
-          throw new Error(
-            'Invalid credentials. Please enter your authorized academy admin email or configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
-          );
-        }
+        throw new Error(
+          'Admin login is unavailable because Supabase is not configured. Please contact the site administrator.'
+        );
       }
     } catch (err: any) {
       setError(err.message || 'Authentication failed. Please check your credentials.');
