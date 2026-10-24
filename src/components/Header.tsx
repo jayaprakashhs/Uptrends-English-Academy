@@ -2,16 +2,20 @@ import React, { useState } from 'react';
 import { Logo } from './Logo';
 import { Menu, X, PhoneCall, ArrowRight, ShieldCheck, Phone } from 'lucide-react';
 
+import { SiteBranding } from '../types';
+
 interface HeaderProps {
   currentPage: string;
   setCurrentPage: (page: string) => void;
   openCallbackModal: (programName?: string) => void;
+  branding?: SiteBranding | null;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   currentPage,
   setCurrentPage,
   openCallbackModal,
+  branding,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -72,7 +76,11 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={() => handleNavigate('home')}
             className="flex items-center text-left focus:outline-hidden focus:ring-2 focus:ring-orange-500 rounded-lg p-1"
           >
-            <Logo size="md" />
+            <Logo
+              size="md"
+              logoUrl={branding?.logo_url}
+              altText={branding?.main_logo_alt || branding?.logo_alt}
+            />
           </button>
 
           {/* Desktop Nav Links */}

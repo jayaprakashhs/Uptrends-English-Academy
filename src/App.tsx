@@ -19,7 +19,7 @@ import { AdminLogin } from './pages/AdminLogin';
 import { AdminPortal } from './pages/AdminPortal';
 import { NotFound } from './pages/NotFound';
 
-import { Program, Review, MediaItem, TeamMember, FAQ, AdminProfile } from './types';
+import { Program, Review, MediaItem, TeamMember, FAQ, AdminProfile, SiteBranding } from './types';
 
 export function App() {
   const [currentPage, setCurrentPage] = useState<string>('home');
@@ -43,9 +43,28 @@ export function App() {
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [branding, setBranding] = useState<SiteBranding | null>(null);
 
   // Initial Data Fetch
   useEffect(() => {
+    fetch('/api/branding')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && data.academy_name) {
+          setBranding(data);
+          if (data.favicon_url) {
+            let link = document.querySelector("link[rel*='icon']") as HTMLLinkElement | null;
+            if (!link) {
+              link = document.createElement('link');
+              link.rel = 'shortcut icon';
+              document.head.appendChild(link);
+            }
+            link.href = data.favicon_url;
+          }
+        }
+      })
+      .catch((e) => console.error('Error fetching branding:', e));
+
     fetch('/api/programs')
       .then((r) => r.json())
       .then((data) => {
@@ -127,6 +146,7 @@ export function App() {
         currentPage={currentPage}
         setCurrentPage={setCurrentPage}
         openCallbackModal={openCallbackModal}
+        branding={branding}
       />
 
       {/* Page Routing */}
@@ -220,7 +240,11 @@ export function App() {
       </main>
 
       {/* Footer */}
-      <Footer setCurrentPage={setCurrentPage} openCallbackModal={openCallbackModal} />
+      <Footer
+        setCurrentPage={setCurrentPage}
+        openCallbackModal={openCallbackModal}
+        branding={branding}
+      />
 
       {/* Global Modals */}
       <CallbackModal

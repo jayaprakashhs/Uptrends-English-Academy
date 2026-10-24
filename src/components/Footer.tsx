@@ -2,12 +2,19 @@ import React from 'react';
 import { Logo } from './Logo';
 import { MapPin, Phone, Mail, Clock, ArrowUpRight, ShieldCheck, Heart } from 'lucide-react';
 
+import { SiteBranding } from '../types';
+
 interface FooterProps {
   setCurrentPage: (page: string) => void;
   openCallbackModal: () => void;
+  branding?: SiteBranding | null;
 }
 
-export const Footer: React.FC<FooterProps> = ({ setCurrentPage, openCallbackModal }) => {
+export const Footer: React.FC<FooterProps> = ({
+  setCurrentPage,
+  openCallbackModal,
+  branding,
+}) => {
   const handleNav = (page: string) => {
     setCurrentPage(page);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -19,7 +26,12 @@ export const Footer: React.FC<FooterProps> = ({ setCurrentPage, openCallbackModa
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-12 mb-12">
           {/* Column 1: Brand & Purpose */}
           <div className="space-y-4">
-            <Logo variant="white" size="md" />
+            <Logo
+              variant="white"
+              size="md"
+              logoUrl={branding?.footer_logo_url || branding?.logo_url}
+              altText={branding?.main_logo_alt || branding?.logo_alt}
+            />
             <p className="text-sm text-slate-400 leading-relaxed pt-2">
               Davangere’s dedicated training center for spoken English, grammar fundamentals, and professional communication skills. Over two decades of empowering confident speakers.
             </p>
