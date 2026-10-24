@@ -1,0 +1,1095 @@
+# COMPLETE MASTER PROMPT — BUILD UPTREND’S ENGLISH ACADEMY FROM SCRATCH
+
+## 1. Your role and project objective
+
+Act as a senior full-stack developer, UI/UX designer, database architect, security engineer, and QA engineer.
+
+Build a complete, production-oriented website and admin portal from scratch for **Uptrend’s English Academy**, an English language training center in Davangere, Karnataka, India.
+
+This must be a real, functional web application, not just a design mockup, static landing page, or demonstration.
+
+Create the application directly in the Google AI Studio project workspace. Generate all required source files, components, pages, styles, database scripts, integrations, and configuration documentation.
+
+Do not use GitHub Copilot instructions. Do not attempt to repair or reuse the previous application's implementation. This is a new project.
+
+Before writing code, determine the framework and application structure supported by the current Google AI Studio environment. Choose a compatible React and TypeScript architecture and use it consistently throughout the project. Do not mix incompatible Vite and Next.js configurations or create conflicting entry points.
+
+If the environment cannot run a particular backend or deployment feature directly, implement the appropriate integration points and provide exact configuration and deployment instructions. Never simulate a backend operation and claim it is real.
+
+## 2. Technology stack
+
+Use the following architecture:
+
+- Frontend: React and TypeScript.
+- Styling: Tailwind CSS if supported by the selected environment; otherwise use a compatible CSS approach with reusable design tokens.
+- Database: Supabase PostgreSQL.
+- Authentication: Supabase Auth.
+- Authorization: Supabase Row Level Security (RLS), with server-side authorization for privileged operations.
+- Image storage: Cloudflare R2.
+- Transactional emails: Resend.
+- Videos: YouTube embeds using URLs entered by authorized administrators.
+- Source control: GitHub-compatible project structure.
+- Hosting: A deployment platform compatible with the actual application architecture.
+
+Keep all integrations modular and maintainable.
+
+Use environment variables for credentials. Never expose the Supabase service-role key, Resend API key, Cloudflare R2 secret credentials, or other privileged secrets in browser code.
+
+Do not use localStorage as the database for applications, enquiries, users, reviews, announcements, programs, or media. Supabase must be the persistent source of truth.
+
+## 3. Academy business details
+
+Use these supplied details consistently.
+
+**Business name:** Uptrend’s English Academy
+
+**Business category:** English Language School / Spoken English Training Center
+
+**Address:** #259/1A1, Devi Building, 2nd Floor, Ram And Co Circle, opposite Ganesha Temple, above Sangeetha Mobiles, Prince Jayachamaraja Wodeyar, Davangere, Karnataka 577002, India.
+
+**Phone:** +91 900 8000 211
+
+**Email:** uptrendsinstitute@gmail.com
+
+**Regular business hours:**
+
+- Monday: 8:00 AM–8:30 PM
+- Tuesday: 8:00 AM–8:30 PM
+- Wednesday: 8:00 AM–8:30 PM
+- Thursday: 8:00 AM–8:30 PM
+- Friday: 8:00 AM–8:30 PM
+- Saturday: 8:00 AM–8:30 PM
+- Sunday: Closed
+
+Treat these as supplied regular hours, not live-verified opening information.
+
+Use the existing Uptrend’s English Academy logo and orange-and-green brand identity where supplied. If the logo file is unavailable, create a clearly replaceable logo placeholder rather than inventing a different official logo.
+
+Do not invent staff names, establishment year, accreditation, student counts, awards, course fees, review ratings, testimonials, or guaranteed outcomes.
+
+## 4. Design requirements
+
+Create a premium, modern, trustworthy, visually appealing educational website.
+
+### Brand colors
+
+- Primary orange
+- Primary green
+- White
+- Neutral gray
+- Dark readable text
+
+Use orange and green in a balanced, consistent manner throughout the website. Use the supplied logo and maintain a coherent identity.
+
+### Visual style
+
+- Premium hero section
+- Clean typography
+- Attractive program cards
+- Consistent buttons and forms
+- Subtle shadows and borders
+- Restrained transitions and animations
+- High-quality, correctly cropped photography
+- Well-spaced sections
+- Clear visual hierarchy
+
+### Responsive layout
+
+Support desktop, laptop, tablet, and mobile.
+
+Build a responsive navigation menu, accessible forms, mobile-friendly admin tables, responsive media embeds, and a collapsible admin sidebar.
+
+### Accessibility and performance
+
+- Use semantic HTML.
+- Provide accessible labels and keyboard navigation.
+- Maintain readable color contrast.
+- Respect reduced-motion preferences.
+- Optimize images and lazy-load appropriate media.
+- Avoid broken images, layout shifts, and unnecessary JavaScript.
+- Provide loading, success, empty, and error states.
+
+## 5. Public website pages
+
+Create these pages:
+
+1. Home
+2. About Us
+3. Programs
+4. Program Details
+5. Reviews
+6. Media Gallery
+7. FAQs
+8. Contact Us
+9. Apply Now
+10. Admin Login
+11. Custom 404 page
+
+Do not create a Batches page, Track Enrolment page, or public Schedule page.
+
+Do not show batch information or schedules inside program cards or program detail pages.
+
+Do not display an “Instant Access” option on the admin login page.
+
+## 6. Homepage structure
+
+Build the homepage with the following sections.
+
+### A. Header
+
+Include the academy logo and navigation links for Home, About Us, Programs, Reviews, Media Gallery, FAQs, Contact Us, and Apply Now.
+
+Every link must work.
+
+### B. Moving announcement banner
+
+Create a continuously moving announcement banner.
+
+Requirements:
+
+- No close button.
+- Content comes from Supabase.
+- Administrators can add, edit, reorder, activate, deactivate, and delete announcements.
+- Public content updates after a successful database save.
+- Only active announcements appear.
+- Support multiple announcements.
+- Use readable animation and respect reduced-motion preferences.
+
+### C. Hero section
+
+Create a visually impressive hero introducing the academy and its English communication training.
+
+Include:
+
+- Main headline
+- Short description
+- Approved academy image or logo
+- Apply Now button
+- Explore Programs button
+- Request a Call button
+
+Do not invent numerical claims or guaranteed learning results.
+
+### D. Programs preview
+
+Show published programs from Supabase.
+
+Each card includes:
+
+- Image
+- Program name
+- Short description
+- Intended audience
+- Duration, if configured
+- Level, if configured
+- View Program button
+- Request a Call button
+
+Do not display batch names, schedules, or invented fees.
+
+### E. Why choose us
+
+Show configurable, academy-approved content describing the teaching approach and learning environment.
+
+Do not publish unverified claims.
+
+### F. About preview
+
+Show a short introduction and link to About Us.
+
+### G. Reviews preview
+
+Show approved reviews and a link to the full Reviews page.
+
+### H. Media gallery preview
+
+Show published photos and YouTube videos.
+
+### I. Apply Now CTA
+
+Encourage visitors to submit an application.
+
+### J. Contact and footer
+
+Show the verified business details, opening hours, address, phone, email, and configured links.
+
+## 7. About Us page
+
+Create these sections.
+
+### About the academy
+
+Explain the academy's purpose of helping people in Davangere improve their English communication and speak with greater confidence.
+
+### Meet Our Team
+
+Display approved team profiles managed by the admin portal. Each profile can include a name, designation, photograph, and biography.
+
+Do not invent team members.
+
+### Our Team Talk
+
+Embed one academy introduction video using a YouTube URL entered by an administrator.
+
+### Our Philosophy
+
+Display three cards:
+
+- Vision
+- Mission
+- Values
+
+Use editable, academy-approved content.
+
+### Our Journey
+
+Include the academy's approximately 25-year journey using approved reference content. Do not invent an exact founding year or historical milestones.
+
+### Hear from Our Recent Batch
+
+Display an approved testimonial video through a YouTube link.
+
+Do not publish student names, images, or testimonials without permission.
+
+### Contact details
+
+Display the supplied phone number, email address, full address, and regular business hours.
+
+## 8. Programs catalogue
+
+Create a dynamic program catalogue managed through Supabase.
+
+Use these as initial draft program records, but make them editable and unpublished until the academy confirms the details.
+
+### Program 1: Spoken English Course — Beginner to Advanced
+
+- Duration: 2–3 months
+- Audience: Students, job seekers, professionals, and homemakers
+- Level: Foundation to Advanced
+
+### Program 2: Basic English Grammar & Vocabulary
+
+- Duration: 2 months
+- Audience: Beginners, school students, and college students
+
+### Program 3: Kids English Course
+
+- Duration: Ongoing
+- Audience: Children
+- Age range: Requires confirmation because the supplied reference contains conflicting ranges of 5–12 and 8–15.
+
+Do not choose an age range without confirmation.
+
+### Program 4: Advanced English & Interview Preparation
+
+- Duration: 1 month
+- Audience: Graduates, job seekers, and final-year students
+
+Support configurable levels such as Foundation, Intermediate, and Advanced.
+
+### Program cards
+
+Each card must include:
+
+- Program image
+- Title
+- Description
+- Audience
+- Configured duration
+- Configured level
+- View Program
+- Request a Call
+
+The **View Program** button opens the correct detail page.
+
+The **Request a Call** button opens a callback form with the selected program prefilled.
+
+The **Apply Now** button opens the application form with the selected program prefilled.
+
+Do not display Batches, Schedule, Join a Batch, Track Enrolment, or unconfigured fees.
+
+## 9. Student application form
+
+Create a complete Apply Now form.
+
+### Required fields
+
+- Student full name
+- Mobile number
+- Email address
+- Student qualification
+- Selected program
+- Passport-size photograph
+- Privacy consent
+
+### Optional fields
+
+- Date of birth
+- Address
+- Additional message
+
+Validate all required fields on both client and server.
+
+The student's email address is mandatory because the system must send confirmation and approval emails.
+
+### Passport photograph requirements
+
+- Accept supported image formats, such as JPEG, PNG, and WebP.
+- Final image size must be **300 KB or less**.
+- Resize and compress the image on the client when necessary.
+- Validate the final size and file type on the server.
+- Upload the photograph to Cloudflare R2 through a secure upload flow.
+- Save the R2 object key in Supabase.
+- Keep student photographs private.
+- Provide authorized access through a secure mechanism.
+
+If compression cannot reduce the photograph to 300 KB or less, reject it with a clear message.
+
+### Submission workflow
+
+When the student submits the form:
+
+1. Validate the form.
+2. Prevent duplicate submissions.
+3. Compress and validate the photograph.
+4. Upload the photograph to R2.
+5. Save the application in Supabase with status `Pending`.
+6. Generate a unique application reference.
+7. Trigger the student's confirmation email through Resend.
+8. Trigger the staff/teacher notification email through Resend.
+9. Show the successful-submission message once the database save has succeeded.
+
+If the upload or database save fails, report the failure and allow a safe retry.
+
+If the application saves successfully but an email fails, preserve the application and record the email failure. Do not falsely claim the email was sent.
+
+## 10. Resend email integration
+
+Use Resend for transactional email delivery.
+
+Create server-side email functionality using the backend mechanism supported by the selected deployment architecture. Do not call Resend directly from public browser code.
+
+### Required environment variables
+
+Configure:
+
+- `RESEND_API_KEY`
+- `RESEND_FROM_EMAIL`
+- `APPLICATION_NOTIFICATION_EMAIL`
+- `APPROVED_FEE_STRUCTURE_PDF_URL`
+- `NEXT_PUBLIC_SITE_URL`
+
+Use `NEXT_PUBLIC_SITE_URL` only if appropriate to the chosen framework. Never expose secrets through public environment variables.
+
+The sender email must be verified in Resend before production email delivery.
+
+### A. Student application confirmation
+
+After the application is saved successfully, send a confirmation email to the student's registered email address.
+
+**Subject:** Application Received — Uptrend’s English Academy
+
+**Email:**
+
+Dear {{student_name}},
+
+Thank you for applying to Uptrend’s English Academy.
+
+Your application for **{{program_name}}** has been submitted successfully. It is currently **waiting for approval** from our staff or teacher.
+
+We will notify you by email when your application status changes.
+
+Application Reference: {{application_reference}}
+
+Thank you for your interest in Uptrend’s English Academy.
+
+Regards,  
+Uptrend’s English Academy  
+Davangere, Karnataka
+
+Use a professional HTML email template with a plain-text alternative.
+
+### B. Staff/teacher new application notification
+
+Send a separate email to the configured staff/teacher email address.
+
+**Subject:** New Student Application — {{student_name}}
+
+**Email:**
+
+A new student application has been submitted.
+
+- Student name: {{student_name}}
+- Program: {{program_name}}
+- Application reference: {{application_reference}}
+- Submission date: {{submission_date}}
+- Status: Pending
+
+Please review the application in the secure admin portal.
+
+Include a link to the authenticated admin portal and, where possible, directly to the relevant application.
+
+Do not include the student's passport photograph or unnecessary personal information in the email.
+
+### C. Approval action
+
+Add a functional Approve Application action in the admin portal.
+
+When an authorized staff member approves a pending application:
+
+1. Verify the user's identity and permission on the server.
+2. Update the application status to `Accepted` in Supabase.
+3. Record the approving user and timestamp.
+4. Send an approval email to the student's registered email.
+5. Attach the official fee-structure and terms-and-conditions PDF.
+6. Record the notification status and provider message identifier.
+7. Provide an authorized retry action if email delivery fails.
+
+### D. Student approval email
+
+**Subject:** Congratulations! Your Application Has Been Approved — Uptrend’s English Academy
+
+**Email:**
+
+Dear {{student_name}},
+
+Congratulations!
+
+Your application to **Uptrend’s English Academy** for **{{program_name}}** has been approved.
+
+Please find the attached PDF containing the academy's fee structure and terms and conditions.
+
+Read the document carefully and contact the academy if you need clarification.
+
+Application Reference: {{application_reference}}
+
+We look forward to welcoming you to Uptrend’s English Academy.
+
+Regards,  
+Uptrend’s English Academy  
+Davangere, Karnataka
+
+**Attachment:** `Uptrends_Fee_Structure_and_Terms.pdf`
+
+### E. Official PDF requirements
+
+Use an actual PDF supplied or approved by the academy. Do not invent fees, refund rules, payment conditions, or legal terms.
+
+The PDF must be configured securely.
+
+Before sending the approval email:
+
+- Verify that the PDF is configured.
+- Verify that the document exists and is a valid PDF.
+- Check its size against Resend's attachment limits.
+- Attach the actual PDF using the format supported by Resend.
+- Do not send an approval email without the required attachment.
+
+If the PDF is missing, show an administrative error and explain how to configure it.
+
+Do not build a fee-management or payment-record module. The PDF is informational only.
+
+### F. Email reliability
+
+Implement:
+
+- Notification statuses: Pending, Sent, Failed.
+- Attempt counts and timestamps.
+- Safe retry handling.
+- Duplicate-notification prevention.
+- Appropriate server-side logging.
+- Resend delivery webhooks if configured.
+
+Resend accepting an email request does not guarantee inbox delivery. Do not describe an accepted request as confirmed delivery.
+
+An email failure must not delete an application or reverse an approval.
+
+## 11. Secure admin portal
+
+Create a separate, protected admin experience with:
+
+- Admin login
+- Dashboard overview
+- Applications
+- Reviews
+- Callback Requests
+- Contact Enquiries
+- Programs Management
+- Media Gallery
+- Announcements
+- Team Management
+- Site Content Management
+- FAQs Management
+- Branding and Settings
+- Admin Roles and Permissions
+- Email Notification Monitoring
+
+Display navigation items according to the authenticated user's role.
+
+Implement real CRUD operations, validation, confirmation dialogs, search, filters, and refresh.
+
+Do not use mock records or nonfunctional buttons.
+
+### Dashboard
+
+Use actual Supabase data to display:
+
+- Total applications
+- Pending applications
+- Accepted applications
+- Published programs
+- Reviews
+- Callback requests
+- Contact enquiries
+- Failed email notifications
+
+Dashboard cards should navigate to the relevant admin section.
+
+## 12. Role-based permissions
+
+### Staff
+
+Access:
+
+- Dashboard Overview
+- Applications
+- Reviews
+- Callback Requests
+- Contact Enquiries
+
+Authorized staff must be able to review and approve applications under the configured approval policy.
+
+### Admin
+
+Access all Staff features, plus:
+
+- Programs Management
+- Media Gallery
+- Announcements
+
+### Super Admin
+
+Access all features, including:
+
+- Dashboard Overview
+- Applications
+- Reviews
+- Callback Requests
+- Contact Enquiries
+- Programs Management
+- Media Gallery
+- Announcements
+- Team Management
+- Site Content Management
+- FAQs Management
+- Branding and Settings
+- Role and Permission Management
+- Email Notification Monitoring
+- Official PDF configuration
+
+Enforce permissions on the server and through Supabase RLS. Hiding a button is not authorization.
+
+No user may promote themselves or assign themselves a higher role.
+
+Do not implement public admin registration or hardcoded default credentials. Provide a safe procedure for creating the first Super Admin.
+
+## 13. Application management
+
+Create a functional application management interface.
+
+Display:
+
+- Application reference
+- Student name
+- Mobile
+- Email
+- Qualification
+- Program
+- Submission date
+- Status
+- Approval details
+- Email notification status
+
+Implement:
+
+- View application details
+- Securely view the student's photograph
+- Search and filter
+- Approve application
+- Delete application when authorized
+- View notification history
+- Retry failed email notifications
+
+Use only these application statuses:
+
+- `Pending`
+- `Accepted`
+
+Record approval user and timestamp.
+
+Require confirmation before deletion. Handle related private photographs and notification records safely.
+
+Do not create a Track Enrolment feature.
+
+## 14. Programs management
+
+Provide functional Add, Edit, Delete, Search, Filter, Publish/Unpublish, and Refresh operations.
+
+Allow authorized administrators to manage:
+
+- Program title
+- Description
+- Image
+- Duration
+- Level
+- Intended audience
+- Learning objectives
+- Publication status
+- Display order
+
+Changes must appear on the public website after a successful save.
+
+Do not add batch scheduling or fee management.
+
+## 15. Reviews management
+
+Public review page:
+
+- Display approved reviews.
+- Sort Latest and Oldest.
+- Filter by rating.
+- Display rating and review text.
+- Support pagination or Load More.
+
+Admin portal:
+
+- View
+- Add where properly sourced
+- Edit
+- Approve or unpublish
+- Delete
+- Search and filter
+
+Do not fabricate reviews, student names, star ratings, or testimonials.
+
+Any supplied testimonial must be verified and published only with appropriate permission.
+
+## 16. Media gallery and Cloudflare R2
+
+### Images
+
+Use Cloudflare R2 to store uploaded academy images.
+
+Authorized administrators can:
+
+- Upload
+- Edit captions, titles, alt text, and display order
+- Replace
+- Delete
+- Publish/unpublish
+- Preview
+- Refresh
+
+After uploading an image, display it immediately after the R2 upload and Supabase metadata save succeed.
+
+If metadata saving fails, report the failure and handle the uploaded object safely.
+
+Provide a real Edit button and Refresh button.
+
+### Videos
+
+Videos must be hosted on YouTube.
+
+The administrator uploads the video to YouTube and pastes its URL into the admin portal.
+
+Support:
+
+- Our Team Talk
+- Hear from Our Recent Batch
+- Other approved gallery videos
+
+Validate YouTube URLs and safely derive the video ID.
+
+Allow editing the video title, caption, cover image, publication status, and display order.
+
+Do not upload video files directly to R2.
+
+### Homepage video cover fix
+
+Ensure the video cover image:
+
+- Uses a valid image URL or approved uploaded image.
+- Has a suitable aspect ratio.
+- Uses appropriate cropping.
+- Has a fallback if the thumbnail is unavailable.
+- Does not stretch or display as a broken image.
+- Opens the correct YouTube video when clicked.
+- Works on mobile and desktop.
+
+## 17. Announcement management
+
+Provide full CRUD for announcements.
+
+Authorized administrators can:
+
+- Add
+- Edit
+- Delete
+- Reorder
+- Activate/deactivate
+- Preview
+
+Store announcement content in Supabase.
+
+Public announcements must update after successful saving. The moving banner must not have a close button.
+
+## 18. Callback request form
+
+Provide a callback form accessible from program cards and detail pages.
+
+Fields:
+
+- Full name
+- Mobile number
+- Email, if provided
+- Interested program
+- Preferred contact time: Morning, Afternoon, Evening
+- Optional message
+- Consent
+
+Save requests in Supabase and optionally notify the configured staff address using Resend.
+
+Provide functional admin management, search, filtering, and status handling where implemented.
+
+The preferred contact time is only a contact preference. Do not create an appointment scheduling system.
+
+## 19. Contact enquiries
+
+Create a Contact Us form with:
+
+- Full name
+- Email
+- Mobile number, if provided
+- Subject
+- Message
+- Consent
+
+Save enquiries in Supabase. Notify the configured staff address using Resend after successful saving.
+
+In the admin portal, authorized users can view, search, filter, and manage enquiries.
+
+## 20. FAQs and site content
+
+Create a public FAQ page and a Super Admin editor.
+
+Allow the Super Admin to add, edit, reorder, publish, unpublish, and delete FAQ entries.
+
+Use approved reference content only. Do not invent fees, guarantees, refund rules, or legal conditions.
+
+Allow authorized administrators to edit:
+
+- Vision
+- Mission
+- Values
+- Our Journey
+- About Us content
+- Homepage copy
+- Contact details where permitted
+- Other approved site content
+
+## 21. Supabase database schema
+
+Create SQL migration files for the required database tables.
+
+### `admin_profiles`
+
+Fields for authenticated user ID, full name, role, active status, and timestamps.
+
+### `programs`
+
+Fields for title, slug, description, short description, duration, level, target audience, image object key, publication status, display order, and timestamps.
+
+### `applications`
+
+Fields for application reference, student name, mobile, email, qualification, program ID, optional date of birth and address, photo object key, optional message, status, consent, approving user, approval timestamp, and timestamps.
+
+### `application_notifications`
+
+Fields for application ID, notification type, recipient email, status, attempt count, provider message ID, sanitized error, sent timestamp, and timestamps.
+
+### `callback_requests`
+
+Store contact details, selected program, preferred contact time, message, status where needed, and timestamps.
+
+### `contact_enquiries`
+
+Store contact details, subject, message, status where needed, and timestamps.
+
+### `reviews`
+
+Store approved review information, author display name, rating, review text, publication status, and timestamps.
+
+### `media_items`
+
+Store media type, title, caption, R2 object key for photos, YouTube video ID or URL for videos, cover image reference, alt text, publication status, display order, and timestamps.
+
+### `announcements`
+
+Store announcement text, active status, display order, and timestamps.
+
+### `team_members`
+
+Store approved names, designations, biographies, photograph references, publication status, display order, and timestamps.
+
+### `site_content`
+
+Store editable homepage, About Us, Vision, Mission, Values, Our Journey, and other content.
+
+### `faqs`
+
+Store questions, answers, publication status, display order, and timestamps.
+
+### `site_branding`
+
+Store the actual branding fields used by the application, including logo references, alt text, favicon reference, footer logo reference, brand colors, and related settings.
+
+Inspect migrations and the actual schema before querying columns. Ensure all fields used by the application exist in the database.
+
+Use UUID keys, appropriate foreign keys, constraints, indexes, and timestamps.
+
+Do not create tables for batches, enrolment tracking, fee management, payment records, or payment tracking.
+
+If a secure notification queue or outbox is needed, implement it without exposing its contents publicly.
+
+## 22. Supabase security
+
+Create and test RLS policies.
+
+- Public users can read only published public content.
+- Public users cannot read private applications, photographs, notification records, or admin profiles.
+- Only authorized users can manage protected content.
+- Application approval requires an authorized role.
+- Role assignment is restricted to Super Admins.
+- Privileged server keys must never be exposed to the browser.
+- Use secure upload authorization for Cloudflare R2.
+- Keep student photographs private.
+- Rate-limit public forms and protect against spam.
+- Validate all server-side inputs.
+
+Never solve permission errors by enabling unrestricted public database access.
+
+## 23. Authentication
+
+Implement Supabase Auth with login and logout.
+
+Requirements:
+
+- No public admin registration.
+- No default public credentials.
+- No Instant Access option.
+- No user-controlled role selection.
+- Secure session handling.
+- Protected admin routes.
+- Server-side permission checks.
+- Safe handling of expired sessions and invalid credentials.
+- Safe Super Admin provisioning and recovery.
+
+## 24. Search, filters, and refresh
+
+Implement working search, filters, sorting, and refresh functionality.
+
+- Applications: search by student name, reference, or contact details; filter by status and program.
+- Reviews: Latest/Oldest sorting and rating filter.
+- Programs: search and publication filters.
+- Media: filter by photo/video and publication status.
+- Announcements: search and active status.
+- Callback requests: search and filter.
+- Contact enquiries: search and filter.
+- Email notifications: filter by type and status.
+
+Refresh must fetch current data from the actual data source, not merely change the UI.
+
+## 25. Error handling and security
+
+Implement:
+
+- Loading indicators
+- Clear validation messages
+- Success/error notifications
+- Duplicate-submission protection
+- Safe retry behavior
+- Server-side logs
+- Secure error handling
+
+Handle Supabase failures, R2 upload failures, Resend errors, invalid YouTube links, missing PDF attachments, and unauthorized operations.
+
+Never claim success before the relevant operation succeeds.
+
+If the application saves but email fails, preserve the application. If approval saves but the approval email fails, preserve the Accepted status and allow a secure email retry.
+
+## 26. SEO
+
+Implement:
+
+- Page titles
+- Meta descriptions
+- Open Graph metadata
+- Favicon
+- Sitemap
+- Robots configuration
+- Canonical URLs where appropriate
+- Correct image alt text
+- Accurate structured business data
+
+Use only supplied and verified business details.
+
+## 27. Environment configuration
+
+Create a `.env.example` file containing placeholder values only.
+
+Document the required settings for:
+
+- Supabase URL
+- Supabase publishable/anonymous key
+- Supabase service-role secret, server-side only where needed
+- Cloudflare R2 account and bucket
+- Cloudflare R2 credentials or secure upload configuration
+- Resend API key
+- Verified Resend sender email
+- Staff notification email
+- Public site URL
+- Approved fee-structure and terms PDF reference
+
+Use environment-variable names appropriate to the actual framework. Keep secrets server-side.
+
+Never commit real API keys or passwords.
+
+## 28. Deployment documentation
+
+Provide a setup guide covering:
+
+1. Creating the Supabase project.
+2. Applying database migrations.
+3. Configuring RLS and authentication.
+4. Creating and configuring the Cloudflare R2 bucket.
+5. Configuring secure image uploads.
+6. Setting up Resend and verifying the sender domain.
+7. Configuring the staff notification email.
+8. Providing the approved PDF.
+9. Provisioning the first Super Admin.
+10. Running the application locally.
+11. Testing application and email workflows.
+12. Deploying to a platform compatible with the selected architecture.
+13. Setting production environment variables.
+
+Do not claim that the website is deployed or that external services are configured unless that has actually been verified.
+
+## 29. Testing checklist
+
+Test the following.
+
+### Public website
+
+- All navigation links work.
+- Program details open correctly.
+- Apply Now opens the correct form.
+- Request a Call preselects the program.
+- Reviews sorting and filters work.
+- Announcement banner displays correctly.
+- YouTube videos embed correctly.
+- Media images display correctly.
+- The homepage video cover is correctly cropped.
+- Mobile layouts work.
+
+### Application submission
+
+- Valid applications save to Supabase.
+- Photographs larger than 300 KB are compressed or rejected.
+- Photographs upload securely to R2.
+- Applications start as Pending.
+- Student confirmation email is triggered.
+- Staff notification email is triggered.
+- Duplicate submissions are safely handled.
+- Email failures are recorded.
+- Failed emails can be retried by authorized users.
+
+### Approval
+
+- Authorized staff can approve an application.
+- Unauthorized users cannot approve.
+- Supabase status changes to Accepted.
+- Approval user and timestamp are saved.
+- Student approval email includes the official PDF.
+- Missing PDFs prevent an incomplete approval email.
+- Email retries do not repeat approval.
+
+### Admin portal
+
+- Login and logout work.
+- Role-based navigation works.
+- Unauthorized server actions are rejected.
+- CRUD operations work.
+- Refresh fetches current data.
+- Changes to programs, announcements, and media appear publicly.
+- RLS prevents unauthorized access.
+
+## 30. Required implementation order
+
+Build the project in phases rather than attempting to generate everything in one unverified operation.
+
+**Phase 1:** Initialize the new application, install compatible dependencies, and create the responsive design system.
+
+**Phase 2:** Build the public website pages and navigation.
+
+**Phase 3:** Create Supabase migrations, authentication, RLS, and secure data access.
+
+**Phase 4:** Build the admin portal, dashboard, role permissions, and navigation.
+
+**Phase 5:** Implement applications, photograph uploads, application management, and approval.
+
+**Phase 6:** Integrate Resend, student/staff notifications, approval emails, and PDF attachments.
+
+**Phase 7:** Implement programs, reviews, FAQs, announcements, team content, and media gallery.
+
+**Phase 8:** Complete callback requests, contact enquiries, search, filters, and refresh.
+
+**Phase 9:** Test security, fix build errors, verify workflows, and document deployment.
+
+At the end of each phase, inspect the generated files, fix TypeScript and build errors, and confirm that the implemented functionality works before proceeding.
+
+## 31. Strict exclusions
+
+Do not implement:
+
+- Batches page
+- Track Enrolment page
+- Batch scheduling
+- Schedule sections in program cards
+- Instant Access login
+- Fee-management module
+- Payment-record module
+- Payment-tracking module
+- Direct video-file uploads to R2
+- Fake reviews or testimonials
+- Invented fees or legal conditions
+- Hardcoded credentials
+- Public admin registration
+- Fake database records presented as real
+- Buttons that do nothing
+- Client-side-only authorization
+
+The approved fee-structure PDF is used only as an informational email attachment when an application is approved.
+
+## 32. Final instruction
+
+Start by creating the new project structure and the minimum working application. Then implement each phase in the actual Google AI Studio workspace.
+
+Do not stop after displaying a plan. Create the source files and implement the functionality supported by the environment.
+
+When an external service requires credentials or configuration, provide the exact steps needed instead of pretending it is configured.
+
+Before declaring the project complete, verify the full end-to-end workflow:
+
+Student submits application → photograph uploads to R2 → application saves in Supabase as Pending → student confirmation email is triggered → staff notification email is triggered → authorized staff approves → status changes to Accepted → student approval email is triggered with the official PDF attachment.
+
+Deliver a maintainable, secure, responsive application with working integrations and clear setup instructions.

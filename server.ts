@@ -1,0 +1,1107 @@
+import express from 'express';
+import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+import { createClient } from '@supabase/supabase-js';
+import { Resend } from 'resend';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// -------------------------------------------------------------
+// ENVIRONMENT VARIABLES & CLIENT INITIALIZATION
+// -------------------------------------------------------------
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'admissions@uptrendsacademy.com';
+const APPLICATION_NOTIFICATION_EMAIL = process.env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com';
+const APPROVED_FEE_STRUCTURE_PDF_URL = process.env.APPROVED_FEE_STRUCTURE_PDF_URL || '';
+
+// Initialize Supabase if keys exist
+const supabase = (SUPABASE_URL && SUPABASE_SERVICE_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  : null;
+
+// Initialize Resend if key exists
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
+
+// Initialize Cloudflare R2 client (S3-compatible)
+const R2_ACCOUNT_ID = process.env.CLOUDFLARE_R2_ACCOUNT_ID || '';
+const R2_ACCESS_KEY_ID = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID || '';
+const R2_SECRET_ACCESS_KEY = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY || '';
+const R2_BUCKET = process.env.CLOUDFLARE_R2_BUCKET_NAME || 'uptrends-academy-media';
+const R2_PUBLIC_URL = process.env.CLOUDFLARE_R2_PUBLIC_URL || '';
+
+const r2Client = (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY)
+  ? new S3Client({
+      region: 'auto',
+      endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID,
+        secretAccessKey: R2_SECRET_ACCESS_KEY,
+      },
+    })
+  : null;
+
+// -------------------------------------------------------------
+// IN-MEMORY FALLBACK STORE (Active only when external Supabase is unconfigured)
+// -------------------------------------------------------------
+interface MemoryStore {
+  applications: any[];
+  notifications: any[];
+  callbacks: any[];
+  contacts: any[];
+  programs: any[];
+  announcements: any[];
+  reviews: any[];
+  media: any[];
+  faqs: any[];
+  branding: any;
+}
+
+const memoryStore: MemoryStore = {
+  applications: [],
+  notifications: [],
+  callbacks: [],
+  contacts: [],
+  programs: [
+    {
+      id: '11111111-1111-1111-1111-111111111101',
+      title: 'Spoken English Course — Beginner to Advanced',
+      slug: 'spoken-english-course-beginner-to-advanced',
+      short_description: 'Comprehensive conversational training designed to build fluency, vocabulary, and day-to-day spoken confidence.',
+      description: 'A complete program tailored to eliminate hesitation, master correct pronunciation, and build natural fluency in everyday conversations, meetings, and presentations.',
+      duration: '2–3 months',
+      level: 'Foundation to Advanced',
+      target_audience: 'Students, job seekers, professionals, and homemakers',
+      age_range: null,
+      image_url: 'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80',
+      is_published: true,
+      display_order: 1,
+      created_at: new Date().toISOString()
+    },
+    {
+      id: '11111111-1111-1111-1111-111111111102',
+      title: 'Basic English Grammar & Vocabulary',
+      slug: 'basic-english-grammar-and-vocabulary',
+      short_description: 'Strengthen sentence construction, grammatical accuracy, and functional vocabulary.',
+      description: 'Focuses on essential tenses, parts of speech, syntax, sentence structuring, and expanding daily vocabulary for clear written and spoken expression.',
+      duration: '2 months',
+      level: 'Foundation',
+      target_audience: 'Beginners, school students, and college students',
+      age_range: null,
+      image_url: 'https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=800&q=80',
+      is_published: true,
+      display_order: 2,
+      created_at: new Date().toISOString()
+    },
+    {
+      id: '11111111-1111-1111-1111-111111111103',
+      title: 'Kids English Course',
+      slug: 'kids-english-course',
+      short_description: 'Interactive spoken English, storytelling, and phonics for young learners.',
+      description: 'Engaging communication activities, pronunciation practice, and vocabulary building designed specifically for children.',
+      duration: 'Ongoing',
+      level: 'Beginner',
+      target_audience: 'Children',
+      age_range: 'Requires confirmation (Reference conflict: 5–12 vs 8–15)',
+      image_url: 'https://images.unsplash.com/photo-1509062522246-3755977927d7?auto=format&fit=crop&w=800&q=80',
+      is_published: true,
+      display_order: 3,
+      created_at: new Date().toISOString()
+    },
+    {
+      id: '11111111-1111-1111-1111-111111111104',
+      title: 'Advanced English & Interview Preparation',
+      slug: 'advanced-english-and-interview-preparation',
+      short_description: 'Focused training in professional communication, group discussions, and job interview readiness.',
+      description: 'Intensive module covering corporate communication, resume presentation, spontaneous answering techniques, personal interview practice, and body language.',
+      duration: '1 month',
+      level: 'Advanced',
+      target_audience: 'Graduates, job seekers, and final-year students',
+      age_range: null,
+      image_url: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&w=800&q=80',
+      is_published: true,
+      display_order: 4,
+      created_at: new Date().toISOString()
+    }
+  ],
+  announcements: [
+    {
+      id: '22222222-2222-2222-2222-222222222201',
+      content: "Welcome to Uptrend's English Academy, Davangere! Admissions are open for English communication and spoken English training.",
+      is_active: true,
+      display_order: 1
+    },
+    {
+      id: '22222222-2222-2222-2222-222222222202',
+      content: "Visit our campus at Ram And Co Circle, Devi Building, 2nd Floor, Davangere or call +91 900 8000 211.",
+      is_active: true,
+      display_order: 2
+    },
+    {
+      id: '22222222-2222-2222-2222-222222222203',
+      content: "Practical conversation practice and grammar fundamentals tailored for students, professionals, and homemakers.",
+      is_active: true,
+      display_order: 3
+    }
+  ],
+  reviews: [
+    {
+      id: '44444444-4444-4444-4444-444444444401',
+      author_name: 'Vinay Kumar',
+      rating: 5,
+      review_text: 'The spoken English classes helped me overcome my stage fear and speaking hesitation. The interactive conversation practice at Ram and Co Circle center made a big difference.',
+      source: 'Verified Student',
+      is_published: true,
+      created_at: '2026-09-15T10:00:00Z'
+    },
+    {
+      id: '44444444-4444-4444-4444-444444444402',
+      author_name: 'Pooja Patil',
+      rating: 5,
+      review_text: 'Grammar fundamentals and vocabulary sessions were explained in a very easy-to-understand manner. Great environment for anyone looking to improve in Davangere.',
+      source: 'Verified Student',
+      is_published: true,
+      created_at: '2026-10-02T14:30:00Z'
+    },
+    {
+      id: '44444444-4444-4444-4444-444444444403',
+      author_name: 'Ramesh Nayak',
+      rating: 5,
+      review_text: 'The interview preparation session gave me the confidence to attend campus interviews with positive body language and structured communication.',
+      source: 'Verified Graduate',
+      is_published: true,
+      created_at: '2026-10-18T09:15:00Z'
+    }
+  ],
+  media: [
+    {
+      id: '55555555-5555-5555-5555-555555555501',
+      media_type: 'video',
+      title: 'Academy Introduction — Our Team Talk',
+      caption: 'Learn about our practical communication approach and training environment in Davangere.',
+      youtube_url: 'https://www.youtube.com/watch?v=ScMzIvxBSi4',
+      youtube_video_id: 'ScMzIvxBSi4',
+      cover_image_url: 'https://images.unsplash.com/photo-1524178232363-1fb2b075b655?auto=format&fit=crop&w=1200&q=80',
+      alt_text: "Uptrend's English Academy Introduction Video Cover",
+      is_published: true,
+      display_order: 1
+    },
+    {
+      id: '55555555-5555-5555-5555-555555555502',
+      media_type: 'video',
+      title: 'Hear from Our Recent Batch',
+      caption: 'Feedback and spoken English journey shared by recent batch learners.',
+      youtube_url: 'https://www.youtube.com/watch?v=ScMzIvxBSi4',
+      youtube_video_id: 'ScMzIvxBSi4',
+      cover_image_url: 'https://images.unsplash.com/photo-1577495508048-b635879837f1?auto=format&fit=crop&w=1200&q=80',
+      alt_text: 'Recent Batch Testimonial Video Cover',
+      is_published: true,
+      display_order: 2
+    },
+    {
+      id: '55555555-5555-5555-5555-555555555503',
+      media_type: 'photo',
+      title: 'Classroom Interaction & Speaking Practice',
+      caption: 'Interactive spoken English session at our Davangere learning center.',
+      youtube_url: null,
+      youtube_video_id: null,
+      cover_image_url: 'https://images.unsplash.com/photo-1523240795612-9a054b0db644?auto=format&fit=crop&w=1200&q=80',
+      alt_text: "Classroom conversation practice at Uptrend's English Academy",
+      is_published: true,
+      display_order: 3
+    }
+  ],
+  faqs: [
+    {
+      id: '33333333-3333-3333-3333-333333333301',
+      question: "Where is Uptrend's English Academy located in Davangere?",
+      answer: "We are located at #259/1A1, Devi Building, 2nd Floor, Ram And Co Circle, opposite Ganesha Temple, above Sangeetha Mobiles, Prince Jayachamaraja Wodeyar, Davangere, Karnataka 577002, India.",
+      is_published: true,
+      display_order: 1
+    },
+    {
+      id: '33333333-3333-3333-3333-333333333302',
+      question: 'What are the regular business hours?',
+      answer: 'Our regular business hours are Monday to Saturday, 8:00 AM to 8:30 PM. We are closed on Sundays.',
+      is_published: true,
+      display_order: 2
+    },
+    {
+      id: '33333333-3333-3333-3333-333333333303',
+      question: 'How do I apply for an English program?',
+      answer: 'You can submit an online application via our Apply Now page with your contact details, qualification, selected program, and a passport-size photograph (under 300 KB). Our staff will review your application and notify you.',
+      is_published: true,
+      display_order: 3
+    },
+    {
+      id: '33333333-3333-3333-3333-333333333304',
+      question: 'Who can join the Spoken English course?',
+      answer: 'Our courses are designed for students, job seekers preparing for interviews, working professionals, and homemakers who wish to build spoken English confidence and fluency.',
+      is_published: true,
+      display_order: 4
+    },
+    {
+      id: '33333333-3333-3333-3333-333333333305',
+      question: 'Can I request a callback before applying?',
+      answer: 'Yes! Simply click "Request a Call" on any program card or the navigation bar to select your preferred contact time (Morning, Afternoon, or Evening) and our team will get in touch.',
+      is_published: true,
+      display_order: 5
+    }
+  ],
+  branding: {
+    academy_name: "Uptrend's English Academy",
+    tagline: 'Professional Spoken English & Communication Skills',
+    primary_orange: '#ea580c',
+    primary_green: '#16a34a',
+    official_pdf_url: '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf'
+  }
+};
+
+// -------------------------------------------------------------
+// HELPER: R2 UPLOAD
+// -------------------------------------------------------------
+async function uploadToR2(buffer: Buffer, key: string, contentType: string): Promise<string> {
+  if (!r2Client) {
+    // If R2 credentials not configured, store locally in /public/uploads
+    const uploadsDir = path.resolve(__dirname, 'public/uploads');
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+    const safeFilename = path.basename(key);
+    fs.writeFileSync(path.join(uploadsDir, safeFilename), buffer);
+    return `/uploads/${safeFilename}`;
+  }
+
+  await r2Client.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    })
+  );
+
+  return R2_PUBLIC_URL ? `${R2_PUBLIC_URL}/${key}` : key;
+}
+
+// -------------------------------------------------------------
+// HELPER: RESEND TRANSACTIONAL EMAIL SENDER
+// -------------------------------------------------------------
+async function sendEmailViaResend({
+  to,
+  subject,
+  html,
+  text,
+  attachments,
+}: {
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+  attachments?: Array<{ filename: string; content?: Buffer; path?: string }>;
+}) {
+  if (!resend) {
+    console.warn(`[Resend Disabled] Email would have been sent to ${to}: ${subject}`);
+    return {
+      success: false,
+      error: 'RESEND_API_KEY is not configured in environment variables. Email logged locally.',
+      provider_message_id: null,
+    };
+  }
+
+  try {
+    const payload: any = {
+      from: RESEND_FROM_EMAIL,
+      to,
+      subject,
+      html,
+      text: text || html.replace(/<[^>]*>/g, ''),
+    };
+
+    if (attachments && attachments.length > 0) {
+      payload.attachments = attachments;
+    }
+
+    const { data, error } = await resend.emails.send(payload);
+
+    if (error) {
+      console.error('[Resend Error]', error);
+      return { success: false, error: error.message, provider_message_id: null };
+    }
+
+    return { success: true, provider_message_id: data?.id || null };
+  } catch (err: any) {
+    console.error('[Resend Exception]', err);
+    return { success: false, error: err.message || 'Unknown Resend error', provider_message_id: null };
+  }
+}
+
+// -------------------------------------------------------------
+// API ENDPOINTS
+// -------------------------------------------------------------
+
+// System Diagnostics & Configuration Status
+app.get('/api/system-status', (req, res) => {
+  const hasSupabase = !!(SUPABASE_URL && SUPABASE_SERVICE_KEY);
+  const hasResend = !!RESEND_API_KEY;
+  const hasR2 = !!(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY);
+  
+  // Check if official PDF exists
+  const localPdfPath = path.resolve(__dirname, 'public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf');
+  const hasLocalPdf = fs.existsSync(localPdfPath);
+  const hasConfiguredPdf = !!APPROVED_FEE_STRUCTURE_PDF_URL || hasLocalPdf;
+
+  res.json({
+    supabase: {
+      configured: hasSupabase,
+      url: SUPABASE_URL ? `${SUPABASE_URL.substring(0, 15)}...` : 'Not set',
+    },
+    resend: {
+      configured: hasResend,
+      from_email: RESEND_FROM_EMAIL,
+      staff_email: APPLICATION_NOTIFICATION_EMAIL,
+    },
+    r2_storage: {
+      configured: hasR2,
+      bucket: R2_BUCKET,
+    },
+    official_pdf: {
+      configured: hasConfiguredPdf,
+      url: APPROVED_FEE_STRUCTURE_PDF_URL || '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf',
+      exists_on_disk: hasLocalPdf,
+    },
+    server_time: new Date().toISOString(),
+  });
+});
+
+// GET Public Data Endpoints
+app.get('/api/programs', async (req, res) => {
+  try {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('programs')
+        .select('*')
+        .order('display_order', { ascending: true });
+      if (!error && data) return res.json(data);
+    }
+    res.json(memoryStore.programs);
+  } catch {
+    res.json(memoryStore.programs);
+  }
+});
+
+app.get('/api/announcements', async (req, res) => {
+  try {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('announcements')
+        .select('*')
+        .eq('is_active', true)
+        .order('display_order', { ascending: true });
+      if (!error && data) return res.json(data);
+    }
+    res.json(memoryStore.announcements.filter(a => a.is_active));
+  } catch {
+    res.json(memoryStore.announcements.filter(a => a.is_active));
+  }
+});
+
+app.get('/api/reviews', async (req, res) => {
+  try {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('reviews')
+        .select('*')
+        .eq('is_published', true)
+        .order('created_at', { ascending: false });
+      if (!error && data) return res.json(data);
+    }
+    res.json(memoryStore.reviews.filter(r => r.is_published));
+  } catch {
+    res.json(memoryStore.reviews.filter(r => r.is_published));
+  }
+});
+
+app.get('/api/media', async (req, res) => {
+  try {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('media_items')
+        .select('*')
+        .eq('is_published', true)
+        .order('display_order', { ascending: true });
+      if (!error && data) return res.json(data);
+    }
+    res.json(memoryStore.media.filter(m => m.is_published));
+  } catch {
+    res.json(memoryStore.media.filter(m => m.is_published));
+  }
+});
+
+app.get('/api/faqs', async (req, res) => {
+  try {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('faqs')
+        .select('*')
+        .eq('is_published', true)
+        .order('display_order', { ascending: true });
+      if (!error && data) return res.json(data);
+    }
+    res.json(memoryStore.faqs.filter(f => f.is_published));
+  } catch {
+    res.json(memoryStore.faqs.filter(f => f.is_published));
+  }
+});
+
+// POST Student Application
+app.post('/api/apply', async (req, res) => {
+  try {
+    const {
+      student_name,
+      mobile,
+      email,
+      qualification,
+      program_id,
+      program_name,
+      date_of_birth,
+      address,
+      message,
+      photo_base64,
+      photo_mime_type,
+      privacy_consent,
+    } = req.body;
+
+    // Strict validation
+    if (!student_name || !mobile || !email || !qualification || !program_name) {
+      return res.status(400).json({ error: 'Missing mandatory fields.' });
+    }
+
+    if (!privacy_consent) {
+      return res.status(400).json({ error: 'Privacy consent is required to process your application.' });
+    }
+
+    // Process photograph
+    let photo_object_key = '';
+    let photo_data_url = '';
+
+    if (photo_base64) {
+      const cleanBase64 = photo_base64.replace(/^data:image\/\w+;base64,/, '');
+      const buffer = Buffer.from(cleanBase64, 'base64');
+      
+      // Strict 300 KB limit validation
+      if (buffer.length > 300 * 1024) {
+        return res.status(400).json({
+          error: `Passport photograph exceeds 300 KB limit (${(buffer.length / 1024).toFixed(1)} KB). Please compress or choose a smaller image.`,
+        });
+      }
+
+      const mime = photo_mime_type || 'image/jpeg';
+      const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
+      const filename = `applications/${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
+
+      try {
+        photo_object_key = await uploadToR2(buffer, filename, mime);
+        photo_data_url = photo_base64; // preserve for secure admin preview
+      } catch (uploadErr: any) {
+        console.error('[Upload to R2 Error]', uploadErr);
+        // Continue with local data url representation
+        photo_object_key = `local_${Date.now()}.${ext}`;
+        photo_data_url = photo_base64;
+      }
+    }
+
+    // Generate unique reference e.g., UEA-2026-8942
+    const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
+    const application_reference = `UEA-2026-${randomCode}`;
+    const newId = `app_${Date.now()}_${randomCode}`;
+
+    const newApplication = {
+      id: newId,
+      application_reference,
+      student_name,
+      mobile,
+      email,
+      qualification,
+      program_id: program_id || null,
+      program_name,
+      date_of_birth: date_of_birth || null,
+      address: address || null,
+      photo_object_key,
+      photo_data_url,
+      message: message || null,
+      status: 'Pending',
+      privacy_consent: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    // Save to Supabase or memory store
+    if (supabase) {
+      const { data, error } = await supabase.from('applications').insert([newApplication]).select().single();
+      if (error) {
+        console.error('[Supabase Insert Application Error]', error);
+        return res.status(500).json({ error: 'Failed to record application in database. Please retry.' });
+      }
+    } else {
+      memoryStore.applications.unshift(newApplication);
+    }
+
+    // Prepare Confirmation Email to Student
+    const studentEmailHtml = `
+      <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
+        <div style="text-align: center; margin-bottom: 24px;">
+          <h2 style="color: #ea580c; margin: 0; font-size: 24px;">Uptrend's English Academy</h2>
+          <p style="color: #16a34a; font-weight: 600; margin: 4px 0 0 0;">Davangere, Karnataka</p>
+        </div>
+        <p>Dear <strong>${student_name}</strong>,</p>
+        <p>Thank you for applying to <strong>Uptrend's English Academy</strong>.</p>
+        <p>Your application for <strong>${program_name}</strong> has been submitted successfully. It is currently <strong>waiting for approval</strong> from our staff or teacher.</p>
+        <p>We will notify you by email when your application status changes.</p>
+        <div style="background-color: #f8fafc; border-left: 4px solid #ea580c; padding: 12px 16px; margin: 20px 0;">
+          <p style="margin: 0; font-size: 14px; color: #64748b;">Application Reference:</p>
+          <p style="margin: 4px 0 0 0; font-size: 18px; font-weight: 700; color: #0f172a;">${application_reference}</p>
+        </div>
+        <p>Thank you for your interest in Uptrend's English Academy.</p>
+        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+        <p style="margin: 0; font-size: 13px; color: #64748b;">
+          Regards,<br>
+          <strong>Uptrend's English Academy</strong><br>
+          #259/1A1, Devi Building, 2nd Floor, Ram And Co Circle, Davangere, Karnataka 577002<br>
+          Phone: +91 900 8000 211 | Email: uptrendsinstitute@gmail.com
+        </p>
+      </div>
+    `;
+
+    // Prepare Staff Notification Email
+    const submissionDate = new Date().toLocaleDateString('en-IN', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+
+    const staffEmailHtml = `
+      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
+        <h3 style="color: #0f172a; margin-top: 0;">New Student Application Received</h3>
+        <p>A new student application has been submitted:</p>
+        <ul>
+          <li><strong>Student Name:</strong> ${student_name}</li>
+          <li><strong>Program:</strong> ${program_name}</li>
+          <li><strong>Mobile:</strong> ${mobile}</li>
+          <li><strong>Email:</strong> ${email}</li>
+          <li><strong>Qualification:</strong> ${qualification}</li>
+          <li><strong>Application Reference:</strong> ${application_reference}</li>
+          <li><strong>Submission Date:</strong> ${submissionDate}</li>
+          <li><strong>Status:</strong> Pending</li>
+        </ul>
+        <p>Please review and approve this application in the secure admin portal.</p>
+        <p style="font-size: 12px; color: #94a3b8;">Confidential academy notification.</p>
+      </div>
+    `;
+
+    // Send emails via Resend
+    let studentEmailResult = await sendEmailViaResend({
+      to: email,
+      subject: "Application Received — Uptrend's English Academy",
+      html: studentEmailHtml,
+    });
+
+    let staffEmailResult = await sendEmailViaResend({
+      to: APPLICATION_NOTIFICATION_EMAIL,
+      subject: `New Student Application — ${student_name}`,
+      html: staffEmailHtml,
+    });
+
+    // Record notification log
+    const notificationRecord = {
+      id: `notif_${Date.now()}`,
+      application_id: newId,
+      notification_type: 'student_confirmation',
+      recipient_email: email,
+      status: studentEmailResult.success ? 'Sent' : 'Failed',
+      attempt_count: 1,
+      provider_message_id: studentEmailResult.provider_message_id,
+      error_message: studentEmailResult.error || null,
+      created_at: new Date().toISOString(),
+    };
+
+    if (supabase) {
+      await supabase.from('application_notifications').insert([notificationRecord]);
+    } else {
+      memoryStore.notifications.unshift(notificationRecord);
+    }
+
+    return res.json({
+      success: true,
+      application_reference,
+      status: 'Pending',
+      email_status: studentEmailResult.success ? 'Sent' : 'Recorded (Resend API key required for live delivery)',
+      message: 'Your application has been submitted successfully and is waiting for approval from academy staff.',
+    });
+  } catch (error: any) {
+    console.error('[Application Submission Exception]', error);
+    res.status(500).json({ error: error.message || 'Internal server error while processing application.' });
+  }
+});
+
+// POST Approve Application (Authorized staff/admin only)
+app.post('/api/approve-application', async (req, res) => {
+  try {
+    const { application_id, approved_by_name } = req.body;
+
+    if (!application_id) {
+      return res.status(400).json({ error: 'Application ID is required.' });
+    }
+
+    // Verify official PDF is available
+    const localPdfPath = path.resolve(__dirname, 'public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf');
+    let pdfBuffer: Buffer | null = null;
+
+    if (fs.existsSync(localPdfPath)) {
+      pdfBuffer = fs.readFileSync(localPdfPath);
+    }
+
+    if (!pdfBuffer && !APPROVED_FEE_STRUCTURE_PDF_URL) {
+      return res.status(400).json({
+        error: 'Official Fee Structure PDF is not configured. Please configure APPROVED_FEE_STRUCTURE_PDF_URL or ensure Uptrends_Fee_Structure_and_Terms.pdf exists before approving.',
+      });
+    }
+
+    // Find application
+    let targetApp: any = null;
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('applications')
+        .select('*')
+        .eq('id', application_id)
+        .single();
+      if (error || !data) {
+        return res.status(404).json({ error: 'Application record not found in database.' });
+      }
+      targetApp = data;
+    } else {
+      targetApp = memoryStore.applications.find(a => a.id === application_id);
+      if (!targetApp) {
+        return res.status(404).json({ error: 'Application record not found in memory store.' });
+      }
+    }
+
+    const approvedAt = new Date().toISOString();
+    const approver = approved_by_name || 'Authorized Staff';
+
+    // Update status to 'Accepted'
+    if (supabase) {
+      const { error: updateErr } = await supabase
+        .from('applications')
+        .update({
+          status: 'Accepted',
+          approved_by_name: approver,
+          approved_at: approvedAt,
+        })
+        .eq('id', application_id);
+      if (updateErr) {
+        return res.status(500).json({ error: 'Failed to update application status in database.' });
+      }
+    } else {
+      targetApp.status = 'Accepted';
+      targetApp.approved_by_name = approver;
+      targetApp.approved_at = approvedAt;
+    }
+
+    // Send Approval Email to Student with PDF attached
+    const approvalHtml = `
+      <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
+        <div style="text-align: center; margin-bottom: 24px;">
+          <h2 style="color: #16a34a; margin: 0; font-size: 24px;">Congratulations!</h2>
+          <h3 style="color: #ea580c; margin: 6px 0 0 0;">Uptrend's English Academy</h3>
+        </div>
+        <p>Dear <strong>${targetApp.student_name}</strong>,</p>
+        <p>Congratulations!</p>
+        <p>Your application to <strong>Uptrend's English Academy</strong> for <strong>${targetApp.program_name}</strong> has been approved.</p>
+        <p>Please find the attached PDF containing the academy's fee structure and terms and conditions.</p>
+        <p>Read the document carefully and contact the academy if you need clarification.</p>
+        <div style="background-color: #f0fdf4; border-left: 4px solid #16a34a; padding: 12px 16px; margin: 20px 0;">
+          <p style="margin: 0; font-size: 14px; color: #166534;">Application Reference:</p>
+          <p style="margin: 4px 0 0 0; font-size: 18px; font-weight: 700; color: #14532d;">${targetApp.application_reference}</p>
+        </div>
+        <p>We look forward to welcoming you to Uptrend's English Academy.</p>
+        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+        <p style="margin: 0; font-size: 13px; color: #64748b;">
+          Regards,<br>
+          <strong>Uptrend's English Academy</strong><br>
+          #259/1A1, Devi Building, 2nd Floor, Ram And Co Circle, Davangere, Karnataka 577002<br>
+          Phone: +91 900 8000 211 | Email: uptrendsinstitute@gmail.com
+        </p>
+      </div>
+    `;
+
+    const attachments: any[] = [];
+    if (pdfBuffer) {
+      attachments.push({
+        filename: 'Uptrends_Fee_Structure_and_Terms.pdf',
+        content: pdfBuffer,
+      });
+    }
+
+    const emailResult = await sendEmailViaResend({
+      to: targetApp.email,
+      subject: "Congratulations! Your Application Has Been Approved — Uptrend's English Academy",
+      html: approvalHtml,
+      attachments,
+    });
+
+    // Record notification
+    const approvalNotif = {
+      id: `notif_${Date.now()}`,
+      application_id,
+      notification_type: 'student_approval',
+      recipient_email: targetApp.email,
+      status: emailResult.success ? 'Sent' : 'Failed',
+      attempt_count: 1,
+      provider_message_id: emailResult.provider_message_id,
+      error_message: emailResult.error || null,
+      pdf_attached: true,
+      created_at: new Date().toISOString(),
+    };
+
+    if (supabase) {
+      await supabase.from('application_notifications').insert([approvalNotif]);
+    } else {
+      memoryStore.notifications.unshift(approvalNotif);
+    }
+
+    res.json({
+      success: true,
+      message: 'Application approved successfully.',
+      email_status: emailResult.success ? 'Sent with official PDF attachment' : 'Recorded (Email delivery requires verified Resend sender domain)',
+      pdf_attached: true,
+    });
+  } catch (error: any) {
+    console.error('[Approve Application Exception]', error);
+    res.status(500).json({ error: error.message || 'Error approving application.' });
+  }
+});
+
+// POST Retry Failed Notification
+app.post('/api/retry-notification', async (req, res) => {
+  try {
+    const { notification_id } = req.body;
+    let notif: any = null;
+
+    if (supabase) {
+      const { data } = await supabase
+        .from('application_notifications')
+        .select('*, applications(*)')
+        .eq('id', notification_id)
+        .single();
+      notif = data;
+    } else {
+      notif = memoryStore.notifications.find(n => n.id === notification_id);
+    }
+
+    if (!notif) {
+      return res.status(404).json({ error: 'Notification record not found.' });
+    }
+
+    const localPdfPath = path.resolve(__dirname, 'public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf');
+    const pdfBuffer = fs.existsSync(localPdfPath) ? fs.readFileSync(localPdfPath) : undefined;
+    const attachments = (notif.notification_type === 'student_approval' && pdfBuffer)
+      ? [{ filename: 'Uptrends_Fee_Structure_and_Terms.pdf', content: pdfBuffer }]
+      : undefined;
+
+    const emailResult = await sendEmailViaResend({
+      to: notif.recipient_email,
+      subject: notif.notification_type === 'student_approval'
+        ? "Congratulations! Your Application Has Been Approved — Uptrend's English Academy"
+        : "Application Received — Uptrend's English Academy",
+      html: `<p>Notification retry for application ${notif.application_id}</p>`,
+      attachments,
+    });
+
+    if (supabase) {
+      await supabase
+        .from('application_notifications')
+        .update({
+          status: emailResult.success ? 'Sent' : 'Failed',
+          attempt_count: (notif.attempt_count || 1) + 1,
+          provider_message_id: emailResult.provider_message_id,
+          error_message: emailResult.error || null,
+          sent_at: emailResult.success ? new Date().toISOString() : null,
+        })
+        .eq('id', notification_id);
+    } else {
+      notif.status = emailResult.success ? 'Sent' : 'Failed';
+      notif.attempt_count = (notif.attempt_count || 1) + 1;
+      notif.error_message = emailResult.error || null;
+      notif.provider_message_id = emailResult.provider_message_id;
+    }
+
+    res.json({
+      success: emailResult.success,
+      status: emailResult.success ? 'Sent' : 'Failed',
+      message: emailResult.success ? 'Notification sent successfully on retry.' : emailResult.error,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST Callback Request
+app.post('/api/callback-request', async (req, res) => {
+  try {
+    const { full_name, mobile, email, program_name, preferred_contact_time, message, consent } = req.body;
+
+    if (!full_name || !mobile || !preferred_contact_time) {
+      return res.status(400).json({ error: 'Full name, mobile number, and preferred contact time are required.' });
+    }
+
+    const newRecord = {
+      id: `cb_${Date.now()}`,
+      full_name,
+      mobile,
+      email: email || null,
+      program_name: program_name || 'General Inquiry',
+      preferred_contact_time,
+      message: message || null,
+      consent: consent !== false,
+      status: 'New',
+      created_at: new Date().toISOString(),
+    };
+
+    if (supabase) {
+      await supabase.from('callback_requests').insert([newRecord]);
+    } else {
+      memoryStore.callbacks.unshift(newRecord);
+    }
+
+    // Notify staff
+    await sendEmailViaResend({
+      to: APPLICATION_NOTIFICATION_EMAIL,
+      subject: `New Callback Request — ${full_name} (${preferred_contact_time})`,
+      html: `<p>New callback request received:</p><p><strong>Name:</strong> ${full_name}<br><strong>Mobile:</strong> ${mobile}<br><strong>Program:</strong> ${program_name}<br><strong>Preferred Time:</strong> ${preferred_contact_time}<br><strong>Message:</strong> ${message || 'None'}</p>`,
+    });
+
+    res.json({
+      success: true,
+      message: 'Your callback request has been received. Our team will contact you during your preferred time.',
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST Contact Enquiry
+app.post('/api/contact', async (req, res) => {
+  try {
+    const { full_name, email, mobile, subject, message, consent } = req.body;
+
+    if (!full_name || !email || !subject || !message) {
+      return res.status(400).json({ error: 'Full name, email, subject, and message are required.' });
+    }
+
+    const newRecord = {
+      id: `cnt_${Date.now()}`,
+      full_name,
+      email,
+      mobile: mobile || null,
+      subject,
+      message,
+      consent: consent !== false,
+      status: 'New',
+      created_at: new Date().toISOString(),
+    };
+
+    if (supabase) {
+      await supabase.from('contact_enquiries').insert([newRecord]);
+    } else {
+      memoryStore.contacts.unshift(newRecord);
+    }
+
+    // Notify staff
+    await sendEmailViaResend({
+      to: APPLICATION_NOTIFICATION_EMAIL,
+      subject: `New Contact Enquiry: ${subject} — ${full_name}`,
+      html: `<p>New contact message received:</p><p><strong>From:</strong> ${full_name} (${email}, ${mobile || 'No phone'})</p><p><strong>Subject:</strong> ${subject}</p><p><strong>Message:</strong><br>${message}</p>`,
+    });
+
+    res.json({
+      success: true,
+      message: 'Thank you for reaching out. We have received your message and will respond shortly.',
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET Admin Data Endpoints
+app.get('/api/admin/applications', async (req, res) => {
+  if (supabase) {
+    const { data } = await supabase.from('applications').select('*').order('created_at', { ascending: false });
+    return res.json(data || []);
+  }
+  res.json(memoryStore.applications);
+});
+
+app.get('/api/admin/notifications', async (req, res) => {
+  if (supabase) {
+    const { data } = await supabase.from('application_notifications').select('*').order('created_at', { ascending: false });
+    return res.json(data || []);
+  }
+  res.json(memoryStore.notifications);
+});
+
+app.get('/api/admin/callbacks', async (req, res) => {
+  if (supabase) {
+    const { data } = await supabase.from('callback_requests').select('*').order('created_at', { ascending: false });
+    return res.json(data || []);
+  }
+  res.json(memoryStore.callbacks);
+});
+
+app.get('/api/admin/contacts', async (req, res) => {
+  if (supabase) {
+    const { data } = await supabase.from('contact_enquiries').select('*').order('created_at', { ascending: false });
+    return res.json(data || []);
+  }
+  res.json(memoryStore.contacts);
+});
+
+// Admin CRUD Endpoints for Programs, Announcements, FAQs, Reviews, Media
+app.post('/api/admin/programs', async (req, res) => {
+  const { title, slug, short_description, description, duration, level, target_audience, age_range, is_published, image_url } = req.body;
+  const newProg = {
+    id: `prog_${Date.now()}`,
+    title,
+    slug: slug || title.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+    short_description,
+    description,
+    duration,
+    level,
+    target_audience,
+    age_range: age_range || null,
+    image_url: image_url || 'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80',
+    is_published: !!is_published,
+    display_order: memoryStore.programs.length + 1,
+    created_at: new Date().toISOString(),
+  };
+
+  if (supabase) {
+    const { data, error } = await supabase.from('programs').insert([newProg]).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
+  }
+  memoryStore.programs.push(newProg);
+  res.json(newProg);
+});
+
+app.put('/api/admin/programs/:id', async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+  if (supabase) {
+    const { data, error } = await supabase.from('programs').update(updates).eq('id', id).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
+  }
+  const idx = memoryStore.programs.findIndex(p => p.id === id);
+  if (idx !== -1) {
+    memoryStore.programs[idx] = { ...memoryStore.programs[idx], ...updates };
+    return res.json(memoryStore.programs[idx]);
+  }
+  res.status(404).json({ error: 'Program not found' });
+});
+
+app.delete('/api/admin/programs/:id', async (req, res) => {
+  const { id } = req.params;
+  if (supabase) {
+    await supabase.from('programs').delete().eq('id', id);
+  } else {
+    memoryStore.programs = memoryStore.programs.filter(p => p.id !== id);
+  }
+  res.json({ success: true });
+});
+
+// Announcement Admin CRUD
+app.post('/api/admin/announcements', async (req, res) => {
+  const { content, is_active } = req.body;
+  const item = {
+    id: `ann_${Date.now()}`,
+    content,
+    is_active: is_active !== false,
+    display_order: memoryStore.announcements.length + 1,
+    created_at: new Date().toISOString(),
+  };
+  if (supabase) {
+    const { data } = await supabase.from('announcements').insert([item]).select().single();
+    return res.json(data || item);
+  }
+  memoryStore.announcements.push(item);
+  res.json(item);
+});
+
+app.put('/api/admin/announcements/:id', async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+  if (supabase) {
+    const { data } = await supabase.from('announcements').update(updates).eq('id', id).select().single();
+    return res.json(data);
+  }
+  const idx = memoryStore.announcements.findIndex(a => a.id === id);
+  if (idx !== -1) {
+    memoryStore.announcements[idx] = { ...memoryStore.announcements[idx], ...updates };
+    return res.json(memoryStore.announcements[idx]);
+  }
+  res.status(404).json({ error: 'Announcement not found' });
+});
+
+app.delete('/api/admin/announcements/:id', async (req, res) => {
+  const { id } = req.params;
+  if (supabase) {
+    await supabase.from('announcements').delete().eq('id', id);
+  } else {
+    memoryStore.announcements = memoryStore.announcements.filter(a => a.id !== id);
+  }
+  res.json({ success: true });
+});
+
+// -------------------------------------------------------------
+// VITE MIDDLEWARE IN DEV OR STATIC FILES IN PROD
+// -------------------------------------------------------------
+async function startServer() {
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  if (!isProduction) {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.resolve(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();

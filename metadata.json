@@ -1,0 +1,6 @@
+{
+  "name": "Uptrend's English Academy",
+  "description": "Official website and management portal for Uptrend's English Academy in Davangere, Karnataka. English communication and spoken English training center.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
