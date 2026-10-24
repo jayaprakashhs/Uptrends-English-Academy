@@ -6,6 +6,8 @@ export interface AdminProfile {
   full_name: string;
   role: AdminRole;
   is_active: boolean;
+  accessToken?: string;
+  last_login?: string | null;
 }
 
 export interface Program {
@@ -143,11 +145,18 @@ export interface FAQ {
 }
 
 export interface SiteBranding {
+  id?: string;
   academy_name: string;
-  tagline: string;
+  tagline?: string;
   logo_url?: string;
-  logo_alt: string;
-  primary_orange: string;
-  primary_green: string;
-  official_pdf_url: string;
+  main_logo_alt?: string;
+  logo_alt?: string;
+  favicon_url?: string;
+  footer_logo_url?: string;
+  primary_orange?: string;
+  primary_green?: string;
+  primary_color?: string;
+  secondary_color?: string;
+  official_pdf_url?: string;
+  updated_at?: string;
 }

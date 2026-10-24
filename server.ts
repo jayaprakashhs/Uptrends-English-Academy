@@ -2,10 +2,11 @@ import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import { Resend } from 'resend';
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 dotenv.config();
 
@@ -29,8 +30,13 @@ const APPLICATION_NOTIFICATION_EMAIL = process.env.APPLICATION_NOTIFICATION_EMAI
 const APPROVED_FEE_STRUCTURE_PDF_URL = process.env.APPROVED_FEE_STRUCTURE_PDF_URL || '';
 
 // Initialize Supabase if keys exist
-const supabase = (SUPABASE_URL && SUPABASE_SERVICE_KEY)
-  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+export const supabase = (SUPABASE_URL && SUPABASE_SERVICE_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    })
   : null;
 
 // Initialize Resend if key exists
@@ -55,6 +61,74 @@ const r2Client = (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY)
   : null;
 
 // -------------------------------------------------------------
+// SERVER-SIDE AUTHENTICATION & ROLE-BASED ACCESS CONTROL
+// -------------------------------------------------------------
+async function requireAdminAuth(
+  req: express.Request,
+  res: express.Response,
+  minRole: 'staff' | 'admin' | 'super_admin' = 'staff'
+): Promise<any | null> {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
+
+  // Standalone / preview mode when Supabase credentials are not yet supplied in .env
+  if (!supabase) {
+    return {
+      id: '59bbb687-4e0d-47f7-b458-5a91955f915d',
+      email: 'uptrendsinstitute@gmail.com',
+      full_name: 'Academy Super Admin',
+      role: 'super_admin',
+      is_active: true,
+    };
+  }
+
+  if (!token) {
+    res.status(401).json({ error: 'Unauthorized: Session Bearer token required.' });
+    return null;
+  }
+
+  try {
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    if (authError || !user) {
+      res.status(401).json({ error: 'Unauthorized: Invalid or expired authentication session.' });
+      return null;
+    }
+
+    const { data: profile, error: profError } = await supabase
+      .from('admin_profiles')
+      .select('*')
+      .eq('id', user.id)
+      .single();
+
+    if (profError || !profile) {
+      res.status(403).json({ error: 'Forbidden: No authorized admin profile linked to this user.' });
+      return null;
+    }
+
+    if (!profile.is_active) {
+      res.status(403).json({ error: 'Forbidden: This admin account has been deactivated.' });
+      return null;
+    }
+
+    const roleRank: Record<string, number> = { staff: 1, admin: 2, super_admin: 3 };
+    const userRank = roleRank[profile.role] || 0;
+    const requiredRank = roleRank[minRole] || 1;
+
+    if (userRank < requiredRank) {
+      res.status(403).json({
+        error: `Forbidden: This operation requires '${minRole}' role privileges. Your current role is '${profile.role}'.`,
+      });
+      return null;
+    }
+
+    return profile;
+  } catch (err: any) {
+    res.status(500).json({ error: 'Authentication verification error: ' + err.message });
+    return null;
+  }
+}
+
+// -------------------------------------------------------------
 // IN-MEMORY FALLBACK STORE (Active only when external Supabase is unconfigured)
 // -------------------------------------------------------------
 interface MemoryStore {
@@ -68,6 +142,7 @@ interface MemoryStore {
   media: any[];
   faqs: any[];
   branding: any;
+  admin_profiles: any[];
 }
 
 const memoryStore: MemoryStore = {
@@ -75,6 +150,16 @@ const memoryStore: MemoryStore = {
   notifications: [],
   callbacks: [],
   contacts: [],
+  admin_profiles: [
+    {
+      id: '59bbb687-4e0d-47f7-b458-5a91955f915d',
+      email: 'uptrendsinstitute@gmail.com',
+      full_name: 'Academy Super Admin',
+      role: 'super_admin',
+      is_active: true,
+      created_at: new Date().toISOString(),
+    },
+  ],
   programs: [
     {
       id: '11111111-1111-1111-1111-111111111101',
@@ -262,8 +347,14 @@ const memoryStore: MemoryStore = {
     }
   ],
   branding: {
+    id: '66666666-6666-6666-6666-666666666601',
     academy_name: "Uptrend's English Academy",
     tagline: 'Professional Spoken English & Communication Skills',
+    logo_url: null,
+    main_logo_alt: "Uptrend's English Academy Davangere Logo",
+    logo_alt: "Uptrend's English Academy Davangere Logo",
+    favicon_url: '/favicon.ico',
+    footer_logo_url: null,
     primary_orange: '#ea580c',
     primary_green: '#16a34a',
     official_pdf_url: '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf'
@@ -275,7 +366,6 @@ const memoryStore: MemoryStore = {
 // -------------------------------------------------------------
 async function uploadToR2(buffer: Buffer, key: string, contentType: string): Promise<string> {
   if (!r2Client) {
-    // If R2 credentials not configured, store locally in /public/uploads
     const uploadsDir = path.resolve(__dirname, 'public/uploads');
     if (!fs.existsSync(uploadsDir)) {
       fs.mkdirSync(uploadsDir, { recursive: true });
@@ -359,7 +449,6 @@ app.get('/api/system-status', (req, res) => {
   const hasResend = !!RESEND_API_KEY;
   const hasR2 = !!(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY);
   
-  // Check if official PDF exists
   const localPdfPath = path.resolve(__dirname, 'public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf');
   const hasLocalPdf = fs.existsSync(localPdfPath);
   const hasConfiguredPdf = !!APPROVED_FEE_STRUCTURE_PDF_URL || hasLocalPdf;
@@ -467,7 +556,19 @@ app.get('/api/faqs', async (req, res) => {
   }
 });
 
-// POST Student Application
+app.get('/api/branding', async (req, res) => {
+  try {
+    if (supabase) {
+      const { data, error } = await supabase.from('site_branding').select('*').limit(1).maybeSingle();
+      if (!error && data) return res.json(data);
+    }
+    res.json(memoryStore.branding);
+  } catch {
+    res.json(memoryStore.branding);
+  }
+});
+
+// POST Student Application (Public - valid UUID generated)
 app.post('/api/apply', async (req, res) => {
   try {
     const {
@@ -485,7 +586,6 @@ app.post('/api/apply', async (req, res) => {
       privacy_consent,
     } = req.body;
 
-    // Strict validation
     if (!student_name || !mobile || !email || !qualification || !program_name) {
       return res.status(400).json({ error: 'Missing mandatory fields.' });
     }
@@ -502,7 +602,6 @@ app.post('/api/apply', async (req, res) => {
       const cleanBase64 = photo_base64.replace(/^data:image\/\w+;base64,/, '');
       const buffer = Buffer.from(cleanBase64, 'base64');
       
-      // Strict 300 KB limit validation
       if (buffer.length > 300 * 1024) {
         return res.status(400).json({
           error: `Passport photograph exceeds 300 KB limit (${(buffer.length / 1024).toFixed(1)} KB). Please compress or choose a smaller image.`,
@@ -515,19 +614,18 @@ app.post('/api/apply', async (req, res) => {
 
       try {
         photo_object_key = await uploadToR2(buffer, filename, mime);
-        photo_data_url = photo_base64; // preserve for secure admin preview
+        photo_data_url = photo_base64;
       } catch (uploadErr: any) {
         console.error('[Upload to R2 Error]', uploadErr);
-        // Continue with local data url representation
         photo_object_key = `local_${Date.now()}.${ext}`;
         photo_data_url = photo_base64;
       }
     }
 
-    // Generate unique reference e.g., UEA-2026-8942
+    // Generate valid UUID and human-readable reference e.g., UEA-2026-8942
     const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
     const application_reference = `UEA-2026-${randomCode}`;
-    const newId = `app_${Date.now()}_${randomCode}`;
+    const newId = crypto.randomUUID();
 
     const newApplication = {
       id: newId,
@@ -549,9 +647,8 @@ app.post('/api/apply', async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
-    // Save to Supabase or memory store
     if (supabase) {
-      const { data, error } = await supabase.from('applications').insert([newApplication]).select().single();
+      const { error } = await supabase.from('applications').insert([newApplication]);
       if (error) {
         console.error('[Supabase Insert Application Error]', error);
         return res.status(500).json({ error: 'Failed to record application in database. Please retry.' });
@@ -586,7 +683,6 @@ app.post('/api/apply', async (req, res) => {
       </div>
     `;
 
-    // Prepare Staff Notification Email
     const submissionDate = new Date().toLocaleDateString('en-IN', {
       year: 'numeric',
       month: 'short',
@@ -614,22 +710,21 @@ app.post('/api/apply', async (req, res) => {
       </div>
     `;
 
-    // Send emails via Resend
     let studentEmailResult = await sendEmailViaResend({
       to: email,
       subject: "Application Received — Uptrend's English Academy",
       html: studentEmailHtml,
     });
 
-    let staffEmailResult = await sendEmailViaResend({
+    await sendEmailViaResend({
       to: APPLICATION_NOTIFICATION_EMAIL,
       subject: `New Student Application — ${student_name}`,
       html: staffEmailHtml,
     });
 
-    // Record notification log
+    // Record notification log with UUID
     const notificationRecord = {
-      id: `notif_${Date.now()}`,
+      id: crypto.randomUUID(),
       application_id: newId,
       notification_type: 'student_confirmation',
       recipient_email: email,
@@ -659,8 +754,11 @@ app.post('/api/apply', async (req, res) => {
   }
 });
 
-// POST Approve Application (Authorized staff/admin only)
+// POST Approve Application (Staff / Admin / Super Admin)
 app.post('/api/approve-application', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+
   try {
     const { application_id, approved_by_name } = req.body;
 
@@ -702,7 +800,7 @@ app.post('/api/approve-application', async (req, res) => {
     }
 
     const approvedAt = new Date().toISOString();
-    const approver = approved_by_name || 'Authorized Staff';
+    const approverName = approved_by_name || admin.full_name || 'Authorized Staff';
 
     // Update status to 'Accepted'
     if (supabase) {
@@ -710,7 +808,8 @@ app.post('/api/approve-application', async (req, res) => {
         .from('applications')
         .update({
           status: 'Accepted',
-          approved_by_name: approver,
+          approved_by_user_id: admin.id,
+          approved_by_name: approverName,
           approved_at: approvedAt,
         })
         .eq('id', application_id);
@@ -719,7 +818,7 @@ app.post('/api/approve-application', async (req, res) => {
       }
     } else {
       targetApp.status = 'Accepted';
-      targetApp.approved_by_name = approver;
+      targetApp.approved_by_name = approverName;
       targetApp.approved_at = approvedAt;
     }
 
@@ -765,9 +864,8 @@ app.post('/api/approve-application', async (req, res) => {
       attachments,
     });
 
-    // Record notification
     const approvalNotif = {
-      id: `notif_${Date.now()}`,
+      id: crypto.randomUUID(),
       application_id,
       notification_type: 'student_approval',
       recipient_email: targetApp.email,
@@ -799,6 +897,9 @@ app.post('/api/approve-application', async (req, res) => {
 
 // POST Retry Failed Notification
 app.post('/api/retry-notification', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+
   try {
     const { notification_id } = req.body;
     let notif: any = null;
@@ -829,7 +930,7 @@ app.post('/api/retry-notification', async (req, res) => {
       subject: notif.notification_type === 'student_approval'
         ? "Congratulations! Your Application Has Been Approved — Uptrend's English Academy"
         : "Application Received — Uptrend's English Academy",
-      html: `<p>Notification retry for application ${notif.application_id}</p>`,
+      html: `<p>Notification retry for application reference: ${notif.application_id}</p>`,
       attachments,
     });
 
@@ -861,7 +962,7 @@ app.post('/api/retry-notification', async (req, res) => {
   }
 });
 
-// POST Callback Request
+// POST Callback Request (Public)
 app.post('/api/callback-request', async (req, res) => {
   try {
     const { full_name, mobile, email, program_name, preferred_contact_time, message, consent } = req.body;
@@ -871,7 +972,7 @@ app.post('/api/callback-request', async (req, res) => {
     }
 
     const newRecord = {
-      id: `cb_${Date.now()}`,
+      id: crypto.randomUUID(),
       full_name,
       mobile,
       email: email || null,
@@ -889,7 +990,6 @@ app.post('/api/callback-request', async (req, res) => {
       memoryStore.callbacks.unshift(newRecord);
     }
 
-    // Notify staff
     await sendEmailViaResend({
       to: APPLICATION_NOTIFICATION_EMAIL,
       subject: `New Callback Request — ${full_name} (${preferred_contact_time})`,
@@ -905,7 +1005,7 @@ app.post('/api/callback-request', async (req, res) => {
   }
 });
 
-// POST Contact Enquiry
+// POST Contact Enquiry (Public)
 app.post('/api/contact', async (req, res) => {
   try {
     const { full_name, email, mobile, subject, message, consent } = req.body;
@@ -915,7 +1015,7 @@ app.post('/api/contact', async (req, res) => {
     }
 
     const newRecord = {
-      id: `cnt_${Date.now()}`,
+      id: crypto.randomUUID(),
       full_name,
       email,
       mobile: mobile || null,
@@ -932,7 +1032,6 @@ app.post('/api/contact', async (req, res) => {
       memoryStore.contacts.unshift(newRecord);
     }
 
-    // Notify staff
     await sendEmailViaResend({
       to: APPLICATION_NOTIFICATION_EMAIL,
       subject: `New Contact Enquiry: ${subject} — ${full_name}`,
@@ -948,8 +1047,13 @@ app.post('/api/contact', async (req, res) => {
   }
 });
 
-// GET Admin Data Endpoints
+// -------------------------------------------------------------
+// PROTECTED ADMIN DATA ENDPOINTS (Staff and above)
+// -------------------------------------------------------------
 app.get('/api/admin/applications', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+
   if (supabase) {
     const { data } = await supabase.from('applications').select('*').order('created_at', { ascending: false });
     return res.json(data || []);
@@ -957,7 +1061,23 @@ app.get('/api/admin/applications', async (req, res) => {
   res.json(memoryStore.applications);
 });
 
+app.delete('/api/admin/applications/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'super_admin');
+  if (!admin) return;
+
+  const { id } = req.params;
+  if (supabase) {
+    await supabase.from('applications').delete().eq('id', id);
+  } else {
+    memoryStore.applications = memoryStore.applications.filter(a => a.id !== id);
+  }
+  res.json({ success: true, message: 'Application deleted successfully.' });
+});
+
 app.get('/api/admin/notifications', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+
   if (supabase) {
     const { data } = await supabase.from('application_notifications').select('*').order('created_at', { ascending: false });
     return res.json(data || []);
@@ -966,6 +1086,9 @@ app.get('/api/admin/notifications', async (req, res) => {
 });
 
 app.get('/api/admin/callbacks', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+
   if (supabase) {
     const { data } = await supabase.from('callback_requests').select('*').order('created_at', { ascending: false });
     return res.json(data || []);
@@ -974,6 +1097,9 @@ app.get('/api/admin/callbacks', async (req, res) => {
 });
 
 app.get('/api/admin/contacts', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+
   if (supabase) {
     const { data } = await supabase.from('contact_enquiries').select('*').order('created_at', { ascending: false });
     return res.json(data || []);
@@ -981,11 +1107,117 @@ app.get('/api/admin/contacts', async (req, res) => {
   res.json(memoryStore.contacts);
 });
 
-// Admin CRUD Endpoints for Programs, Announcements, FAQs, Reviews, Media
+// Admin Profiles Management (Super Admin only)
+app.get('/api/admin/profiles', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'super_admin');
+  if (!admin) return;
+
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('admin_profiles')
+      .select('*')
+      .order('created_at', { ascending: true });
+    if (!error && data) return res.json(data);
+  }
+  res.json(memoryStore.admin_profiles);
+});
+
+app.put('/api/admin/profiles/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'super_admin');
+  if (!admin) return;
+
+  const { id } = req.params;
+  const { role, is_active } = req.body;
+
+  if (id === admin.id && is_active === false) {
+    return res.status(400).json({ error: 'Cannot deactivate your own super admin account.' });
+  }
+
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('admin_profiles')
+      .update({ role, is_active, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
+  }
+
+  const idx = memoryStore.admin_profiles.findIndex(p => p.id === id);
+  if (idx !== -1) {
+    memoryStore.admin_profiles[idx] = { ...memoryStore.admin_profiles[idx], role, is_active };
+    return res.json(memoryStore.admin_profiles[idx]);
+  }
+  res.status(404).json({ error: 'Admin profile not found' });
+});
+
+// Site Branding Management (Super Admin only - updates favicon_url, footer_logo_url, main_logo_alt, etc.)
+app.put('/api/admin/branding', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'super_admin');
+  if (!admin) return;
+
+  const {
+    academy_name,
+    tagline,
+    logo_url,
+    main_logo_alt,
+    logo_alt,
+    favicon_url,
+    footer_logo_url,
+    primary_orange,
+    primary_green,
+    official_pdf_url,
+  } = req.body;
+
+  const updates = {
+    academy_name: academy_name || "Uptrend's English Academy",
+    tagline: tagline || 'Professional Spoken English & Communication Skills',
+    logo_url,
+    main_logo_alt: main_logo_alt || logo_alt || "Uptrend's English Academy Davangere Logo",
+    logo_alt: logo_alt || main_logo_alt || "Uptrend's English Academy Davangere Logo",
+    favicon_url: favicon_url || '/favicon.ico',
+    footer_logo_url,
+    primary_orange: primary_orange || '#ea580c',
+    primary_green: primary_green || '#16a34a',
+    official_pdf_url: official_pdf_url || '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf',
+    updated_at: new Date().toISOString(),
+  };
+
+  if (supabase) {
+    const { data: existing } = await supabase.from('site_branding').select('id').limit(1).maybeSingle();
+    if (existing?.id) {
+      const { data, error } = await supabase
+        .from('site_branding')
+        .update(updates)
+        .eq('id', existing.id)
+        .select()
+        .single();
+      if (error) return res.status(500).json({ error: error.message });
+      return res.json(data);
+    } else {
+      const { data, error } = await supabase
+        .from('site_branding')
+        .insert([{ id: crypto.randomUUID(), ...updates }])
+        .select()
+        .single();
+      if (error) return res.status(500).json({ error: error.message });
+      return res.json(data);
+    }
+  }
+
+  memoryStore.branding = { ...memoryStore.branding, ...updates };
+  res.json(memoryStore.branding);
+});
+
+// Admin CRUD Endpoints for Programs (Admin & Super Admin)
 app.post('/api/admin/programs', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
   const { title, slug, short_description, description, duration, level, target_audience, age_range, is_published, image_url } = req.body;
   const newProg = {
-    id: `prog_${Date.now()}`,
+    id: crypto.randomUUID(),
     title,
     slug: slug || title.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
     short_description,
@@ -1010,6 +1242,9 @@ app.post('/api/admin/programs', async (req, res) => {
 });
 
 app.put('/api/admin/programs/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
   const { id } = req.params;
   const updates = req.body;
   if (supabase) {
@@ -1026,6 +1261,9 @@ app.put('/api/admin/programs/:id', async (req, res) => {
 });
 
 app.delete('/api/admin/programs/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
   const { id } = req.params;
   if (supabase) {
     await supabase.from('programs').delete().eq('id', id);
@@ -1035,11 +1273,14 @@ app.delete('/api/admin/programs/:id', async (req, res) => {
   res.json({ success: true });
 });
 
-// Announcement Admin CRUD
+// Announcement Admin CRUD (Admin & Super Admin)
 app.post('/api/admin/announcements', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
   const { content, is_active } = req.body;
   const item = {
-    id: `ann_${Date.now()}`,
+    id: crypto.randomUUID(),
     content,
     is_active: is_active !== false,
     display_order: memoryStore.announcements.length + 1,
@@ -1054,10 +1295,14 @@ app.post('/api/admin/announcements', async (req, res) => {
 });
 
 app.put('/api/admin/announcements/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
   const { id } = req.params;
   const updates = req.body;
   if (supabase) {
-    const { data } = await supabase.from('announcements').update(updates).eq('id', id).select().single();
+    const { data, error } = await supabase.from('announcements').update(updates).eq('id', id).select().single();
+    if (error) return res.status(500).json({ error: error.message });
     return res.json(data);
   }
   const idx = memoryStore.announcements.findIndex(a => a.id === id);
@@ -1069,11 +1314,70 @@ app.put('/api/admin/announcements/:id', async (req, res) => {
 });
 
 app.delete('/api/admin/announcements/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
   const { id } = req.params;
   if (supabase) {
     await supabase.from('announcements').delete().eq('id', id);
   } else {
     memoryStore.announcements = memoryStore.announcements.filter(a => a.id !== id);
+  }
+  res.json({ success: true });
+});
+
+// FAQs Admin CRUD (Super Admin only)
+app.post('/api/admin/faqs', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'super_admin');
+  if (!admin) return;
+
+  const { question, answer, is_published } = req.body;
+  const item = {
+    id: crypto.randomUUID(),
+    question,
+    answer,
+    is_published: is_published !== false,
+    display_order: memoryStore.faqs.length + 1,
+    created_at: new Date().toISOString(),
+  };
+
+  if (supabase) {
+    const { data, error } = await supabase.from('faqs').insert([item]).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
+  }
+  memoryStore.faqs.push(item);
+  res.json(item);
+});
+
+app.put('/api/admin/faqs/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'super_admin');
+  if (!admin) return;
+
+  const { id } = req.params;
+  const updates = req.body;
+  if (supabase) {
+    const { data, error } = await supabase.from('faqs').update(updates).eq('id', id).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
+  }
+  const idx = memoryStore.faqs.findIndex(f => f.id === id);
+  if (idx !== -1) {
+    memoryStore.faqs[idx] = { ...memoryStore.faqs[idx], ...updates };
+    return res.json(memoryStore.faqs[idx]);
+  }
+  res.status(404).json({ error: 'FAQ not found' });
+});
+
+app.delete('/api/admin/faqs/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'super_admin');
+  if (!admin) return;
+
+  const { id } = req.params;
+  if (supabase) {
+    await supabase.from('faqs').delete().eq('id', id);
+  } else {
+    memoryStore.faqs = memoryStore.faqs.filter(f => f.id !== id);
   }
   res.json({ success: true });
 });

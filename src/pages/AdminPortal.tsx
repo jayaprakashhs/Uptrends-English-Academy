@@ -11,6 +11,7 @@ import {
   Review,
   MediaItem,
   FAQ,
+  SiteBranding,
 } from '../types';
 import {
   LayoutDashboard,
@@ -41,6 +42,8 @@ import {
   Menu,
   X,
   ExternalLink,
+  Palette,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface AdminPortalProps {
@@ -68,6 +71,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [systemStatus, setSystemStatus] = useState<any>(null);
+  const [branding, setBranding] = useState<SiteBranding | null>(null);
+  const [editingBranding, setEditingBranding] = useState<Partial<SiteBranding> | null>(null);
+  const [adminProfiles, setAdminProfiles] = useState<AdminProfile[]>([]);
 
   const [loading, setLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -91,10 +97,22 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const isSuperAdmin = currentAdmin.role === 'super_admin';
   const isAdminOrHigher = currentAdmin.role === 'admin' || isSuperAdmin;
 
+  const getAuthHeaders = (): Record<string, string> => {
+    const token = currentAdmin.accessToken || sessionStorage.getItem('uptrends_access_token') || '';
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    return headers;
+  };
+
   const fetchAllData = async () => {
     setLoading(true);
     setActionMessage(null);
     try {
+      const headers = getAuthHeaders();
       const [
         appsRes,
         notifsRes,
@@ -106,17 +124,23 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         mediaRes,
         faqsRes,
         sysRes,
+        brandingRes,
+        profilesRes,
       ] = await Promise.all([
-        fetch('/api/admin/applications').then((r) => r.json()),
-        fetch('/api/admin/notifications').then((r) => r.json()),
-        fetch('/api/admin/callbacks').then((r) => r.json()),
-        fetch('/api/admin/contacts').then((r) => r.json()),
+        fetch('/api/admin/applications', { headers }).then((r) => r.json()),
+        fetch('/api/admin/notifications', { headers }).then((r) => r.json()),
+        fetch('/api/admin/callbacks', { headers }).then((r) => r.json()),
+        fetch('/api/admin/contacts', { headers }).then((r) => r.json()),
         fetch('/api/programs').then((r) => r.json()),
         fetch('/api/announcements').then((r) => r.json()),
         fetch('/api/reviews').then((r) => r.json()),
         fetch('/api/media').then((r) => r.json()),
         fetch('/api/faqs').then((r) => r.json()),
         fetch('/api/system-status').then((r) => r.json()),
+        fetch('/api/branding').then((r) => r.json()),
+        isSuperAdmin
+          ? fetch('/api/admin/profiles', { headers }).then((r) => r.json()).catch(() => [])
+          : Promise.resolve([]),
       ]);
 
       if (Array.isArray(appsRes)) setApplications(appsRes);
@@ -129,6 +153,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       if (Array.isArray(mediaRes)) setMediaItems(mediaRes);
       if (Array.isArray(faqsRes)) setFaqs(faqsRes);
       if (sysRes) setSystemStatus(sysRes);
+      if (brandingRes && brandingRes.academy_name) {
+        setBranding(brandingRes);
+        setEditingBranding(brandingRes);
+      }
+      if (Array.isArray(profilesRes)) setAdminProfiles(profilesRes);
     } catch (err: any) {
       console.error('Error fetching admin data:', err);
     } finally {
@@ -147,7 +176,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     try {
       const res = await fetch('/api/approve-application', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           application_id: appId,
           approved_by_name: currentAdmin.full_name,
@@ -172,6 +201,32 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     }
   };
 
+  // Action: Delete Application (Super Admin only)
+  const handleDeleteApplication = async (appId: string) => {
+    if (!confirm('Are you sure you want to permanently delete this application record? This action cannot be undone.')) return;
+    setActionMessage(null);
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/admin/applications/${appId}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete application.');
+
+      setActionMessage({
+        type: 'success',
+        text: 'Application record deleted successfully.',
+      });
+      if (selectedApp?.id === appId) setSelectedApp(null);
+      await fetchAllData();
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Error deleting application.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Action: Retry Email Notification
   const handleRetryNotification = async (notifId: string) => {
     setActionMessage(null);
@@ -179,7 +234,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     try {
       const res = await fetch('/api/retry-notification', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ notification_id: notifId }),
       });
       const data = await res.json();
@@ -206,7 +261,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       const url = editingProgram.id ? `/api/admin/programs/${editingProgram.id}` : '/api/admin/programs';
       const res = await fetch(url, {
         method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(editingProgram),
       });
       if (!res.ok) throw new Error('Failed to save program');
@@ -225,7 +280,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     if (!confirm('Are you sure you want to delete this program?')) return;
     setLoading(true);
     try {
-      await fetch(`/api/admin/programs/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/admin/programs/${id}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to delete program');
+      }
       setActionMessage({ type: 'success', text: 'Program deleted.' });
       await fetchAllData();
     } catch (err: any) {
@@ -245,7 +307,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       const url = editingAnnouncement.id ? `/api/admin/announcements/${editingAnnouncement.id}` : '/api/admin/announcements';
       const res = await fetch(url, {
         method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(editingAnnouncement),
       });
       if (!res.ok) throw new Error('Failed to save announcement');
@@ -264,8 +326,58 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     if (!confirm('Delete this announcement?')) return;
     setLoading(true);
     try {
-      await fetch(`/api/admin/announcements/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/admin/announcements/${id}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to delete announcement');
+      }
       setActionMessage({ type: 'success', text: 'Announcement deleted.' });
+      await fetchAllData();
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Action: Save Site Branding
+  const handleSaveBranding = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingBranding) return;
+    setLoading(true);
+    try {
+      const res = await fetch('/api/admin/branding', {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(editingBranding),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update branding');
+      setBranding(data);
+      setActionMessage({ type: 'success', text: 'Branding and logo configurations updated successfully!' });
+      await fetchAllData();
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Action: Update Admin Role / Status (Super Admin only)
+  const handleUpdateAdminRole = async (profileId: string, newRole: AdminRole, newStatus: boolean) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/admin/profiles/${profileId}`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ role: newRole, is_active: newStatus }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update admin role');
+      setActionMessage({ type: 'success', text: `Admin role updated to ${newRole}.` });
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message });
@@ -284,8 +396,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     { id: 'programs', label: 'Programs Management', icon: BookOpen, minRole: 'admin' },
     { id: 'media', label: 'Media Gallery', icon: Video, minRole: 'admin' },
     { id: 'announcements', label: 'Announcements', icon: Volume2, minRole: 'admin' },
+    { id: 'branding', label: 'Site Branding & Assets', icon: Palette, minRole: 'admin' },
     { id: 'faqs', label: 'FAQs Management', icon: HelpCircle, minRole: 'super_admin' },
     { id: 'notifications', label: 'Email Outbox & Retries', icon: Send, minRole: 'super_admin' },
+    { id: 'roles', label: 'Admin Roles & Access', icon: ShieldCheck, minRole: 'super_admin' },
     { id: 'settings', label: 'Settings & PDF Config', icon: Settings, minRole: 'super_admin' },
   ];
 
@@ -704,6 +818,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                                   Approve
                                 </button>
                               )}
+                              {isSuperAdmin && (
+                                <button
+                                  onClick={() => handleDeleteApplication(app.id)}
+                                  className="px-2 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold cursor-pointer"
+                                  title="Permanently Delete Application (Super Admin only)"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5 inline" />
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))
@@ -1003,6 +1126,255 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             </div>
           )}
 
+          {/* TAB: SITE BRANDING & ASSETS */}
+          {activeTab === 'branding' && (
+            <div className="space-y-6 max-w-4xl">
+              <div>
+                <h1 className="text-2xl font-extrabold text-slate-950">Site Branding & Assets</h1>
+                <p className="text-xs text-slate-500 mt-1">
+                  Configure the academy visual brand identity, logos, favicon, and theme colors stored in the database.
+                </p>
+              </div>
+
+              {editingBranding ? (
+                <form onSubmit={handleSaveBranding} className="bg-white p-6 sm:p-8 rounded-2xl border border-slate-200 shadow-xs space-y-6 text-xs">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="font-bold text-slate-700 block mb-1">Academy Name</label>
+                      <input
+                        type="text"
+                        required
+                        value={editingBranding.academy_name || ''}
+                        onChange={(e) => setEditingBranding({ ...editingBranding, academy_name: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl"
+                      />
+                    </div>
+                    <div>
+                      <label className="font-bold text-slate-700 block mb-1">Tagline</label>
+                      <input
+                        type="text"
+                        value={editingBranding.tagline || ''}
+                        onChange={(e) => setEditingBranding({ ...editingBranding, tagline: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="border-t border-slate-100 pt-4 space-y-4">
+                    <h3 className="font-bold text-slate-900 text-sm">Logo & Visual Brand Assets</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="font-bold text-slate-700 block mb-1">Main Logo URL</label>
+                        <input
+                          type="text"
+                          value={editingBranding.logo_url || ''}
+                          onChange={(e) => setEditingBranding({ ...editingBranding, logo_url: e.target.value })}
+                          className="w-full px-3 py-2 border border-slate-200 rounded-xl font-mono text-[11px]"
+                        />
+                      </div>
+                      <div>
+                        <label className="font-bold text-slate-700 block mb-1">Main Logo Alt Text (main_logo_alt)</label>
+                        <input
+                          type="text"
+                          value={editingBranding.main_logo_alt || editingBranding.logo_alt || ''}
+                          onChange={(e) => setEditingBranding({ ...editingBranding, main_logo_alt: e.target.value, logo_alt: e.target.value })}
+                          className="w-full px-3 py-2 border border-slate-200 rounded-xl"
+                          placeholder="e.g. Uptrend's English Academy Official Logo"
+                        />
+                      </div>
+                      <div>
+                        <label className="font-bold text-slate-700 block mb-1">Favicon URL (favicon_url)</label>
+                        <input
+                          type="text"
+                          value={editingBranding.favicon_url || ''}
+                          onChange={(e) => setEditingBranding({ ...editingBranding, favicon_url: e.target.value })}
+                          className="w-full px-3 py-2 border border-slate-200 rounded-xl font-mono text-[11px]"
+                          placeholder="/favicon.ico or Cloudflare R2 URL"
+                        />
+                      </div>
+                      <div>
+                        <label className="font-bold text-slate-700 block mb-1">Footer Logo URL (footer_logo_url)</label>
+                        <input
+                          type="text"
+                          value={editingBranding.footer_logo_url || ''}
+                          onChange={(e) => setEditingBranding({ ...editingBranding, footer_logo_url: e.target.value })}
+                          className="w-full px-3 py-2 border border-slate-200 rounded-xl font-mono text-[11px]"
+                          placeholder="Logo used in dark footer background"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="border-t border-slate-100 pt-4 space-y-4">
+                    <h3 className="font-bold text-slate-900 text-sm">Theme Colors & Official Documents</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      <div>
+                        <label className="font-bold text-slate-700 block mb-1">Primary Color</label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="color"
+                            value={editingBranding.primary_color || '#ea580c'}
+                            onChange={(e) => setEditingBranding({ ...editingBranding, primary_color: e.target.value })}
+                            className="w-8 h-8 rounded border border-slate-200 cursor-pointer"
+                          />
+                          <input
+                            type="text"
+                            value={editingBranding.primary_color || '#ea580c'}
+                            onChange={(e) => setEditingBranding({ ...editingBranding, primary_color: e.target.value })}
+                            className="flex-1 px-3 py-2 border border-slate-200 rounded-xl font-mono"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="font-bold text-slate-700 block mb-1">Secondary Color</label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="color"
+                            value={editingBranding.secondary_color || '#0f172a'}
+                            onChange={(e) => setEditingBranding({ ...editingBranding, secondary_color: e.target.value })}
+                            className="w-8 h-8 rounded border border-slate-200 cursor-pointer"
+                          />
+                          <input
+                            type="text"
+                            value={editingBranding.secondary_color || '#0f172a'}
+                            onChange={(e) => setEditingBranding({ ...editingBranding, secondary_color: e.target.value })}
+                            className="flex-1 px-3 py-2 border border-slate-200 rounded-xl font-mono"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="font-bold text-slate-700 block mb-1">Official Fee Structure PDF Path</label>
+                        <input
+                          type="text"
+                          value={editingBranding.official_pdf_url || ''}
+                          onChange={(e) => setEditingBranding({ ...editingBranding, official_pdf_url: e.target.value })}
+                          className="w-full px-3 py-2 border border-slate-200 rounded-xl font-mono"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-4 flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={loading}
+                      className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-xl shadow-sm cursor-pointer"
+                    >
+                      Save Branding Configurations
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="bg-white p-8 rounded-2xl border text-center text-slate-500">
+                  Loading site branding data...
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB: ADMIN ROLES & ACCESS (SUPER ADMIN ONLY) */}
+          {activeTab === 'roles' && isSuperAdmin && (
+            <div className="space-y-6">
+              <div>
+                <h1 className="text-2xl font-extrabold text-slate-950">Admin Roles & Access Control</h1>
+                <p className="text-xs text-slate-500 mt-1">
+                  Manage staff and administrator privileges. Enforces strict server-side role validation in Supabase.
+                </p>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[11px] border-b border-slate-200">
+                    <tr>
+                      <th className="px-5 py-3.5">Administrator</th>
+                      <th className="px-5 py-3.5">Auth UID</th>
+                      <th className="px-5 py-3.5">Role</th>
+                      <th className="px-5 py-3.5">Status</th>
+                      <th className="px-5 py-3.5">Last Login</th>
+                      <th className="px-5 py-3.5 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-slate-700">
+                    {adminProfiles.length > 0 ? (
+                      adminProfiles.map((adm) => (
+                        <tr key={adm.id} className="hover:bg-slate-50">
+                          <td className="px-5 py-4">
+                            <div className="font-bold text-slate-900">{adm.full_name}</div>
+                            <div className="text-[11px] text-slate-500">{adm.email}</div>
+                          </td>
+                          <td className="px-5 py-4 font-mono text-[11px] text-slate-500">
+                            {adm.id}
+                          </td>
+                          <td className="px-5 py-4">
+                            <span
+                              className={`px-2.5 py-1 rounded text-[10px] font-extrabold uppercase ${
+                                adm.role === 'super_admin'
+                                  ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                                  : adm.role === 'admin'
+                                  ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                                  : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                              }`}
+                            >
+                              {adm.role}
+                            </span>
+                          </td>
+                          <td className="px-5 py-4">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                adm.is_active
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-rose-100 text-rose-800'
+                              }`}
+                            >
+                              {adm.is_active ? 'Active' : 'Suspended'}
+                            </span>
+                          </td>
+                          <td className="px-5 py-4 text-slate-500 text-[11px]">
+                            {adm.last_login ? new Date(adm.last_login).toLocaleString('en-IN') : 'Never'}
+                          </td>
+                          <td className="px-5 py-4 text-right space-x-2">
+                            {adm.id !== currentAdmin.id && (
+                              <div className="inline-flex items-center gap-2">
+                                <select
+                                  value={adm.role}
+                                  onChange={(e) => handleUpdateAdminRole(adm.id, e.target.value as AdminRole, adm.is_active)}
+                                  className="px-2 py-1 bg-slate-50 border border-slate-300 rounded text-xs font-semibold cursor-pointer"
+                                >
+                                  <option value="staff">Staff</option>
+                                  <option value="admin">Admin</option>
+                                  <option value="super_admin">Super Admin</option>
+                                </select>
+                                <button
+                                  onClick={() => handleUpdateAdminRole(adm.id, adm.role, !adm.is_active)}
+                                  className={`px-2 py-1 rounded text-xs font-bold cursor-pointer ${
+                                    adm.is_active
+                                      ? 'bg-rose-50 text-rose-700 hover:bg-rose-100'
+                                      : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                  }`}
+                                >
+                                  {adm.is_active ? 'Suspend' : 'Activate'}
+                                </button>
+                              </div>
+                            )}
+                            {adm.id === currentAdmin.id && (
+                              <span className="text-[11px] font-semibold text-slate-400 italic">Current Session</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={6} className="text-center py-8 text-slate-400">
+                          No admin profiles found.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           {/* TAB 8: SETTINGS & OFFICIAL PDF */}
           {activeTab === 'settings' && (
             <div className="space-y-8 max-w-4xl">
@@ -1129,15 +1501,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 Current Status: <strong className="text-slate-900">{selectedApp.status}</strong>
               </span>
 
-              {selectedApp.status === 'Pending' && (
-                <button
-                  onClick={() => handleApproveApp(selectedApp.id)}
-                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md cursor-pointer flex items-center gap-1.5"
-                >
-                  <CheckCircle className="w-4 h-4" />
-                  <span>Confirm Approval & Send Official PDF</span>
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {isSuperAdmin && (
+                  <button
+                    onClick={() => handleDeleteApplication(selectedApp.id)}
+                    className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete Record</span>
+                  </button>
+                )}
+
+                {selectedApp.status === 'Pending' && (
+                  <button
+                    onClick={() => handleApproveApp(selectedApp.id)}
+                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md cursor-pointer flex items-center gap-1.5"
+                  >
+                    <CheckCircle className="w-4 h-4" />
+                    <span>Confirm Approval & Send Official PDF</span>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

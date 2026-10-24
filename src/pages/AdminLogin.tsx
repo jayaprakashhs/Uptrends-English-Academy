@@ -49,12 +49,17 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, setCurre
           if (profileErr || !profile) {
             // User exists in auth but has not been provisioned as admin profile
             throw new Error(
-              'User authentication successful, but no authorized admin profile was found. Please request Super Admin provisioning in database.'
+              'User authentication successful, but no authorized admin profile was found in public.admin_profiles. Please run the provisioning SQL migration in Supabase SQL Editor.'
             );
           }
 
           if (!profile.is_active) {
             throw new Error('This admin account has been deactivated. Contact Super Admin.');
+          }
+
+          if (data.session?.access_token) {
+            profile.accessToken = data.session.access_token;
+            sessionStorage.setItem('uptrends_access_token', data.session.access_token);
           }
 
           onLoginSuccess(profile);
