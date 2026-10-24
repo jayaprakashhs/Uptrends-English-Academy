@@ -71,15 +71,12 @@ async function requireAdminAuth(
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
-  // Standalone / preview mode when Supabase credentials are not yet supplied in .env
+  // Fail closed when Supabase is not configured.
   if (!supabase) {
-    return {
-      id: '59bbb687-4e0d-47f7-b458-5a91955f915d',
-      email: 'uptrendsinstitute@gmail.com',
-      full_name: 'Academy Super Admin',
-      role: 'super_admin',
-      is_active: true,
-    };
+    res.status(503).json({
+      error: 'Admin authentication is unavailable because Supabase is not configured.',
+    });
+    return null;
   }
 
   if (!token) {
