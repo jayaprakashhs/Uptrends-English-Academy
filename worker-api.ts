@@ -35,7 +35,7 @@ const MAX_JSON_BYTES = 7 * 1024 * 1024;
 const MAX_MEDIA_BYTES = 5 * 1024 * 1024;
 const MAX_PASSPORT_BYTES = 300 * 1024;
 const ROLE_RANK: Record<string, number> = { staff: 1, admin: 2, super_admin: 3 };
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {

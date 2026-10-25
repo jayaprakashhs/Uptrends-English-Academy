@@ -132,6 +132,33 @@ test('admin routes preserve fail-closed behavior when privileged bindings are mi
   });
 });
 
+test('program update accepts the existing PostgreSQL UUID without RFC version or variant bits', async () => {
+  const programId = '11111111-1111-1111-1111-111111111103';
+  const response = await handleApiRequest(
+    new Request(`https://academy.example/api/admin/programs/${programId}`, { method: 'PUT' }),
+    {
+      SUPABASE_URL: 'https://project.example',
+      SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+    },
+  );
+  assert.equal(response.status, 401);
+  assert.equal(response.status, 401);
+  const body = await response.json() as { error: string };
+  assert.match(body.error, /^Unauthorized:/);
+});
+
+test('program update continues to reject malformed resource IDs', async () => {
+  const response = await handleApiRequest(
+    new Request('https://academy.example/api/admin/programs/not-a-uuid', { method: 'PUT' }),
+    {},
+  );
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    error: 'Resource ID must be a valid UUID.',
+  });
+});
+
 test('missing public bindings are logged by operation and binding name only', async () => {
   const logs = await withCapturedLogs(async (captured) => {
     await handleApiRequest(requestFor('/api/programs'), {});
