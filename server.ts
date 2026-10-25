@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import { Resend } from 'resend';
-import { DeleteObjectCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, HeadBucketCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -508,35 +508,121 @@ async function sendEmailViaResend({
 // API ENDPOINTS
 // -------------------------------------------------------------
 
-// System Diagnostics & Configuration Status
-app.get('/api/system-status', (req, res) => {
-  const hasSupabase = !!(SUPABASE_URL && SUPABASE_SERVICE_KEY);
-  const hasResend = !!RESEND_API_KEY;
-  const hasR2 = !!(r2Client && hasValidR2PublicUrl());
-  
+type IntegrationHealth = {
+  configured: boolean;
+  connected: boolean;
+  error_category?: string;
+};
+
+function supabaseErrorCategory(error: unknown): string {
+  const details = error as { code?: unknown; message?: unknown };
+  const code = typeof details.code === 'string' ? details.code : '';
+  const message = typeof details.message === 'string' ? details.message : '';
+  if (code === '42501') return 'permission_denied';
+  if (code === 'PGRST301' || /invalid (api )?key|invalid jwt/i.test(message)) return 'authentication_failed';
+  if (code === '42P01' || code === 'PGRST205') return 'schema_mismatch';
+  return 'database_query_failed';
+}
+
+async function checkSupabaseHealth(): Promise<IntegrationHealth> {
+  const configured = Boolean(SUPABASE_URL && SUPABASE_SERVICE_KEY);
+  if (!supabase) return { configured, connected: false, error_category: configured ? 'invalid_configuration' : 'missing_configuration' };
+  try {
+    const { error } = await supabase.from('site_branding').select('id').limit(1).abortSignal(AbortSignal.timeout(5000));
+    if (error) return { configured: true, connected: false, error_category: supabaseErrorCategory(error) };
+    return { configured: true, connected: true };
+  } catch (error) {
+    return {
+      configured: true,
+      connected: false,
+      error_category: error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'service_unreachable',
+    };
+  }
+}
+
+async function checkResendHealth(): Promise<IntegrationHealth> {
+  if (!RESEND_API_KEY) return { configured: false, connected: false, error_category: 'missing_configuration' };
+  try {
+    const response = await fetch('https://api.resend.com/domains', {
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (response.ok) return { configured: true, connected: true };
+    return {
+      configured: true,
+      connected: false,
+      error_category: response.status === 401 ? 'authentication_failed' : response.status === 403 ? 'permission_denied' : 'service_error',
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      connected: false,
+      error_category: error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'service_unreachable',
+    };
+  }
+}
+
+async function checkR2Health(): Promise<IntegrationHealth> {
+  const configured = Boolean(r2Client && hasValidR2PublicUrl());
+  if (!r2Client || !configured) return { configured: false, connected: false, error_category: 'missing_or_invalid_configuration' };
+  try {
+    await r2Client.send(new HeadBucketCommand({ Bucket: R2_BUCKET }), { abortSignal: AbortSignal.timeout(5000) });
+    return { configured: true, connected: true };
+  } catch (error: any) {
+    return {
+      configured: true,
+      connected: false,
+      error_category: error?.$metadata?.httpStatusCode === 403
+        ? 'permission_denied'
+        : error?.$metadata?.httpStatusCode === 404 ? 'bucket_not_found' : 'storage_unreachable',
+    };
+  }
+}
+
+async function checkPdfHealth(): Promise<IntegrationHealth & { available: boolean }> {
   const localPdfPath = path.resolve(__dirname, 'public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf');
-  const hasLocalPdf = fs.existsSync(localPdfPath);
-  const hasConfiguredPdf = !!APPROVED_FEE_STRUCTURE_PDF_URL || hasLocalPdf;
+  if (!APPROVED_FEE_STRUCTURE_PDF_URL) {
+    const available = fs.existsSync(localPdfPath);
+    return {
+      configured: available,
+      connected: available,
+      available,
+      ...(available ? {} : { error_category: 'file_not_found' }),
+    };
+  }
+  try {
+    const url = new URL(APPROVED_FEE_STRUCTURE_PDF_URL);
+    if (url.protocol !== 'https:') {
+      return { configured: true, connected: false, available: false, error_category: 'invalid_configuration' };
+    }
+    const response = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+    return response.ok
+      ? { configured: true, connected: true, available: true }
+      : { configured: true, connected: false, available: false, error_category: `http_${response.status}` };
+  } catch (error) {
+    return {
+      configured: true,
+      connected: false,
+      available: false,
+      error_category: error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'unreachable',
+    };
+  }
+}
+
+// System Diagnostics & Configuration Status
+app.get('/api/system-status', async (_req, res) => {
+  const [supabaseHealth, resendHealth, r2Health, pdfHealth] = await Promise.all([
+    checkSupabaseHealth(),
+    checkResendHealth(),
+    checkR2Health(),
+    checkPdfHealth(),
+  ]);
 
   res.json({
-    supabase: {
-      configured: hasSupabase,
-      url: SUPABASE_URL ? `${SUPABASE_URL.substring(0, 15)}...` : 'Not set',
-    },
-    resend: {
-      configured: hasResend,
-      from_email: RESEND_FROM_EMAIL,
-      staff_email: APPLICATION_NOTIFICATION_EMAIL,
-    },
-    r2_storage: {
-      configured: hasR2,
-      bucket: R2_BUCKET,
-    },
-    official_pdf: {
-      configured: hasConfiguredPdf,
-      url: APPROVED_FEE_STRUCTURE_PDF_URL || '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf',
-      exists_on_disk: hasLocalPdf,
-    },
+    supabase: supabaseHealth,
+    resend: resendHealth,
+    r2_storage: r2Health,
+    official_pdf: pdfHealth,
     server_time: new Date().toISOString(),
   });
 });

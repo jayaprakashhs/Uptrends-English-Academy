@@ -53,6 +53,25 @@ interface AdminPortalProps {
   setCurrentPage: (page: string) => void;
 }
 
+interface IntegrationHealth {
+  configured: boolean;
+  connected: boolean;
+  error_category?: string;
+  available?: boolean;
+}
+
+const integrationStatusLabel = (health: IntegrationHealth | undefined, missingLabel: string): string => {
+  if (!health) return 'Checking...';
+  if (health.connected) return 'Connected';
+  if (!health.configured) return missingLabel;
+  return `Issue: ${health.error_category || 'unavailable'}`;
+};
+
+const integrationStatusClass = (health: IntegrationHealth | undefined): string => {
+  if (health?.connected) return 'bg-emerald-100 text-emerald-800';
+  return health?.configured ? 'bg-amber-100 text-amber-800' : 'bg-slate-200 text-slate-700';
+};
+
 export const AdminPortal: React.FC<AdminPortalProps> = ({
   currentAdmin,
   onLogout,
@@ -75,7 +94,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [editingFaq, setEditingFaq] = useState<Partial<FAQ> | null>(null);
-  const [systemStatus, setSystemStatus] = useState<any>(null);
+  const [systemStatus, setSystemStatus] = useState<{
+    supabase?: IntegrationHealth;
+    resend?: IntegrationHealth;
+    r2_storage?: IntegrationHealth;
+    official_pdf?: IntegrationHealth;
+  } | null>(null);
   const [branding, setBranding] = useState<SiteBranding | null>(null);
   const [editingBranding, setEditingBranding] = useState<Partial<SiteBranding> | null>(null);
   const [adminProfiles, setAdminProfiles] = useState<AdminProfile[]>([]);
@@ -1039,41 +1063,29 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   <div className="space-y-3 text-xs">
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
                       <span className="font-semibold text-slate-700">Database & Persistence</span>
-                      <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
-                        {systemStatus?.supabase?.configured ? 'Supabase Configured' : 'Supabase Not Configured'}
+                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${integrationStatusClass(systemStatus?.supabase)}`}>
+                        {integrationStatusLabel(systemStatus?.supabase, 'Supabase Not Configured')}
                       </span>
                     </div>
 
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
                       <span className="font-semibold text-slate-700">Resend Transactional Email</span>
-                      <span
-                        className={`text-[11px] font-bold px-2 py-0.5 rounded ${
-                          systemStatus?.resend?.configured
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : 'bg-amber-100 text-amber-800'
-                        }`}
-                      >
-                        {systemStatus?.resend?.configured ? 'Resend API Active' : 'API Key Pending in .env'}
+                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${integrationStatusClass(systemStatus?.resend)}`}>
+                        {integrationStatusLabel(systemStatus?.resend, 'API key missing')}
                       </span>
                     </div>
 
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
                       <span className="font-semibold text-slate-700">Cloudflare R2 Storage</span>
-                      <span
-                        className={`text-[11px] font-bold px-2 py-0.5 rounded ${
-                          systemStatus?.r2_storage?.configured
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : 'bg-slate-200 text-slate-700'
-                        }`}
-                      >
-                        {systemStatus?.r2_storage?.configured ? 'R2 Configured' : 'R2 Not Configured'}
+                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${integrationStatusClass(systemStatus?.r2_storage)}`}>
+                        {integrationStatusLabel(systemStatus?.r2_storage, 'R2 Not Configured')}
                       </span>
                     </div>
 
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
                       <span className="font-semibold text-slate-700">Official Fee Structure PDF</span>
-                      <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
-                        {systemStatus?.official_pdf?.exists_on_disk ? 'Valid PDF Ready' : 'Configure PDF'}
+                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${integrationStatusClass(systemStatus?.official_pdf)}`}>
+                        {systemStatus?.official_pdf?.available ? 'PDF Ready' : integrationStatusLabel(systemStatus?.official_pdf, 'Configure PDF')}
                       </span>
                     </div>
                   </div>

@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 
 interface Env {
@@ -62,6 +62,119 @@ const getSupabaseClient = (env: Env, privileged = false): SupabaseClient | null 
     });
   } catch {
     return null;
+  }
+};
+
+interface IntegrationHealth {
+  configured: boolean;
+  connected: boolean;
+  error_category?: string;
+}
+
+const supabaseErrorCategory = (error: unknown): string => {
+  const details = error as { code?: unknown; message?: unknown };
+  const code = typeof details.code === 'string' ? details.code : '';
+  const message = typeof details.message === 'string' ? details.message : '';
+  if (code === '42501') return 'permission_denied';
+  if (code === 'PGRST301' || /invalid (api )?key|invalid jwt/i.test(message)) return 'authentication_failed';
+  if (code === '42P01' || code === 'PGRST205') return 'schema_mismatch';
+  return 'database_query_failed';
+};
+
+const checkSupabaseHealth = async (env: Env): Promise<IntegrationHealth> => {
+  const configured = Boolean(getSupabaseUrl(env) && env.SUPABASE_SERVICE_ROLE_KEY);
+  const client = getSupabaseClient(env, true);
+  if (!client) return { configured, connected: false, error_category: configured ? 'invalid_configuration' : 'missing_configuration' };
+  try {
+    const { error } = await client.from('site_branding').select('id').limit(1).abortSignal(AbortSignal.timeout(5000));
+    if (error) return { configured: true, connected: false, error_category: supabaseErrorCategory(error) };
+    return { configured: true, connected: true };
+  } catch (error) {
+    return {
+      configured: true,
+      connected: false,
+      error_category: error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'service_unreachable',
+    };
+  }
+};
+
+const checkResendHealth = async (env: Env): Promise<IntegrationHealth> => {
+  if (!env.RESEND_API_KEY) return { configured: false, connected: false, error_category: 'missing_configuration' };
+  try {
+    const response = await fetch('https://api.resend.com/domains', {
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (response.ok) return { configured: true, connected: true };
+    return {
+      configured: true,
+      connected: false,
+      error_category: response.status === 401 ? 'authentication_failed' : response.status === 403 ? 'permission_denied' : 'service_error',
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      connected: false,
+      error_category: error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'service_unreachable',
+    };
+  }
+};
+
+const checkR2Health = async (env: Env): Promise<IntegrationHealth> => {
+  const client = createR2Client(env);
+  let publicUrlIsValid = false;
+  try {
+    publicUrlIsValid = new URL(env.CLOUDFLARE_R2_PUBLIC_URL || '').protocol === 'https:';
+  } catch {
+    publicUrlIsValid = false;
+  }
+  const configured = Boolean(client && publicUrlIsValid);
+  if (!client || !publicUrlIsValid) {
+    return { configured, connected: false, error_category: configured ? undefined : 'missing_or_invalid_configuration' };
+  }
+  try {
+    await client.send(
+      new HeadBucketCommand({ Bucket: env.CLOUDFLARE_R2_BUCKET_NAME || 'uptrends-academy-media' }),
+      { abortSignal: AbortSignal.timeout(5000) },
+    );
+    return { configured: true, connected: true };
+  } catch (error) {
+    const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+    return {
+      configured: true,
+      connected: false,
+      error_category: status === 403 ? 'permission_denied' : status === 404 ? 'bucket_not_found' : 'storage_unreachable',
+    };
+  }
+};
+
+const checkPdfHealth = async (env: Env, request: Request): Promise<IntegrationHealth & { available: boolean }> => {
+  const pdfPath = '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf';
+  const configuredUrl = env.APPROVED_FEE_STRUCTURE_PDF_URL;
+  if (!configuredUrl && !env.ASSETS) {
+    return { configured: false, connected: false, available: false, error_category: 'missing_configuration' };
+  }
+  try {
+    let response: Response;
+    if (configuredUrl) {
+      const url = new URL(configuredUrl);
+      if (url.protocol !== 'https:') {
+        return { configured: true, connected: false, available: false, error_category: 'invalid_configuration' };
+      }
+      response = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+    } else {
+      response = await env.ASSETS!.fetch(new Request(new URL(pdfPath, request.url), { method: 'HEAD' }));
+    }
+    return response.ok
+      ? { configured: true, connected: true, available: true }
+      : { configured: true, connected: false, available: false, error_category: `http_${response.status}` };
+  } catch (error) {
+    return {
+      configured: true,
+      connected: false,
+      available: false,
+      error_category: error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'unreachable',
+    };
   }
 };
 
@@ -1263,19 +1376,17 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     if (pathname === '/api/system-status' && method === 'GET') {
-      const officialUrl = env.APPROVED_FEE_STRUCTURE_PDF_URL || '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf';
-      const pdfAsset = env.ASSETS
-        ? await env.ASSETS.fetch(new Request(new URL('/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf', request.url), { method: 'HEAD' }))
-        : new Response(null, { status: 404 });
-      const hasPdfAsset = pdfAsset.ok;
+      const [supabaseHealth, resendHealth, r2Health, pdfHealth] = await Promise.all([
+        checkSupabaseHealth(env),
+        checkResendHealth(env),
+        checkR2Health(env),
+        checkPdfHealth(env, request),
+      ]);
       return json({
-        supabase: {
-          configured: Boolean(getSupabaseClient(env, true)),
-          url: getSupabaseUrl(env) ? `${getSupabaseUrl(env).slice(0, 15)}...` : 'Not set',
-        },
-        resend: { configured: Boolean(env.RESEND_API_KEY) },
-        r2_storage: { configured: Boolean(createR2Client(env) && env.CLOUDFLARE_R2_PUBLIC_URL) },
-        official_pdf: { configured: Boolean(env.APPROVED_FEE_STRUCTURE_PDF_URL || hasPdfAsset), url: officialUrl, exists_on_disk: hasPdfAsset },
+        supabase: supabaseHealth,
+        resend: resendHealth,
+        r2_storage: r2Health,
+        official_pdf: pdfHealth,
         server_time: new Date().toISOString(),
       });
     }
