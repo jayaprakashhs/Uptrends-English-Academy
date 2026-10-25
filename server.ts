@@ -384,6 +384,24 @@ async function uploadToR2(buffer: Buffer, key: string, contentType: string): Pro
   return R2_PUBLIC_URL ? `${R2_PUBLIC_URL}/${key}` : key;
 }
 
+function toSafeYouTubeUrl(url?: string | null): string | null {
+  if (!url) return null;
+  const value = url.trim();
+  if (!value) return null;
+  const videoIdMatch = value.match(/(?:youtu\.be\/|youtube\.com\/.*(?:v=|vi=|embed\/|shorts\/|live\/))([\w-]{11})/i);
+  if (videoIdMatch?.[1]) return `https://www.youtube.com/watch?v=${videoIdMatch[1]}`;
+  return value.startsWith('http') ? value : `https://${value}`;
+}
+
+function extractYouTubeVideoId(url?: string | null): string | null {
+  if (!url) return null;
+  const value = url.trim();
+  const idMatch = value.match(/(?:youtu\.be\/|youtube\.com\/.*(?:v=|vi=|embed\/|shorts\/|live\/))([\w-]{11})/i);
+  if (idMatch?.[1]) return idMatch[1];
+  if (/^[\w-]{11}$/.test(value)) return value;
+  return null;
+}
+
 // -------------------------------------------------------------
 // HELPER: RESEND TRANSACTIONAL EMAIL SENDER
 // -------------------------------------------------------------
@@ -534,6 +552,232 @@ app.get('/api/media', async (req, res) => {
     res.json(memoryStore.media.filter(m => m.is_published));
   } catch {
     res.json(memoryStore.media.filter(m => m.is_published));
+  }
+});
+
+app.get('/api/admin/media', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
+  try {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('media_items')
+        .select('*')
+        .order('display_order', { ascending: true });
+      if (!error && data) return res.json(data);
+    }
+    res.json(memoryStore.media || []);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Unable to load media items.' });
+  }
+});
+
+app.post('/api/admin/media', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
+  try {
+    const {
+      title,
+      caption,
+      alt_text,
+      media_type,
+      is_published,
+      display_order,
+      youtube_url,
+      cover_image_url,
+      media_file_base64,
+      media_file_mime,
+      media_url,
+    } = req.body || {};
+
+    if (!title || !title.trim()) {
+      return res.status(400).json({ error: 'Media title is required.' });
+    }
+
+    const normalizedType = media_type === 'video' ? 'video' : 'photo';
+    const cleanYoutube = toSafeYouTubeUrl(youtube_url || null);
+    const youtubeVideoId = extractYouTubeVideoId(cleanYoutube || youtube_url || null);
+
+    if (normalizedType === 'video' && !cleanYoutube && !youtubeVideoId) {
+      return res.status(400).json({ error: 'A valid YouTube URL is required for video entries.' });
+    }
+
+    let storedUrl = media_url || null;
+    let objectKey = null;
+    if (normalizedType === 'photo' && media_file_base64) {
+      const matches = media_file_base64.match(/^data:(image\/(png|jpeg|jpg|webp));base64,(.+)$/i);
+      if (!matches) {
+        return res.status(400).json({ error: 'Invalid image upload. Please use a valid PNG, JPG, or WebP image.' });
+      }
+      const mime = matches[1].toLowerCase();
+      const allowedMime = ['image/jpeg', 'image/png', 'image/webp'];
+      if (!allowedMime.includes(mime)) {
+        return res.status(400).json({ error: 'Unsupported photo format. Please upload JPEG, PNG, or WebP.' });
+      }
+      const base64Data = matches[3];
+      const buffer = Buffer.from(base64Data, 'base64');
+      if (buffer.length > 5 * 1024 * 1024) {
+        return res.status(400).json({ error: 'Photo upload exceeds 5 MB limit.' });
+      }
+      const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
+      const key = `media/${Date.now()}_${crypto.randomUUID()}.${ext}`;
+      const url = await uploadToR2(buffer, key, mime);
+      storedUrl = url;
+      objectKey = key;
+    }
+
+    const newItem = {
+      id: crypto.randomUUID(),
+      media_type: normalizedType,
+      title: title.trim(),
+      caption: caption || null,
+      r2_object_key: objectKey,
+      media_url: storedUrl,
+      youtube_url: cleanYoutube || null,
+      youtube_video_id: youtubeVideoId,
+      cover_image_url: cover_image_url || null,
+      alt_text: alt_text || title.trim(),
+      is_published: is_published !== false,
+      display_order: Number(display_order || 0),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    if (supabase) {
+      const { data, error } = await supabase.from('media_items').insert([newItem]).select().single();
+      if (error) return res.status(500).json({ error: error.message || 'Failed to create media item.' });
+      return res.json(data);
+    }
+
+    memoryStore.media.unshift(newItem);
+    return res.json(newItem);
+  } catch (err: any) {
+    console.error('[Admin Media Create Error]', err);
+    res.status(500).json({ error: err.message || 'Unable to save media item.' });
+  }
+});
+
+app.put('/api/admin/media/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
+  try {
+    const { id } = req.params;
+    const {
+      title,
+      caption,
+      alt_text,
+      media_type,
+      is_published,
+      display_order,
+      youtube_url,
+      cover_image_url,
+      media_file_base64,
+      media_file_mime,
+      media_url,
+    } = req.body || {};
+
+    let item: any = null;
+    if (supabase) {
+      const { data } = await supabase.from('media_items').select('*').eq('id', id).single();
+      item = data;
+    } else {
+      item = memoryStore.media.find((m) => m.id === id);
+    }
+
+    if (!item) {
+      return res.status(404).json({ error: 'Media item not found.' });
+    }
+
+    const nextType = media_type === 'video' ? 'video' : 'photo';
+    const nextYoutube = toSafeYouTubeUrl((youtube_url ?? item.youtube_url) || null);
+    const nextYoutubeId = extractYouTubeVideoId(nextYoutube || (youtube_url ?? item.youtube_url) || null);
+    let nextMediaUrl = media_url ?? item.media_url ?? null;
+    let nextObjectKey = item.r2_object_key ?? null;
+
+    if (nextType === 'photo' && media_file_base64) {
+      const matches = media_file_base64.match(/^data:(image\/(png|jpeg|jpg|webp));base64,(.+)$/i);
+      if (!matches) {
+        return res.status(400).json({ error: 'Invalid image upload. Please use a valid PNG, JPG, or WebP image.' });
+      }
+      const mime = matches[1].toLowerCase();
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime)) {
+        return res.status(400).json({ error: 'Unsupported photo format. Please upload JPEG, PNG, or WebP.' });
+      }
+      const buffer = Buffer.from(matches[3], 'base64');
+      if (buffer.length > 5 * 1024 * 1024) {
+        return res.status(400).json({ error: 'Photo upload exceeds 5 MB limit.' });
+      }
+      const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
+      const key = `media/${Date.now()}_${crypto.randomUUID()}.${ext}`;
+      const url = await uploadToR2(buffer, key, mime);
+      nextMediaUrl = url;
+      nextObjectKey = key;
+    }
+
+    const updates = {
+      title: title !== undefined ? String(title).trim() : item.title,
+      caption: caption !== undefined ? caption : item.caption,
+      alt_text: alt_text !== undefined ? alt_text : item.alt_text,
+      media_type: nextType,
+      media_url: nextMediaUrl,
+      r2_object_key: nextObjectKey,
+      youtube_url: nextYoutube || null,
+      youtube_video_id: nextYoutubeId,
+      cover_image_url: cover_image_url !== undefined ? cover_image_url : item.cover_image_url,
+      is_published: is_published !== undefined ? Boolean(is_published) : item.is_published,
+      display_order: display_order !== undefined ? Number(display_order) : item.display_order,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (supabase) {
+      const { data, error } = await supabase.from('media_items').update(updates).eq('id', id).select().single();
+      if (error) return res.status(500).json({ error: error.message || 'Failed to update media item.' });
+      return res.json(data);
+    }
+
+    const idx = memoryStore.media.findIndex((m) => m.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'Media item not found.' });
+    memoryStore.media[idx] = { ...memoryStore.media[idx], ...updates };
+    return res.json(memoryStore.media[idx]);
+  } catch (err: any) {
+    console.error('[Admin Media Update Error]', err);
+    res.status(500).json({ error: err.message || 'Unable to update media item.' });
+  }
+});
+
+app.delete('/api/admin/media/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+
+  try {
+    const { id } = req.params;
+    if (supabase) {
+      const { data: existing } = await supabase.from('media_items').select('*').eq('id', id).single();
+      if (existing?.r2_object_key && r2Client) {
+        try {
+          await r2Client.send(new (await import('@aws-sdk/client-s3')).DeleteObjectCommand({
+            Bucket: R2_BUCKET,
+            Key: existing.r2_object_key,
+          }));
+        } catch (deleteErr) {
+          console.warn('[R2 delete warning]', deleteErr);
+        }
+      }
+      const { error } = await supabase.from('media_items').delete().eq('id', id);
+      if (error) return res.status(500).json({ error: error.message || 'Unable to delete media item.' });
+      return res.json({ success: true, message: 'Media item deleted.' });
+    }
+
+    const idx = memoryStore.media.findIndex((m) => m.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'Media item not found.' });
+    memoryStore.media.splice(idx, 1);
+    return res.json({ success: true, message: 'Media item deleted.' });
+  } catch (err: any) {
+    console.error('[Admin Media Delete Error]', err);
+    res.status(500).json({ error: err.message || 'Unable to delete media item.' });
   }
 });
 

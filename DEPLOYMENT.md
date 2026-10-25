@@ -110,9 +110,40 @@ npm run dev
 # Lint code for TypeScript correctness
 npm run lint
 
-# Build client assets for production
+# Build the Worker and client assets for production
 npm run build
 
-# Start production server
+# Start the local Express server
 npm run start
 ```
+
+---
+
+## 8. Cloudflare Worker API Migration & Safe Testing
+
+The Cloudflare Worker API is implemented in `worker-api.ts`; `worker.ts` handles API dispatch and static assets. For local Worker testing, put Worker runtime bindings below in an untracked `.dev.vars` file. The browser Supabase client separately requires `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` at Vite build time; provide those public values in the build environment or an ignored `.env.production.local`. Cloudflare Worker settings are runtime-only and do not populate the browser bundle. Never put `SUPABASE_SERVICE_ROLE_KEY`, R2 credentials, or Resend credentials in any `VITE_*` variable, and do not commit local env files or log secret values.
+
+```env
+VITE_SUPABASE_URL="https://your-project.supabase.co"
+VITE_SUPABASE_ANON_KEY="your-anon-key"
+SUPABASE_SERVICE_ROLE_KEY="your-service-role-key"
+CLOUDFLARE_R2_ACCOUNT_ID="your-account-id"
+CLOUDFLARE_R2_ACCESS_KEY_ID="your-r2-access-key"
+CLOUDFLARE_R2_SECRET_ACCESS_KEY="your-r2-secret-key"
+CLOUDFLARE_R2_BUCKET_NAME="uptrends-academy-media"
+CLOUDFLARE_R2_PUBLIC_URL="https://media.example.com"
+RESEND_API_KEY="your-resend-key"
+RESEND_FROM_EMAIL="admissions@example.com"
+APPLICATION_NOTIFICATION_EMAIL="test-inbox@example.com"
+APPROVED_FEE_STRUCTURE_PDF_URL="https://example.com/Uptrends_Fee_Structure_and_Terms.pdf"
+```
+
+Start Wrangler locally with `npx wrangler dev --local --port 8787`. First verify non-mutating requests: public GET endpoints return JSON arrays/objects from Supabase, `GET /api/apply` returns `405` with `Allow: POST`, and an admin GET without a bearer token returns `401` when server credentials are configured. With no credentials, database-dependent endpoints should return JSON `503`, not sample data.
+
+Before deploying, add the Worker runtime bindings in Cloudflare Worker Settings. Set `SUPABASE_SERVICE_ROLE_KEY`, the R2 access/secret keys, and `RESEND_API_KEY` as encrypted secrets. Set `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, R2 account ID/bucket/public URL, email sender/recipient, and optional PDF URL as Worker variables. Separately make `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` available to the machine/CI job running `npm run deploy`, because Vite embeds these public values into the client bundle at build time. The anon key is intentionally public; the service-role key is not. `wrangler.json` declares the `ASSETS` binding. The Worker uses the S3-compatible R2 API through Smithy's Fetch handler, so no Node compatibility flag or public R2 binding is required. API calls are same-origin only; cross-origin requests are rejected and no wildcard CORS policy is enabled.
+
+The source Worker entry is `worker.ts`. Vite builds the deployable bundle and generates `dist/uptrends_english_academy/wrangler.json`, whose `main` is the compiled Worker and whose assets directory points at `dist/client`. After review and configuration, `npm run deploy` builds first and deploys using that generated config. Do not deploy using the root `wrangler.json` directly; it is the Vite plugin's source configuration, not the final bundle/assets layout.
+
+Use a staging Supabase project, a dedicated test R2 bucket, and a Resend test/verified recipient for mutation checks. Submit one test application, callback, and contact enquiry; verify their database records and notification/email outcomes. For gallery testing, create a small JPEG/PNG/WebP photo, verify its `media_items.r2_object_key` and `media_url`, then delete it and verify both the row and R2 object are removed. Also create/edit a YouTube entry with a valid URL and reject an invalid URL. These actions create records, upload files, and can send email; do not run them against production as smoke tests.
+
+Review CRUD is implemented in the Worker and the existing Reviews tab: staff can list, create, edit, publish/unpublish, and delete reviews using the schema's `author_name`, `rating`, `review_text`, `source`, and `is_published` fields. The original Express backend had no review mutation handlers; this added surface follows the existing reviews table and staff RLS policy.

@@ -7,38 +7,21 @@ interface AnnouncementBannerProps {
 }
 
 export const AnnouncementBanner: React.FC<AnnouncementBannerProps> = ({ initialAnnouncements }) => {
-  const [announcements, setAnnouncements] = useState<Announcement[]>(
-    initialAnnouncements || [
-      {
-        id: '1',
-        content: "Welcome to Uptrend's English Academy, Davangere! Admissions are open for Spoken English & Communication training.",
-        is_active: true,
-        display_order: 1,
-      },
-      {
-        id: '2',
-        content: "Visit our campus at Ram And Co Circle, Devi Building, 2nd Floor, Davangere or call +91 900 8000 211.",
-        is_active: true,
-        display_order: 2,
-      },
-      {
-        id: '3',
-        content: "Practical conversation practice and grammar fundamentals tailored for students, professionals, and homemakers.",
-        is_active: true,
-        display_order: 3,
-      },
-    ]
-  );
+  const [announcements, setAnnouncements] = useState<Announcement[]>(initialAnnouncements || []);
 
   useEffect(() => {
     fetch('/api/announcements')
-      .then((res) => res.json())
-      .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setAnnouncements(data.filter((item: Announcement) => item.is_active));
-        }
+      .then((res) => {
+        if (!res.ok) throw new Error(`Announcement request failed (${res.status}).`);
+        return res.json();
       })
-      .catch((err) => console.error('Failed to load announcements:', err));
+      .then((data) => {
+        setAnnouncements(Array.isArray(data) ? data.filter((item: Announcement) => item.is_active) : []);
+      })
+      .catch((err) => {
+        console.error('Failed to load announcements:', err);
+        setAnnouncements([]);
+      });
   }, []);
 
   if (announcements.length === 0) return null;

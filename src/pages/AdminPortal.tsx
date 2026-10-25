@@ -68,12 +68,25 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [programs, setPrograms] = useState<Program[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
+  const [editingReview, setEditingReview] = useState<Partial<Review> | null>(null);
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [systemStatus, setSystemStatus] = useState<any>(null);
   const [branding, setBranding] = useState<SiteBranding | null>(null);
   const [editingBranding, setEditingBranding] = useState<Partial<SiteBranding> | null>(null);
   const [adminProfiles, setAdminProfiles] = useState<AdminProfile[]>([]);
+  const [mediaForm, setMediaForm] = useState<Partial<MediaItem> & { media_file_base64?: string; media_file_mime?: string }>({
+    media_type: 'photo',
+    title: '',
+    caption: '',
+    alt_text: '',
+    youtube_url: '',
+    cover_image_url: '',
+    is_published: true,
+    display_order: 0,
+  });
+  const [editingMediaId, setEditingMediaId] = useState<string | null>(null);
+  const [mediaError, setMediaError] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -131,11 +144,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         fetch('/api/admin/notifications', { headers }).then((r) => r.json()),
         fetch('/api/admin/callbacks', { headers }).then((r) => r.json()),
         fetch('/api/admin/contacts', { headers }).then((r) => r.json()),
-        fetch('/api/programs').then((r) => r.json()),
-        fetch('/api/announcements').then((r) => r.json()),
-        fetch('/api/reviews').then((r) => r.json()),
-        fetch('/api/media').then((r) => r.json()),
-        fetch('/api/faqs').then((r) => r.json()),
+        fetch(isAdminOrHigher ? '/api/admin/programs' : '/api/programs', isAdminOrHigher ? { headers } : undefined).then((r) => r.json()),
+        fetch(isAdminOrHigher ? '/api/admin/announcements' : '/api/announcements', isAdminOrHigher ? { headers } : undefined).then((r) => r.json()),
+        fetch('/api/admin/reviews', { headers }).then((r) => r.json()),
+        fetch('/api/admin/media', { headers }).then((r) => r.json()),
+        isSuperAdmin
+          ? fetch('/api/admin/faqs', { headers }).then((r) => r.json())
+          : fetch('/api/faqs').then((r) => r.json()),
         fetch('/api/system-status').then((r) => r.json()),
         fetch('/api/branding').then((r) => r.json()),
         isSuperAdmin
@@ -155,7 +170,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       if (sysRes) setSystemStatus(sysRes);
       if (brandingRes && brandingRes.academy_name) {
         setBranding(brandingRes);
-        setEditingBranding(brandingRes);
+        setEditingBranding({
+          ...brandingRes,
+          main_logo_alt: brandingRes.logo_alt || brandingRes.main_logo_alt,
+          primary_color: brandingRes.primary_orange || brandingRes.primary_color,
+          secondary_color: brandingRes.primary_green || brandingRes.secondary_color,
+        });
       }
       if (Array.isArray(profilesRes)) setAdminProfiles(profilesRes);
     } catch (err: any) {
@@ -264,7 +284,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         headers: getAuthHeaders(),
         body: JSON.stringify(editingProgram),
       });
-      if (!res.ok) throw new Error('Failed to save program');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save program');
       setEditingProgram(null);
       setActionMessage({ type: 'success', text: 'Program updated successfully!' });
       await fetchAllData();
@@ -310,7 +331,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         headers: getAuthHeaders(),
         body: JSON.stringify(editingAnnouncement),
       });
-      if (!res.ok) throw new Error('Failed to save announcement');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save announcement');
       setEditingAnnouncement(null);
       setActionMessage({ type: 'success', text: 'Announcement updated successfully!' });
       await fetchAllData();
@@ -338,6 +360,48 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveReview = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingReview) return;
+    setLoading(true);
+    try {
+      const url = editingReview.id ? `/api/admin/reviews/${editingReview.id}` : '/api/admin/reviews';
+      const res = await fetch(url, {
+        method: editingReview.id ? 'PUT' : 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(editingReview),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Unable to save review.');
+      setEditingReview(null);
+      setActionMessage({ type: 'success', text: 'Review saved.' });
+      await fetchAllData();
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to save review.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteReview = async (id: string) => {
+    if (!confirm('Delete this review?')) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/admin/reviews/${id}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Unable to delete review.');
+      setActionMessage({ type: 'success', text: 'Review deleted.' });
+      await fetchAllData();
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to delete review.' });
     } finally {
       setLoading(false);
     }
@@ -386,6 +450,132 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     }
   };
 
+  const resetMediaForm = () => {
+    setMediaForm({
+      media_type: 'photo',
+      title: '',
+      caption: '',
+      alt_text: '',
+      youtube_url: '',
+      cover_image_url: '',
+      is_published: true,
+      display_order: 0,
+    });
+    setEditingMediaId(null);
+    setMediaError(null);
+  };
+
+  const handleMediaFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setMediaError('Please upload a valid image file for photo entries.');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setMediaError('Photo uploads must be under 5 MB.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setMediaError(null);
+      setMediaForm((prev) => ({
+        ...prev,
+        media_file_base64: String(reader.result || ''),
+        media_file_mime: file.type,
+      }));
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSaveMedia = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    setMediaError(null);
+
+    try {
+      const payload = {
+        ...mediaForm,
+        media_type: mediaForm.media_type || 'photo',
+        title: mediaForm.title?.trim(),
+        caption: mediaForm.caption?.trim() || '',
+        alt_text: mediaForm.alt_text?.trim() || mediaForm.title?.trim() || '',
+        youtube_url: mediaForm.youtube_url?.trim() || '',
+        cover_image_url: mediaForm.cover_image_url?.trim() || '',
+        is_published: mediaForm.is_published !== false,
+        display_order: Number(mediaForm.display_order || 0),
+      };
+
+      if (!payload.title) {
+        throw new Error('Media title is required.');
+      }
+
+      if (payload.media_type === 'video' && !payload.youtube_url) {
+        throw new Error('Video entries need a valid YouTube URL.');
+      }
+
+      const url = editingMediaId ? `/api/admin/media/${editingMediaId}` : '/api/admin/media';
+      const method = editingMediaId ? 'PUT' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save media entry.');
+
+      setActionMessage({ type: 'success', text: editingMediaId ? 'Media item updated successfully.' : 'Media item created successfully.' });
+      resetMediaForm();
+      await fetchAllData();
+    } catch (err: any) {
+      setMediaError(err.message || 'Unable to save media item.');
+      setActionMessage({ type: 'error', text: err.message || 'Unable to save media item.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteMedia = async (itemId: string) => {
+    if (!confirm('Delete this media item? This cannot be undone.')) return;
+
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/admin/media/${itemId}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete media item.');
+      setActionMessage({ type: 'success', text: 'Media item deleted.' });
+      await fetchAllData();
+      if (editingMediaId === itemId) resetMediaForm();
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to delete media item.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleToggleMediaPublished = async (item: MediaItem) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/admin/media/${item.id}`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ ...item, is_published: !item.is_published }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update publication status.');
+      setActionMessage({ type: 'success', text: `Media marked as ${!item.is_published ? 'published' : 'draft'}.` });
+      await fetchAllData();
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to update media status.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Navigation Items according to role
   const navItems = [
     { id: 'dashboard', label: 'Dashboard Overview', icon: LayoutDashboard, minRole: 'staff' },
@@ -396,7 +586,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     { id: 'programs', label: 'Programs Management', icon: BookOpen, minRole: 'admin' },
     { id: 'media', label: 'Media Gallery', icon: Video, minRole: 'admin' },
     { id: 'announcements', label: 'Announcements', icon: Volume2, minRole: 'admin' },
-    { id: 'branding', label: 'Site Branding & Assets', icon: Palette, minRole: 'admin' },
+    { id: 'branding', label: 'Site Branding & Assets', icon: Palette, minRole: 'super_admin' },
     { id: 'faqs', label: 'FAQs Management', icon: HelpCircle, minRole: 'super_admin' },
     { id: 'notifications', label: 'Email Outbox & Retries', icon: Send, minRole: 'super_admin' },
     { id: 'roles', label: 'Admin Roles & Access', icon: ShieldCheck, minRole: 'super_admin' },
@@ -656,7 +846,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
                       <span className="font-semibold text-slate-700">Database & Persistence</span>
                       <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
-                        {systemStatus?.supabase?.configured ? 'Supabase Connected' : 'Local Fallback Active'}
+                        {systemStatus?.supabase?.configured ? 'Supabase Configured' : 'Supabase Not Configured'}
                       </span>
                     </div>
 
@@ -682,7 +872,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             : 'bg-slate-200 text-slate-700'
                         }`}
                       >
-                        {systemStatus?.r2_storage?.configured ? 'R2 Connected' : 'Local Uploads Active'}
+                        {systemStatus?.r2_storage?.configured ? 'R2 Configured' : 'R2 Not Configured'}
                       </span>
                     </div>
 
@@ -921,6 +1111,75 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             </div>
           )}
 
+          {activeTab === 'reviews' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h1 className="text-2xl font-extrabold text-slate-950">Review Management</h1>
+                  <p className="text-xs text-slate-500 mt-1">Create reviews and control which ones appear publicly.</p>
+                </div>
+                <button
+                  onClick={() => setEditingReview({ author_name: '', rating: 5, review_text: '', source: 'Verified Student Review', is_published: true })}
+                  className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Add Review</span>
+                </button>
+              </div>
+
+              {editingReview && (
+                <form onSubmit={handleSaveReview} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <label className="space-y-1 text-xs font-semibold text-slate-700">
+                      <span>Author name</span>
+                      <input required maxLength={300} value={editingReview.author_name || ''} onChange={(event) => setEditingReview({ ...editingReview, author_name: event.target.value })} className="w-full px-3 py-2 border border-slate-200 rounded-lg" />
+                    </label>
+                    <label className="space-y-1 text-xs font-semibold text-slate-700">
+                      <span>Rating (1 to 5)</span>
+                      <input required type="number" min={1} max={5} value={editingReview.rating ?? 5} onChange={(event) => setEditingReview({ ...editingReview, rating: Number(event.target.value) })} className="w-full px-3 py-2 border border-slate-200 rounded-lg" />
+                    </label>
+                  </div>
+                  <label className="block space-y-1 text-xs font-semibold text-slate-700">
+                    <span>Review</span>
+                    <textarea required maxLength={10000} rows={4} value={editingReview.review_text || ''} onChange={(event) => setEditingReview({ ...editingReview, review_text: event.target.value })} className="w-full px-3 py-2 border border-slate-200 rounded-lg" />
+                  </label>
+                  <label className="block space-y-1 text-xs font-semibold text-slate-700">
+                    <span>Source</span>
+                    <input maxLength={300} value={editingReview.source || ''} onChange={(event) => setEditingReview({ ...editingReview, source: event.target.value })} className="w-full px-3 py-2 border border-slate-200 rounded-lg" />
+                  </label>
+                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                    <input type="checkbox" checked={editingReview.is_published !== false} onChange={(event) => setEditingReview({ ...editingReview, is_published: event.target.checked })} />
+                    Published on the public site
+                  </label>
+                  <div className="flex gap-2">
+                    <button disabled={loading} type="submit" className="px-4 py-2 bg-orange-600 text-white text-xs font-bold rounded-lg disabled:opacity-60">{loading ? 'Saving...' : editingReview.id ? 'Save Review' : 'Create Review'}</button>
+                    <button type="button" onClick={() => setEditingReview(null)} className="px-4 py-2 bg-slate-100 text-slate-700 text-xs font-bold rounded-lg">Cancel</button>
+                  </div>
+                </form>
+              )}
+
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs divide-y divide-slate-100">
+                {reviews.length ? reviews.map((review) => (
+                  <div key={review.id} className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <strong className="text-slate-900">{review.author_name}</strong>
+                        <span className="text-amber-700 font-semibold">{review.rating}/5</span>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${review.is_published ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'}`}>{review.is_published ? 'Published' : 'Draft'}</span>
+                      </div>
+                      <p className="text-slate-600">{review.review_text}</p>
+                      {review.source && <p className="text-slate-400">{review.source}</p>}
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <button onClick={() => setEditingReview(review)} className="font-bold text-orange-600 hover:underline">Edit</button>
+                      <button onClick={() => handleDeleteReview(review.id)} className="font-bold text-rose-600 hover:underline">Delete</button>
+                    </div>
+                  </div>
+                )) : <p className="p-8 text-center text-xs text-slate-400">No reviews found.</p>}
+              </div>
+            </div>
+          )}
+
           {/* TAB 5: PROGRAMS MANAGEMENT (Admin/Super Admin only) */}
           {activeTab === 'programs' && (
             <div className="space-y-6">
@@ -988,6 +1247,236 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 6: MEDIA GALLERY MANAGEMENT */}
+          {activeTab === 'media' && (
+            <div className="space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h1 className="text-2xl font-extrabold text-slate-950">Media Gallery Management</h1>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Manage published and draft photo and YouTube video entries for the public academy gallery.
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    resetMediaForm();
+                    setActiveTab('media');
+                  }}
+                  className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Add Media</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-6">
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-lg font-bold text-slate-900">All Media Entries</h2>
+                    <span className="text-[11px] font-bold text-slate-500">{mediaItems.length} total</span>
+                  </div>
+
+                  <div className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
+                    {mediaItems.length > 0 ? (
+                      mediaItems.map((item) => (
+                        <div key={item.id} className="border border-slate-200 rounded-2xl p-3">
+                          <div className="flex items-start gap-3">
+                            <div className="w-20 h-16 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 shrink-0">
+                              <img
+                                src={item.media_type === 'video' ? (item.cover_image_url || item.media_url || `https://img.youtube.com/vi/${item.youtube_video_id || 'dQw4w9WgXcQ'}/hqdefault.jpg`) : (item.cover_image_url || item.media_url || '')}
+                                alt={item.alt_text || item.title}
+                                className="w-full h-full object-cover"
+                              />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="font-bold text-slate-900 text-sm truncate">{item.title}</p>
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${item.is_published ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'}`}>
+                                  {item.is_published ? 'Published' : 'Draft'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-500 mt-1">{item.media_type === 'video' ? 'YouTube video' : 'Photo'} • Order {item.display_order || 0}</p>
+                              <p className="text-[11px] text-slate-600 mt-2 line-clamp-2">{item.caption || 'No caption set.'}</p>
+                            </div>
+                          </div>
+
+                          <div className="mt-3 flex items-center justify-end gap-2">
+                            <button
+                              onClick={() => handleToggleMediaPublished(item)}
+                              className="px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-700 font-semibold text-[11px] cursor-pointer"
+                            >
+                              {item.is_published ? 'Unpublish' : 'Publish'}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditingMediaId(item.id);
+                                setMediaForm({
+                                  ...item,
+                                  media_file_base64: '',
+                                  media_file_mime: '',
+                                });
+                                setMediaError(null);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-orange-50 text-orange-700 font-semibold text-[11px] cursor-pointer"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => handleDeleteMedia(item.id)}
+                              className="px-2.5 py-1.5 rounded-lg bg-rose-50 text-rose-700 font-semibold text-[11px] cursor-pointer"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center py-12 text-slate-400 text-xs">No media entries found yet.</div>
+                    )}
+                  </div>
+                </div>
+
+                <form onSubmit={handleSaveMedia} className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-bold text-slate-900">{editingMediaId ? 'Edit Media' : 'Add Media'}</h2>
+                    {editingMediaId && (
+                      <button
+                        type="button"
+                        onClick={resetMediaForm}
+                        className="text-[11px] font-semibold text-slate-500 hover:text-slate-700"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-[11px] font-bold text-slate-700">Type</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setMediaForm((prev) => ({ ...prev, media_type: 'photo' }))}
+                        className={`px-3 py-2 rounded-xl border text-xs font-semibold ${mediaForm.media_type === 'photo' ? 'bg-orange-600 text-white border-orange-600' : 'bg-slate-50 text-slate-700 border-slate-200'}`}
+                      >
+                        Photo
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setMediaForm((prev) => ({ ...prev, media_type: 'video' }))}
+                        className={`px-3 py-2 rounded-xl border text-xs font-semibold ${mediaForm.media_type === 'video' ? 'bg-orange-600 text-white border-orange-600' : 'bg-slate-50 text-slate-700 border-slate-200'}`}
+                      >
+                        YouTube Video
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Title</label>
+                    <input
+                      type="text"
+                      value={mediaForm.title || ''}
+                      onChange={(e) => setMediaForm((prev) => ({ ...prev, title: e.target.value }))}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      placeholder="Classroom session / Student speaking practice"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Caption</label>
+                    <textarea
+                      value={mediaForm.caption || ''}
+                      onChange={(e) => setMediaForm((prev) => ({ ...prev, caption: e.target.value }))}
+                      rows={3}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                    />
+                  </div>
+
+                  {mediaForm.media_type === 'photo' ? (
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Upload Photo</label>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={handleMediaFileChange}
+                        className="w-full text-[11px] text-slate-600"
+                      />
+                      {mediaForm.media_url && (
+                        <div className="mt-2 rounded-xl overflow-hidden border border-slate-200">
+                          <img src={mediaForm.media_url} alt={mediaForm.alt_text || mediaForm.title || 'Media preview'} className="w-full h-36 object-cover" />
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">YouTube URL</label>
+                        <input
+                          type="url"
+                          value={mediaForm.youtube_url || ''}
+                          onChange={(e) => setMediaForm((prev) => ({ ...prev, youtube_url: e.target.value }))}
+                          className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                          placeholder="https://www.youtube.com/watch?v=..."
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Cover Image URL (optional)</label>
+                        <input
+                          type="url"
+                          value={mediaForm.cover_image_url || ''}
+                          onChange={(e) => setMediaForm((prev) => ({ ...prev, cover_image_url: e.target.value }))}
+                          className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                          placeholder="https://example.com/cover.jpg"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Alt Text</label>
+                      <input
+                        type="text"
+                        value={mediaForm.alt_text || ''}
+                        onChange={(e) => setMediaForm((prev) => ({ ...prev, alt_text: e.target.value }))}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Display Order</label>
+                      <input
+                        type="number"
+                        value={mediaForm.display_order ?? 0}
+                        onChange={(e) => setMediaForm((prev) => ({ ...prev, display_order: Number(e.target.value) }))}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-[11px] font-semibold text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={mediaForm.is_published !== false}
+                      onChange={(e) => setMediaForm((prev) => ({ ...prev, is_published: e.target.checked }))}
+                    />
+                    Published on the public gallery
+                  </label>
+
+                  {mediaError && (
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 text-rose-700 text-[11px] px-3 py-2">{mediaError}</div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="w-full px-4 py-2.5 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl cursor-pointer disabled:opacity-60"
+                  >
+                    {loading ? 'Saving...' : editingMediaId ? 'Update Media Entry' : 'Save Media Entry'}
+                  </button>
+                </form>
               </div>
             </div>
           )}
