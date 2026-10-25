@@ -3,10 +3,10 @@ import test from 'node:test';
 import { fetchSystemStatus, type SystemStatus } from '../src/lib/systemStatus';
 
 const validStatus: SystemStatus = {
-  supabase: { configured: true, connected: true },
+  supabase: { configured: true, connected: true, error_category: null },
   resend: { configured: false, connected: false, error_category: 'missing_configuration' },
   r2_storage: { configured: true, connected: false, error_category: 'permission_denied' },
-  official_pdf: { configured: true, connected: true, available: true },
+  official_pdf: { configured: true, connected: true, available: true, error_category: null },
   server_time: '2026-10-25T07:09:21.865Z',
 };
 

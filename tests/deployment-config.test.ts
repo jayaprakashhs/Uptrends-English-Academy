@@ -11,10 +11,10 @@ test('Wrangler deploy config targets the production Worker and preserves dashboa
     name?: string;
     keep_vars?: boolean;
   };
-  assert.equal(config.name, 'uptrend-english-academy');
+  assert.equal(config.name, 'uptrends-english-academy');
   assert.equal(config.keep_vars, true);
 });
 
 test('deploy script uses the Wrangler config actually emitted by Vite', () => {
-  assert.match(packageJson.scripts.deploy, /dist\/uptrend_english_academy\/wrangler\.json/);
+  assert.match(packageJson.scripts.deploy, /dist\/uptrends_english_academy\/wrangler\.json/);
 });

@@ -1,7 +1,7 @@
 export interface IntegrationHealth {
   configured: boolean;
   connected: boolean;
-  error_category?: string;
+  error_category?: string | null;
   available?: boolean;
 }
 
@@ -22,7 +22,7 @@ const isIntegrationHealth = (value: unknown): value is IntegrationHealth =>
   isRecord(value) &&
   typeof value.configured === 'boolean' &&
   typeof value.connected === 'boolean' &&
-  (value.error_category === undefined || typeof value.error_category === 'string') &&
+  (value.error_category === undefined || value.error_category === null || typeof value.error_category === 'string') &&
   (value.available === undefined || typeof value.available === 'boolean');
 
 export const isSystemStatus = (value: unknown): value is SystemStatus =>

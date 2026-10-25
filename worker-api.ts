@@ -120,7 +120,7 @@ const getSupabaseClient = (
 interface IntegrationHealth {
   configured: boolean;
   connected: boolean;
-  error_category?: string;
+  error_category?: string | null;
 }
 
 const supabaseErrorCategory = (error: unknown): string => {
@@ -140,7 +140,7 @@ const checkSupabaseHealth = async (env: Env): Promise<IntegrationHealth> => {
   try {
     const { error } = await client.from('site_branding').select('id').limit(1).abortSignal(AbortSignal.timeout(5000));
     if (error) return { configured: true, connected: false, error_category: supabaseErrorCategory(error) };
-    return { configured: true, connected: true };
+    return { configured: true, connected: true, error_category: null };
   } catch (error) {
     return {
       configured: true,
@@ -160,7 +160,7 @@ const checkResendHealth = async (env: Env): Promise<IntegrationHealth> => {
       headers: { Authorization: `Bearer ${env.RESEND_API_KEY}` },
       signal: AbortSignal.timeout(5000),
     });
-    if (response.ok) return { configured: true, connected: true };
+    if (response.ok) return { configured: true, connected: true, error_category: null };
     return {
       configured: true,
       connected: false,
@@ -210,7 +210,7 @@ const checkR2Health = async (env: Env): Promise<IntegrationHealth> => {
       new HeadBucketCommand({ Bucket: env.CLOUDFLARE_R2_BUCKET_NAME || 'uptrends-academy-media' }),
       { abortSignal: AbortSignal.timeout(5000) },
     );
-    return { configured: true, connected: true };
+    return { configured: true, connected: true, error_category: null };
   } catch (error) {
     const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
     return {

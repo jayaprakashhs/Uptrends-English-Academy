@@ -81,11 +81,17 @@ test('system status recognizes all documented runtime bindings as configured', a
         ASSETS: { fetch: async () => new Response(null, { status: 200 }) },
       });
       assert.equal(response.status, 200);
-      const body = await response.json() as Record<string, { configured: boolean; connected: boolean }>;
-      for (const service of ['supabase', 'resend', 'r2_storage', 'official_pdf']) {
+      const body = await response.json() as Record<string, {
+        configured: boolean;
+        connected: boolean;
+        error_category: string | null;
+      }>;
+      for (const service of ['supabase', 'resend', 'r2_storage']) {
         assert.equal(body[service].configured, true, service);
         assert.equal(body[service].connected, true, service);
+        assert.equal(body[service].error_category, null, service);
       }
+      assert.deepEqual(body.official_pdf, { configured: true, connected: true, available: true });
       return captured;
     });
     const bindingPresence = logs.find((line) => line.includes('"event":"worker_binding_presence"'));
