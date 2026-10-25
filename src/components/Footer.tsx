@@ -26,12 +26,14 @@ export const Footer: React.FC<FooterProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-12 mb-12">
           {/* Column 1: Brand & Purpose */}
           <div className="space-y-4">
-            <Logo
-              variant="white"
-              size="md"
+            <div className="flex justify-center">
+              <Logo
+                variant="white"
+              size="lg"
               logoUrl={branding?.footer_logo_url || branding?.logo_url}
-              altText={branding?.main_logo_alt || branding?.logo_alt}
-            />
+                altText={branding?.main_logo_alt || branding?.logo_alt}
+              />
+            </div>
             <p className="text-sm text-slate-400 leading-relaxed pt-2">
               Davangere’s dedicated training center for spoken English, grammar fundamentals, and professional communication skills. Over two decades of empowering confident speakers.
             </p>

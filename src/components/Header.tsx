@@ -1,7 +1,14 @@
+
 import React, { useState } from 'react';
 import { Logo } from './Logo';
-import { Menu, X, PhoneCall, ArrowRight, ShieldCheck, Phone } from 'lucide-react';
-
+import {
+  Menu,
+  X,
+  PhoneCall,
+  ArrowRight,
+  ShieldCheck,
+  Phone,
+} from 'lucide-react';
 import { SiteBranding } from '../types';
 
 interface HeaderProps {
@@ -36,65 +43,75 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/80 transition-all shadow-xs">
-      {/* Top quick-contact micro bar */}
-      <div className="hidden lg:block bg-slate-900 text-slate-300 py-1.5 px-4 text-xs font-medium">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-6">
-            <span className="flex items-center gap-1.5 text-slate-300">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+    <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/95 shadow-xs backdrop-blur-md">
+      {/* Top contact bar — separate from the 80px main navigation */}
+      <div className="hidden bg-slate-900 px-4 py-1.5 text-xs font-medium text-slate-300 lg:block">
+        <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <span className="flex items-center gap-1.5 whitespace-nowrap">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
               Admissions Open in Davangere
             </span>
+
             <span className="text-slate-500">|</span>
+
             <a
               href="tel:+919008000211"
-              className="flex items-center gap-1.5 hover:text-white transition-colors"
+              className="flex items-center gap-1.5 whitespace-nowrap transition-colors hover:text-white"
             >
-              <Phone className="w-3.5 h-3.5 text-orange-400" />
+              <Phone className="h-3.5 w-3.5 text-orange-400" />
               +91 900 8000 211
             </a>
+
             <span className="text-slate-500">|</span>
-            <span>Mon–Sat: 8:00 AM – 8:30 PM (Sun Closed)</span>
+
+            <span className="whitespace-nowrap">
+              Mon–Sat: 8:00 AM – 8:30 PM (Sun Closed)
+            </span>
           </div>
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => handleNavigate('admin')}
-              className="flex items-center gap-1 text-slate-400 hover:text-orange-400 transition-colors text-xs"
-            >
-              <ShieldCheck className="w-3.5 h-3.5" />
-              Admin Portal
-            </button>
-          </div>
+
+          <button
+            onClick={() => handleNavigate('admin')}
+            className="flex shrink-0 items-center gap-1 text-xs text-slate-400 transition-colors hover:text-orange-400"
+          >
+            <ShieldCheck className="h-3.5 w-3.5" />
+            Admin Portal
+          </button>
         </div>
       </div>
 
-      {/* Main Navigation Bar */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-20">
-          {/* Logo */}
+      {/* Main navigation — exactly 80px high */}
+      <div className="mx-auto max-w-[1600px] px-3 sm:px-5 2xl:px-8">
+        <div className="flex h-20 items-center gap-4">
+          {/* Main logo */}
           <button
             onClick={() => handleNavigate('home')}
-            className="flex items-center text-left focus:outline-hidden focus:ring-2 focus:ring-orange-500 rounded-lg p-1"
+            aria-label="Go to home page"
+            className="flex shrink-0 items-center rounded-lg p-1 text-left focus:outline-none focus:ring-2 focus:ring-orange-500"
           >
             <Logo
-              size="md"
+              size="lg"
               logoUrl={branding?.logo_url}
               altText={branding?.main_logo_alt || branding?.logo_alt}
             />
           </button>
 
-          {/* Desktop Nav Links */}
-          <nav className="hidden xl:flex items-center space-x-1">
+          {/* Desktop navigation: sequential horizontal links */}
+          <nav
+            aria-label="Main navigation"
+            className="hidden min-w-0 flex-1 items-center justify-evenly gap-1 lg:flex"
+          >
             {navLinks.map((link) => {
               const isActive = currentPage === link.id;
+
               return (
                 <button
                   key={link.id}
                   onClick={() => handleNavigate(link.id)}
-                  className={`px-3.5 py-2 rounded-lg text-sm font-semibold transition-colors duration-150 cursor-pointer ${
+                  className={`shrink-0 whitespace-nowrap rounded-lg px-2 py-2 text-sm font-semibold transition-colors 2xl:px-3 ${
                     isActive
-                      ? 'text-orange-600 bg-orange-50/80 font-bold'
-                      : 'text-slate-700 hover:text-orange-600 hover:bg-slate-50'
+                      ? 'bg-orange-50 text-orange-600'
+                      : 'text-slate-700 hover:bg-slate-50 hover:text-orange-600'
                   }`}
                 >
                   {link.label}
@@ -103,91 +120,105 @@ export const Header: React.FC<HeaderProps> = ({
             })}
           </nav>
 
-          {/* Action Buttons */}
-          <div className="hidden md:flex items-center gap-3">
+          {/* Desktop action buttons */}
+          <div className="hidden shrink-0 items-center gap-2 xl:flex 2xl:gap-3">
             <button
               onClick={() => openCallbackModal()}
-              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-semibold text-slate-700 hover:text-orange-600 border border-slate-300 hover:border-orange-500 bg-white transition-all shadow-xs cursor-pointer"
+              className="inline-flex items-center gap-2 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-xs transition-all hover:border-orange-500 hover:text-orange-600"
             >
-              <PhoneCall className="w-4 h-4 text-orange-600" />
+              <PhoneCall className="h-4 w-4 text-orange-600" />
               <span>Request a Call</span>
             </button>
 
             <button
               onClick={() => handleNavigate('apply')}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-all cursor-pointer ${
+              className={`inline-flex items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold shadow-sm transition-all 2xl:px-4 ${
                 currentPage === 'apply'
                   ? 'bg-emerald-700 text-white ring-2 ring-emerald-500 ring-offset-2'
-                  : 'bg-gradient-to-r from-orange-600 to-orange-500 hover:from-orange-500 hover:to-orange-600 text-white hover:shadow-md'
+                  : 'bg-gradient-to-r from-orange-600 to-orange-500 text-white hover:from-orange-500 hover:to-orange-600 hover:shadow-md'
               }`}
             >
               <span>Apply Now</span>
-              <ArrowRight className="w-4 h-4" />
+              <ArrowRight className="h-4 w-4" />
             </button>
           </div>
 
-          {/* Mobile Menu Button */}
-          <div className="flex items-center gap-2 xl:hidden">
+          {/* Mobile and tablet menu button */}
+          <div className="ml-auto flex shrink-0 items-center gap-2 lg:hidden">
             <button
               onClick={() => openCallbackModal()}
-              className="p-2 text-orange-600 hover:bg-orange-50 rounded-lg border border-orange-200 md:hidden"
+              className="rounded-lg border border-orange-200 p-2 text-orange-600 hover:bg-orange-50 md:hidden"
+              aria-label="Request a call"
               title="Request a Call"
             >
-              <PhoneCall className="w-5 h-5" />
+              <PhoneCall className="h-5 w-5" />
             </button>
+
             <button
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="p-2 text-slate-700 hover:text-orange-600 hover:bg-slate-100 rounded-lg focus:outline-hidden"
-              aria-label="Toggle navigation menu"
+              onClick={() => setMobileMenuOpen((open) => !open)}
+              className="rounded-lg p-2 text-slate-700 hover:bg-slate-100 hover:text-orange-600 focus:outline-none focus:ring-2 focus:ring-orange-500"
+              aria-label={
+                mobileMenuOpen
+                  ? 'Close navigation menu'
+                  : 'Open navigation menu'
+              }
+              aria-expanded={mobileMenuOpen}
             >
-              {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+              {mobileMenuOpen ? (
+                <X className="h-6 w-6" />
+              ) : (
+                <Menu className="h-6 w-6" />
+              )}
             </button>
           </div>
         </div>
       </div>
 
-      {/* Mobile Drawer */}
+      {/* Mobile and tablet navigation drawer */}
       {mobileMenuOpen && (
-        <div className="xl:hidden bg-white border-b border-slate-200 px-4 pt-2 pb-6 space-y-2 shadow-xl animate-in fade-in slide-in-from-top duration-200">
-          <div className="grid grid-cols-1 gap-1">
+        <div className="border-b border-slate-200 bg-white px-4 pb-6 pt-2 shadow-xl lg:hidden">
+          <nav
+            aria-label="Mobile navigation"
+            className="grid grid-cols-1 gap-1"
+          >
             {navLinks.map((link) => (
               <button
                 key={link.id}
                 onClick={() => handleNavigate(link.id)}
-                className={`text-left px-4 py-3 rounded-lg text-base font-semibold transition-colors ${
+                className={`rounded-lg px-4 py-3 text-left text-base font-semibold transition-colors ${
                   currentPage === link.id
-                    ? 'bg-orange-50 text-orange-600 font-bold border-l-4 border-orange-500'
+                    ? 'border-l-4 border-orange-500 bg-orange-50 text-orange-600'
                     : 'text-slate-800 hover:bg-slate-50'
                 }`}
               >
                 {link.label}
               </button>
             ))}
-          </div>
+          </nav>
 
-          <div className="pt-4 border-t border-slate-100 flex flex-col gap-2.5">
+          <div className="mt-4 flex flex-col gap-2.5 border-t border-slate-100 pt-4">
             <button
               onClick={() => {
                 setMobileMenuOpen(false);
                 openCallbackModal();
               }}
-              className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-semibold text-slate-800 border border-slate-300 bg-slate-50"
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-800"
             >
-              <PhoneCall className="w-4 h-4 text-orange-600" />
+              <PhoneCall className="h-4 w-4 text-orange-600" />
               <span>Request a Call</span>
             </button>
 
             <button
               onClick={() => handleNavigate('apply')}
-              className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-base font-bold bg-orange-600 text-white shadow-sm"
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-3 text-base font-bold text-white shadow-sm"
             >
               <span>Apply Now</span>
-              <ArrowRight className="w-4 h-4" />
+              <ArrowRight className="h-4 w-4" />
             </button>
 
             <button
               onClick={() => handleNavigate('admin')}
-              className="w-full text-center text-xs text-slate-500 hover:text-slate-800 py-2"
+              className="w-full py-2 text-center text-xs text-slate-500 hover:text-slate-800"
             >
               Admin Portal
             </button>
