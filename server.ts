@@ -7,9 +7,12 @@ import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import { Resend } from 'resend';
 import { DeleteObjectCommand, HeadBucketCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
+import { removeLegacyUploadFile } from './local-upload-storage';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const LOCAL_UPLOADS_DIRECTORY = path.resolve(__dirname, 'public/uploads');
 
 dotenv.config({ path: path.resolve(__dirname, '.env') });
 dotenv.config({ path: path.resolve(__dirname, '.dev.vars') });
@@ -365,12 +368,11 @@ const memoryStore: MemoryStore = {
 // -------------------------------------------------------------
 async function uploadToR2(buffer: Buffer, key: string, contentType: string): Promise<string> {
   if (!r2Client) {
-    const uploadsDir = path.resolve(__dirname, 'public/uploads');
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
+    if (!fs.existsSync(LOCAL_UPLOADS_DIRECTORY)) {
+      fs.mkdirSync(LOCAL_UPLOADS_DIRECTORY, { recursive: true });
     }
     const safeFilename = path.basename(key);
-    fs.writeFileSync(path.join(uploadsDir, safeFilename), buffer);
+    fs.writeFileSync(path.join(LOCAL_UPLOADS_DIRECTORY, safeFilename), buffer);
     return `/uploads/${safeFilename}`;
   }
 
@@ -387,10 +389,7 @@ async function uploadToR2(buffer: Buffer, key: string, contentType: string): Pro
 }
 
 function getManagedR2Key(value: unknown, prefix: 'applications' | 'media'): string | null {
-  if (typeof value !== 'string' || !value) return null;
-  const publicUrl = R2_PUBLIC_URL.replace(/\/+$/, '');
-  const key = publicUrl && value.startsWith(`${publicUrl}/`) ? value.slice(publicUrl.length + 1) : value;
-  return key.startsWith(`${prefix}/`) && /^[A-Za-z0-9._/-]+$/.test(key) && !key.includes('..') ? key : null;
+  return managedR2ObjectKeyFromMetadata(value, R2_PUBLIC_URL, prefix);
 }
 
 function hasValidR2PublicUrl(): boolean {
@@ -1076,30 +1075,78 @@ app.delete('/api/admin/media/:id', async (req, res) => {
 
   try {
     const { id } = req.params;
+
     if (supabase) {
-      const { data: existing, error: lookupError } = await supabase.from('media_items').select('*').eq('id', id).single();
+      const { data: existing, error: lookupError } = await supabase
+        .from('media_items')
+        .select('*')
+        .eq('id', id)
+        .single();
+
       if (lookupError) {
-        if (lookupError.code === 'PGRST116') return res.status(404).json({ error: 'Media item not found.' });
-        return res.status(500).json({ error: lookupError.message || 'Unable to load media item.' });
+        if (lookupError.code === 'PGRST116') {
+          return res.status(404).json({ error: 'Media item not found.' });
+        }
+        return res.status(500).json({
+          error: lookupError.message || 'Unable to load media item.',
+        });
       }
-      const objectKey = existing.r2_object_key ? getManagedR2Key(existing.r2_object_key, 'media') : null;
+
+      const objectKey = existing.r2_object_key
+        ? getManagedR2Key(existing.r2_object_key, 'media')
+        : null;
+
+      // Never delete a database record when its stored object key is malformed.
       if (existing.r2_object_key && !objectKey) {
-        return res.status(400).json({ error: 'Stored media object key is invalid; refusing to delete the media record.' });
+        return res.status(400).json({
+          error: 'Stored media object key is invalid; refusing to delete the media record.',
+        });
       }
+
       if (objectKey && !r2Client) {
-        return res.status(503).json({ error: 'Cloudflare R2 storage is not configured, so the media photo cannot be deleted.' });
+        return res.status(503).json({
+          error: 'Cloudflare R2 storage is not configured, so the media photo cannot be deleted.',
+        });
       }
-      const { data: deleted, error } = await supabase.from('media_items').delete().eq('id', id).select('id').maybeSingle();
-      if (error) return res.status(500).json({ error: error.message || 'Unable to delete media item.' });
-      if (!deleted) return res.status(404).json({ error: 'Media item not found.' });
+
+      // Delete the R2 object first. If storage deletion fails, preserve the DB row
+      // so the admin can retry without losing the reference to the photo.
       if (objectKey) {
         try {
           await deleteManagedR2Object(objectKey);
         } catch (deleteError: any) {
           console.error('[Admin Media R2 Delete Error]', deleteError);
-          return res.status(502).json({ error: `Media record was deleted, but its R2 photo could not be removed: ${deleteError.message || 'storage error'}` });
+          return res.status(502).json({
+            error: `Unable to delete the media photo from R2; the media record was retained. ${deleteError?.message || 'Storage error.'}`,
+          });
         }
       }
+
+      const { data: deleted, error: deleteError } = await supabase
+        .from('media_items')
+        .delete()
+        .eq('id', id)
+        .select('id')
+        .maybeSingle();
+
+      if (deleteError) {
+        console.error('[Admin Media Database Delete Error]', deleteError);
+        const partialMessage = objectKey
+          ? ' The R2 photo was deleted, but the database record could not be deleted.'
+          : '';
+        return res.status(500).json({
+          error: `${deleteError.message || 'Unable to delete media item.'}${partialMessage}`,
+        });
+      }
+
+      if (!deleted) {
+        return res.status(404).json({
+          error: objectKey
+            ? 'The R2 photo was deleted, but the media database record was not found.'
+            : 'Media item not found.',
+        });
+      }
+
       return res.json({ success: true, message: 'Media item deleted.' });
     }
 
@@ -1109,7 +1156,9 @@ app.delete('/api/admin/media/:id', async (req, res) => {
     return res.json({ success: true, message: 'Media item deleted.' });
   } catch (err: any) {
     console.error('[Admin Media Delete Error]', err);
-    res.status(500).json({ error: err.message || 'Unable to delete media item.' });
+    return res.status(500).json({
+      error: err?.message || 'Unable to delete media item.',
+    });
   }
 });
 
@@ -1683,15 +1732,19 @@ app.delete('/api/admin/applications/:id', async (req, res) => {
     if (readError) return res.status(500).json({ error: `Unable to load application: ${readError.message}` });
     if (!application) return res.status(404).json({ error: 'Application not found.' });
 
-    const photoKey = application.photo_object_key
-      ? getManagedR2Key(application.photo_object_key, 'applications')
+    const storedPhoto = application.photo_object_key;
+    const photoKey = storedPhoto ? getManagedR2Key(storedPhoto, 'applications') : null;
+    const legacyFilename = storedPhoto && !photoKey
+      ? legacyUploadFilenameFromMetadata(storedPhoto)
       : null;
-    if (application.photo_object_key && !photoKey) {
-      return res.status(500).json({ error: 'Stored application photo R2 object key is invalid; refusing to delete the row.' });
+    if (storedPhoto && !photoKey && !legacyFilename) {
+      return res.status(500).json({ error: 'Stored application photo reference is invalid; refusing to delete the record or photo.' });
     }
+    let photoRemoved = false;
     if (photoKey) {
       try {
         await deleteManagedR2Object(photoKey);
+        photoRemoved = true;
       } catch (deleteError: any) {
         return res.status(502).json({
           error: 'Unable to remove the application photo; the application record was not deleted.',
@@ -1699,14 +1752,23 @@ app.delete('/api/admin/applications/:id', async (req, res) => {
         });
       }
     }
+    if (legacyFilename) {
+      try {
+        photoRemoved = (await removeLegacyUploadFile(LOCAL_UPLOADS_DIRECTORY, legacyFilename)) === 'removed';
+      } catch {
+        return res.status(502).json({
+          error: 'Unable to remove the legacy application photo; the application record was not deleted.',
+        });
+      }
+    }
 
     const { data: deleted, error } = await supabase.from('applications').delete().eq('id', id).select('id').maybeSingle();
     if (error) {
       return res.status(500).json({
-        error: photoKey
+        error: photoRemoved
           ? `The application photo was removed, but the application record could not be deleted: ${error.message}`
           : `Unable to delete application: ${error.message}`,
-        photo_removed: Boolean(photoKey),
+        photo_removed: photoRemoved,
       });
     }
     if (!deleted) return res.status(404).json({ error: 'Application not found.' });

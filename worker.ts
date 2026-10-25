@@ -1,4 +1,5 @@
 import { handleApiRequest } from './worker-api';
+import type { R2BucketBinding } from './worker-r2';
 
 interface Env {
   ASSETS?: { fetch: typeof fetch };
@@ -6,10 +7,8 @@ interface Env {
   VITE_SUPABASE_URL?: string;
   VITE_SUPABASE_ANON_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
-  CLOUDFLARE_R2_ACCOUNT_ID?: string;
-  CLOUDFLARE_R2_ACCESS_KEY_ID?: string;
-  CLOUDFLARE_R2_SECRET_ACCESS_KEY?: string;
-  CLOUDFLARE_R2_BUCKET_NAME?: string;
+  APPLICATION_MEDIA?: R2BucketBinding;
+  PUBLIC_MEDIA?: R2BucketBinding;
   CLOUDFLARE_R2_PUBLIC_URL?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;

@@ -1,16 +1,14 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { DeleteObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { FetchHttpHandler } from '@smithy/fetch-http-handler';
+import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
+import type { R2BucketBinding } from './worker-r2';
 
 interface Env {
   SUPABASE_URL?: string;
   VITE_SUPABASE_URL?: string;
   VITE_SUPABASE_ANON_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
-  CLOUDFLARE_R2_ACCOUNT_ID?: string;
-  CLOUDFLARE_R2_ACCESS_KEY_ID?: string;
-  CLOUDFLARE_R2_SECRET_ACCESS_KEY?: string;
-  CLOUDFLARE_R2_BUCKET_NAME?: string;
+  APPLICATION_MEDIA?: R2BucketBinding;
+  PUBLIC_MEDIA?: R2BucketBinding;
   CLOUDFLARE_R2_PUBLIC_URL?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
@@ -61,10 +59,8 @@ const logBindingPresence = (env: Env): void => {
       SUPABASE_SERVICE_ROLE_KEY: Boolean(env.SUPABASE_SERVICE_ROLE_KEY),
       RESEND_API_KEY: Boolean(env.RESEND_API_KEY),
       RESEND_FROM_EMAIL: Boolean(env.RESEND_FROM_EMAIL),
-      CLOUDFLARE_R2_ACCOUNT_ID: Boolean(env.CLOUDFLARE_R2_ACCOUNT_ID),
-      CLOUDFLARE_R2_ACCESS_KEY_ID: Boolean(env.CLOUDFLARE_R2_ACCESS_KEY_ID),
-      CLOUDFLARE_R2_SECRET_ACCESS_KEY: Boolean(env.CLOUDFLARE_R2_SECRET_ACCESS_KEY),
-      CLOUDFLARE_R2_BUCKET_NAME: Boolean(env.CLOUDFLARE_R2_BUCKET_NAME),
+      APPLICATION_MEDIA: Boolean(env.APPLICATION_MEDIA),
+      PUBLIC_MEDIA: Boolean(env.PUBLIC_MEDIA),
       CLOUDFLARE_R2_PUBLIC_URL: Boolean(env.CLOUDFLARE_R2_PUBLIC_URL),
       APPROVED_FEE_STRUCTURE_PDF_URL: Boolean(env.APPROVED_FEE_STRUCTURE_PDF_URL),
       ASSETS: Boolean(env.ASSETS),
@@ -176,25 +172,19 @@ const checkResendHealth = async (env: Env): Promise<IntegrationHealth> => {
 };
 
 const checkR2Health = async (env: Env): Promise<IntegrationHealth> => {
-  const client = createR2Client(env);
   let publicUrlIsValid = false;
   try {
     publicUrlIsValid = new URL(env.CLOUDFLARE_R2_PUBLIC_URL || '').protocol === 'https:';
   } catch {
     publicUrlIsValid = false;
   }
-  const configured = Boolean(client && publicUrlIsValid);
-  if (!client || !publicUrlIsValid) {
+  if (!env.APPLICATION_MEDIA || !env.PUBLIC_MEDIA || !publicUrlIsValid) {
     const missingBindings = [
-      ...(!env.CLOUDFLARE_R2_ACCOUNT_ID ? ['CLOUDFLARE_R2_ACCOUNT_ID'] : []),
-      ...(!env.CLOUDFLARE_R2_ACCESS_KEY_ID ? ['CLOUDFLARE_R2_ACCESS_KEY_ID'] : []),
-      ...(!env.CLOUDFLARE_R2_SECRET_ACCESS_KEY ? ['CLOUDFLARE_R2_SECRET_ACCESS_KEY'] : []),
+      ...(!env.APPLICATION_MEDIA ? ['APPLICATION_MEDIA'] : []),
+      ...(!env.PUBLIC_MEDIA ? ['PUBLIC_MEDIA'] : []),
       ...(!env.CLOUDFLARE_R2_PUBLIC_URL ? ['CLOUDFLARE_R2_PUBLIC_URL'] : []),
     ];
     const invalidBindings = [
-      ...(env.CLOUDFLARE_R2_ACCOUNT_ID && !/^[a-z0-9-]+$/i.test(env.CLOUDFLARE_R2_ACCOUNT_ID)
-        ? ['CLOUDFLARE_R2_ACCOUNT_ID']
-        : []),
       ...(env.CLOUDFLARE_R2_PUBLIC_URL && !publicUrlIsValid ? ['CLOUDFLARE_R2_PUBLIC_URL'] : []),
     ];
     logApiDiagnostic(
@@ -203,20 +193,19 @@ const checkR2Health = async (env: Env): Promise<IntegrationHealth> => {
       missingBindings.length ? missingBindings : invalidBindings.length ? invalidBindings : undefined,
       missingBindings.length ? 'missing' : 'invalid',
     );
-    return { configured, connected: false, error_category: configured ? undefined : 'missing_or_invalid_configuration' };
+    return { configured: false, connected: false, error_category: 'missing_or_invalid_configuration' };
   }
   try {
-    await client.send(
-      new HeadBucketCommand({ Bucket: env.CLOUDFLARE_R2_BUCKET_NAME || 'uptrends-academy-media' }),
-      { abortSignal: AbortSignal.timeout(5000) },
-    );
+    await Promise.all([
+      env.APPLICATION_MEDIA.list({ limit: 1 }),
+      env.PUBLIC_MEDIA.list({ limit: 1 }),
+    ]);
     return { configured: true, connected: true, error_category: null };
-  } catch (error) {
-    const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+  } catch {
     return {
       configured: true,
       connected: false,
-      error_category: status === 403 ? 'permission_denied' : status === 404 ? 'bucket_not_found' : 'storage_unreachable',
+      error_category: 'storage_unreachable',
     };
   }
 };
@@ -354,52 +343,50 @@ const decodeImage = (value: unknown, maxBytes: number): ImagePayload | Response 
   }
 };
 
-const createR2Client = (env: Env): S3Client | null => {
-  if (!env.CLOUDFLARE_R2_ACCOUNT_ID || !/^[a-z0-9-]+$/i.test(env.CLOUDFLARE_R2_ACCOUNT_ID) || !env.CLOUDFLARE_R2_ACCESS_KEY_ID || !env.CLOUDFLARE_R2_SECRET_ACCESS_KEY) return null;
-  return new S3Client({
-    region: 'auto',
-    endpoint: `https://${env.CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    requestHandler: new FetchHttpHandler(),
-    credentials: {
-      accessKeyId: env.CLOUDFLARE_R2_ACCESS_KEY_ID,
-      secretAccessKey: env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
-    },
-  });
-};
+const bucketForPrefix = (env: Env, prefix: 'applications' | 'media'): R2BucketBinding | undefined =>
+  prefix === 'applications' ? env.APPLICATION_MEDIA : env.PUBLIC_MEDIA;
 
-const uploadToR2 = async (env: Env, image: ImagePayload, prefix: 'applications' | 'media'): Promise<{ key: string; url: string } | Response> => {
-  const client = createR2Client(env);
-  const bucket = env.CLOUDFLARE_R2_BUCKET_NAME || 'uptrends-academy-media';
+function uploadToR2(env: Env, image: ImagePayload, prefix: 'applications'): Promise<{ key: string } | Response>;
+function uploadToR2(env: Env, image: ImagePayload, prefix: 'media'): Promise<{ key: string; url: string } | Response>;
+async function uploadToR2(
+  env: Env,
+  image: ImagePayload,
+  prefix: 'applications' | 'media',
+): Promise<{ key: string; url?: string } | Response> {
+  const bucket = bucketForPrefix(env, prefix);
   const publicUrl = env.CLOUDFLARE_R2_PUBLIC_URL?.replace(/\/+$/, '');
-  if (!client) return errorResponse('R2 photo storage is not configured.', 503);
-  if (!publicUrl || !URL.canParse(publicUrl) || new URL(publicUrl).protocol !== 'https:') {
+  if (!bucket) {
+    return errorResponse(prefix === 'applications'
+      ? 'Private application photo storage is not configured.'
+      : 'Public gallery media storage is not configured.', 503);
+  }
+  if (prefix === 'media' && (!publicUrl || !URL.canParse(publicUrl) || new URL(publicUrl).protocol !== 'https:')) {
     return errorResponse('A valid HTTPS R2 public URL is not configured, so uploaded photos cannot be served.', 503);
   }
 
   const extension = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg';
   const key = `${prefix}/${crypto.randomUUID()}.${extension}`;
   try {
-    await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: image.bytes, ContentType: image.mime }));
-    return { key, url: `${publicUrl}/${key}` };
+    await bucket.put(key, image.bytes, { httpMetadata: { contentType: image.mime } });
+    return prefix === 'media'
+      ? { key, url: `${publicUrl}/${key}` }
+      : { key };
   } catch (error) {
     return errorResponse(`R2 upload failed: ${messageOf(error)}`, 502);
   }
-};
+}
 
-const deleteFromR2 = async (env: Env, key: string): Promise<void> => {
-  const client = createR2Client(env);
-  if (!client) throw new Error('R2 storage is not configured.');
-  await client.send(new DeleteObjectCommand({
-    Bucket: env.CLOUDFLARE_R2_BUCKET_NAME || 'uptrends-academy-media',
-    Key: key,
-  }));
+const deleteFromR2 = async (env: Env, key: string, prefix: 'applications' | 'media'): Promise<void> => {
+  if (managedR2ObjectKeyFromMetadata(key, undefined, prefix) !== key) {
+    throw new Error('R2 object key is invalid.');
+  }
+  const bucket = bucketForPrefix(env, prefix);
+  if (!bucket) throw new Error('R2 storage is not configured.');
+  await bucket.delete(key);
 };
 
 const objectKeyFromMetadata = (env: Env, value: unknown, expectedPrefix: 'applications' | 'media'): string | null => {
-  if (typeof value !== 'string' || !value) return null;
-  const publicUrl = env.CLOUDFLARE_R2_PUBLIC_URL?.replace(/\/+$/, '');
-  const key = publicUrl && value.startsWith(`${publicUrl}/`) ? value.slice(publicUrl.length + 1) : value;
-  return key.startsWith(`${expectedPrefix}/`) && /^[A-Za-z0-9._/-]+$/.test(key) && !key.includes('..') ? key : null;
+  return managedR2ObjectKeyFromMetadata(value, env.CLOUDFLARE_R2_PUBLIC_URL, expectedPrefix);
 };
 
 const extractYouTubeVideoId = (value: unknown): string | null => {
@@ -849,7 +836,7 @@ const createMedia = async (request: Request, env: Env): Promise<Response> => {
   if (error) {
     if (uploaded) {
       try {
-        await deleteFromR2(env, uploaded.key);
+        await deleteFromR2(env, uploaded.key, 'media');
       } catch (cleanupError) {
         return json({ error: `Failed to create media item: ${error.message}`, cleanup_error: messageOf(cleanupError), orphaned_object_key: uploaded.key }, 502);
       }
@@ -926,7 +913,7 @@ const updateMedia = async (request: Request, env: Env, id: string): Promise<Resp
   if (error) {
     if (newObjectKey) {
       try {
-        await deleteFromR2(env, newObjectKey);
+        await deleteFromR2(env, newObjectKey, 'media');
       } catch (cleanupError) {
         return json({ error: `Failed to update media item: ${error.message}`, cleanup_error: messageOf(cleanupError), orphaned_object_key: newObjectKey }, 502);
       }
@@ -936,7 +923,7 @@ const updateMedia = async (request: Request, env: Env, id: string): Promise<Resp
   if (!saved) {
     if (newObjectKey) {
       try {
-        await deleteFromR2(env, newObjectKey);
+        await deleteFromR2(env, newObjectKey, 'media');
       } catch (cleanupError) {
         return json({ error: 'Media item disappeared before its update completed.', cleanup_error: messageOf(cleanupError), orphaned_object_key: newObjectKey }, 502);
       }
@@ -947,7 +934,7 @@ const updateMedia = async (request: Request, env: Env, id: string): Promise<Resp
   const previousKey = previousObjectKey;
   if (previousKey && previousKey !== newObjectKey && (mediaType === 'video' || newObjectKey)) {
     try {
-      await deleteFromR2(env, previousKey);
+      await deleteFromR2(env, previousKey, 'media');
     } catch (cleanupError) {
       return json({ error: 'Media metadata was updated, but its previous R2 object could not be removed.', storage_error: messageOf(cleanupError), orphaned_object_key: previousKey }, 502);
     }
@@ -964,14 +951,22 @@ const deleteMedia = async (request: Request, env: Env, id: string): Promise<Resp
   const objectKey = item.r2_object_key ? objectKeyFromMetadata(env, item.r2_object_key, 'media') : null;
   if (item.r2_object_key && !objectKey) return errorResponse('Stored media R2 object key is invalid; refusing to delete the row.', 500);
 
-  const { error } = await auth.supabase.from('media_items').delete().eq('id', id);
-  if (error) return errorResponse(`Unable to delete media item: ${error.message}`, 500);
-  if (item.r2_object_key) {
+  if (objectKey) {
     try {
-      await deleteFromR2(env, objectKey!);
+      await deleteFromR2(env, objectKey, 'media');
     } catch (deleteError) {
-      return json({ error: 'Media metadata was deleted, but its R2 object could not be removed.', storage_error: messageOf(deleteError), orphaned_object_key: objectKey }, 502);
+      return json({ error: 'Unable to remove the media object; the media record was not deleted.', storage_error: messageOf(deleteError), object_key: objectKey }, 502);
     }
+  }
+
+  const { error } = await auth.supabase.from('media_items').delete().eq('id', id);
+  if (error) {
+    return json({
+      error: objectKey
+        ? `The media object was removed, but its record could not be deleted: ${error.message}`
+        : `Unable to delete media item: ${error.message}`,
+      photo_removed: Boolean(objectKey),
+    }, 500);
   }
   return json({ success: true, message: 'Media item deleted.' });
 };
@@ -1039,7 +1034,7 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
   const { error: insertError } = await supabase.from('applications').insert(application);
   if (insertError) {
     try {
-      await deleteFromR2(env, upload.key);
+      await deleteFromR2(env, upload.key, 'applications');
     } catch (cleanupError) {
       return json({ error: `Failed to record application in database: ${insertError.message}`, cleanup_error: messageOf(cleanupError), orphaned_object_key: upload.key }, 502);
     }
@@ -1303,24 +1298,50 @@ const deleteApplication = async (request: Request, env: Env, id: string): Promis
   if (readError) return errorResponse(`Unable to load application: ${readError.message}`, 500);
   if (!application) return errorResponse('Application not found.', 404);
 
-  const photoKey = application.photo_object_key ? objectKeyFromMetadata(env, application.photo_object_key, 'applications') : null;
-  if (application.photo_object_key && !photoKey) return errorResponse('Stored application photo R2 object key is invalid; refusing to delete the row.', 500);
+  const storedPhoto = application.photo_object_key;
+  const photoKey = storedPhoto ? objectKeyFromMetadata(env, storedPhoto, 'applications') : null;
+  const legacyFilename = storedPhoto && !photoKey ? legacyUploadFilenameFromMetadata(storedPhoto) : null;
+  if (storedPhoto && !photoKey && !legacyFilename) {
+    return errorResponse('Stored application photo reference is invalid; refusing to delete the record or photo.', 500);
+  }
 
+  let photoRemoved = false;
   if (photoKey) {
     try {
-      await deleteFromR2(env, photoKey);
+      await deleteFromR2(env, photoKey, 'applications');
+      photoRemoved = true;
     } catch (deleteError) {
       return json({ error: 'Unable to remove the application photo; the application record was not deleted.', storage_error: messageOf(deleteError), object_key: photoKey }, 502);
+    }
+  }
+
+  if (legacyFilename) {
+    if (!env.ASSETS) {
+      return errorResponse('Legacy local application photo cannot be checked by this Worker; the application record was not deleted.', 503);
+    }
+    let assetResponse: Response;
+    try {
+      assetResponse = await env.ASSETS.fetch(new Request(
+        new URL(`/uploads/${legacyFilename}`, request.url),
+        { method: 'HEAD' },
+      ));
+    } catch {
+      return errorResponse('Unable to verify the legacy local application photo; the application record was not deleted.', 502);
+    }
+    if (assetResponse.status !== 404) {
+      return assetResponse.ok
+        ? errorResponse('Legacy local application photo is still present in static assets and cannot be removed by this Worker; the application record was not deleted.', 409)
+        : errorResponse('Unable to verify the legacy local application photo; the application record was not deleted.', 502);
     }
   }
 
   const { error } = await auth.supabase.from('applications').delete().eq('id', id);
   if (error) {
     return json({
-      error: photoKey
+      error: photoRemoved
         ? `The application photo was removed, but the application record could not be deleted: ${error.message}`
         : `Unable to delete application: ${error.message}`,
-      photo_removed: Boolean(photoKey),
+      photo_removed: photoRemoved,
     }, 500);
   }
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
+const viteConfig = await readFile(new URL('../vite.config.ts', import.meta.url), 'utf8');
 const packageJson = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8'),
 ) as { scripts: { deploy: string } };
@@ -10,11 +11,17 @@ test('Wrangler deploy config targets the production Worker and preserves dashboa
   const config = JSON.parse(await readFile(new URL('../wrangler.json', import.meta.url), 'utf8')) as {
     name?: string;
     keep_vars?: boolean;
+    r2_buckets?: Array<{ binding: string; bucket_name: string }>;
   };
   assert.equal(config.name, 'uptrends-english-academy');
   assert.equal(config.keep_vars, true);
+  assert.deepEqual(config.r2_buckets, [
+    { binding: 'APPLICATION_MEDIA', bucket_name: 'uptrends-academy-media' },
+    { binding: 'PUBLIC_MEDIA', bucket_name: 'uptrends-academy-public' },
+  ]);
 });
 
 test('deploy script uses the Wrangler config actually emitted by Vite', () => {
   assert.match(packageJson.scripts.deploy, /dist\/uptrends_english_academy\/wrangler\.json/);
+  assert.match(viteConfig, /dist\/uptrends_english_academy\/\.dev\.vars/);
 });

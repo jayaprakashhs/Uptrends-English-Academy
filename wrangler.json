@@ -8,7 +8,18 @@
     "directory": "./dist",
     "binding": "ASSETS"
   },
+  "r2_buckets": [
+    {
+      "binding": "APPLICATION_MEDIA",
+      "bucket_name": "uptrends-academy-media"
+    },
+    {
+      "binding": "PUBLIC_MEDIA",
+      "bucket_name": "uptrends-academy-public"
+    }
+  ],
   "observability": {
-    "enabled": true
-  }
+  "enabled": true
+},
+"upload_source_maps": false
 }

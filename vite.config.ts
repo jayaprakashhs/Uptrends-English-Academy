@@ -29,7 +29,7 @@ export default defineConfig(({ mode }) => {
         apply: 'build',
         enforce: 'post',
         closeBundle() {
-          const generatedDevVarsPath = resolve(process.cwd(), 'dist/uptrend_english_academy/.dev.vars');
+          const generatedDevVarsPath = resolve(process.cwd(), 'dist/uptrends_english_academy/.dev.vars');
           if (existsSync(generatedDevVarsPath)) unlinkSync(generatedDevVarsPath);
         },
       },
