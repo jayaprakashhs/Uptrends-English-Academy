@@ -80,7 +80,9 @@ export const MediaGallery: React.FC<MediaGalleryProps> = ({ mediaItems, openVide
             {filtered.map((item) => {
               const isVideo = item.media_type === 'video';
               const yId = isVideo ? extractYouTubeId(item.youtube_url || item.youtube_video_id) : null;
-              const coverSrc = item.cover_image_url || getYouTubeThumbnail(yId);
+              const coverSrc = isVideo
+  ? item.cover_image_url || getYouTubeThumbnail(yId)
+  : item.cover_image_url || item.media_url || '';
 
               return (
                 <div
@@ -163,7 +165,7 @@ export const MediaGallery: React.FC<MediaGalleryProps> = ({ mediaItems, openVide
             </div>
             <div className="p-2 bg-black flex items-center justify-center max-h-[75vh]">
               <img
-                src={lightboxPhoto.cover_image_url || lightboxPhoto.media_url || ''}
+                src={lightboxPhoto.media_url || lightboxPhoto.cover_image_url || ''}
                 alt={lightboxPhoto.alt_text || lightboxPhoto.title}
                 className="max-h-[70vh] w-auto object-contain rounded-lg"
               />
