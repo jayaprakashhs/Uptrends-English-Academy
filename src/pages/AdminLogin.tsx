@@ -97,6 +97,15 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, setCurre
 
         {/* Login Form */}
         <form onSubmit={handleLogin} className="p-8 space-y-6">
+          {!isSupabaseConfigured && (
+            <div role="alert" className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2 text-amber-800 text-xs">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                Admin login is unavailable because Supabase is not configured. Set <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> in the local environment; keep service-role and R2 secrets server-side.
+              </span>
+            </div>
+          )}
+
           {error && (
             <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-2 text-rose-700 text-xs">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -140,7 +149,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, setCurre
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || !isSupabaseConfigured}
             className="w-full py-3.5 px-4 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
           >
             {loading ? (

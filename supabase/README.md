@@ -92,26 +92,31 @@ ON CONFLICT (id) DO UPDATE SET
 
 ## 4. Environment Variables Required
 
-Ensure these are configured in your `.env` file (copied from `.env.example`):
+Configure these variables in the local root `.env` file. `server.ts` loads that file for local development, and Vite exposes only `VITE_` variables to browser code:
 
 ```bash
-# Supabase Configuration
+# Supabase (the anonymous key is public; the service-role key is server-side only)
 VITE_SUPABASE_URL=https://<your-project-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY=eyJhbGciOi...
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOi... # Server-side only! Never expose to client.
 
 # Resend Transactional Email (Admissions & Staff Alerts)
-RESEND_API_KEY=re_...
+RESEND_API_KEY=<server-only-resend-api-key>
 RESEND_FROM_EMAIL="Uptrend's English Academy <admissions@uptrendsenglishacademy.in>"
-STAFF_NOTIFICATION_EMAIL="uptrendsinstitute@gmail.com"
+APPLICATION_NOTIFICATION_EMAIL="uptrendsinstitute@gmail.com"
 
 # Cloudflare R2 Storage (Student Passport Photos & Media Assets)
-R2_ACCOUNT_ID=...
-R2_ACCESS_KEY_ID=...
-R2_SECRET_ACCESS_KEY=...
-R2_BUCKET_NAME=uptrends-academy-media
-R2_PUBLIC_URL=https://media.uptrendsenglishacademy.in
+CLOUDFLARE_R2_ACCOUNT_ID=<server-only-account-id>
+CLOUDFLARE_R2_ACCESS_KEY_ID=<server-only-access-key-id>
+CLOUDFLARE_R2_SECRET_ACCESS_KEY=<server-only-secret-access-key>
+CLOUDFLARE_R2_BUCKET_NAME=uptrends-academy-media
+CLOUDFLARE_R2_PUBLIC_URL=https://media.uptrendsenglishacademy.in
+
+# Optional: use a hosted official PDF instead of the bundled public asset
+APPROVED_FEE_STRUCTURE_PDF_URL=https://<your-host>/Uptrends_Fee_Structure_and_Terms.pdf
 ```
+
+For Cloudflare Workers, configure `SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as Worker variables and `SUPABASE_SERVICE_ROLE_KEY` as an encrypted Worker secret. Use encrypted secrets for R2 access and Resend credentials as well. `SUPABASE_URL` must point to the same Supabase project as the service-role key. The Worker accepts `VITE_SUPABASE_URL` as a backward-compatible runtime URL binding, but use `SUPABASE_URL` for new configuration. Worker runtime settings are separate from the Vite build environment: the browser requires `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` at build time, while the service-role key must never enter the browser bundle. Missing client Supabase settings disable admin login with a visible configuration message; missing server credentials cause protected API requests to fail closed.
 
 ---
 

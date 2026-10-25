@@ -6,15 +6,17 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import { Resend } from 'resend';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-
-dotenv.config();
+import { DeleteObjectCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+dotenv.config({ path: path.resolve(__dirname, '.env') });
+dotenv.config({ path: path.resolve(__dirname, '.dev.vars') });
+
 const app = express();
 const PORT = process.env.PORT || 3000;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -23,7 +25,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // ENVIRONMENT VARIABLES & CLIENT INITIALIZATION
 // -------------------------------------------------------------
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'admissions@uptrendsacademy.com';
 const APPLICATION_NOTIFICATION_EMAIL = process.env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com';
@@ -384,22 +386,70 @@ async function uploadToR2(buffer: Buffer, key: string, contentType: string): Pro
   return R2_PUBLIC_URL ? `${R2_PUBLIC_URL}/${key}` : key;
 }
 
+function getManagedR2Key(value: unknown, prefix: 'applications' | 'media'): string | null {
+  if (typeof value !== 'string' || !value) return null;
+  const publicUrl = R2_PUBLIC_URL.replace(/\/+$/, '');
+  const key = publicUrl && value.startsWith(`${publicUrl}/`) ? value.slice(publicUrl.length + 1) : value;
+  return key.startsWith(`${prefix}/`) && /^[A-Za-z0-9._/-]+$/.test(key) && !key.includes('..') ? key : null;
+}
+
+function hasValidR2PublicUrl(): boolean {
+  try {
+    return new URL(R2_PUBLIC_URL).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+async function uploadMediaToR2(buffer: Buffer, key: string, contentType: string): Promise<string> {
+  if (!r2Client) throw new Error('Cloudflare R2 storage is not configured. Media photos cannot be uploaded.');
+  let publicUrl: URL;
+  try {
+    publicUrl = new URL(R2_PUBLIC_URL);
+  } catch {
+    throw new Error('A valid HTTPS Cloudflare R2 public URL is required to serve uploaded media.');
+  }
+  if (publicUrl.protocol !== 'https:') {
+    throw new Error('A valid HTTPS Cloudflare R2 public URL is required to serve uploaded media.');
+  }
+  await r2Client.send(new PutObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType,
+  }));
+  return `${publicUrl.toString().replace(/\/+$/, '')}/${key}`;
+}
+
+async function deleteManagedR2Object(key: string): Promise<void> {
+  if (!r2Client) throw new Error('Cloudflare R2 storage is not configured.');
+  await r2Client.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+}
+
 function toSafeYouTubeUrl(url?: string | null): string | null {
-  if (!url) return null;
-  const value = url.trim();
-  if (!value) return null;
-  const videoIdMatch = value.match(/(?:youtu\.be\/|youtube\.com\/.*(?:v=|vi=|embed\/|shorts\/|live\/))([\w-]{11})/i);
-  if (videoIdMatch?.[1]) return `https://www.youtube.com/watch?v=${videoIdMatch[1]}`;
-  return value.startsWith('http') ? value : `https://${value}`;
+  const videoId = extractYouTubeVideoId(url);
+  return videoId ? `https://www.youtube.com/watch?v=${videoId}` : null;
 }
 
 function extractYouTubeVideoId(url?: string | null): string | null {
   if (!url) return null;
   const value = url.trim();
-  const idMatch = value.match(/(?:youtu\.be\/|youtube\.com\/.*(?:v=|vi=|embed\/|shorts\/|live\/))([\w-]{11})/i);
-  if (idMatch?.[1]) return idMatch[1];
-  if (/^[\w-]{11}$/.test(value)) return value;
-  return null;
+  if (/^[A-Za-z0-9_-]{11}$/.test(value)) return value;
+  try {
+    const parsed = new URL(value.includes('://') ? value : `https://${value}`);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    const id = host === 'youtu.be'
+      ? segments[0]
+      : ['youtube.com', 'm.youtube.com', 'youtube-nocookie.com'].includes(host)
+        ? parsed.pathname === '/watch'
+          ? parsed.searchParams.get('v')
+          : ['embed', 'shorts', 'live', 'v'].includes(segments[0] || '') ? segments[1] : null
+        : null;
+    return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 // -------------------------------------------------------------
@@ -462,7 +512,7 @@ async function sendEmailViaResend({
 app.get('/api/system-status', (req, res) => {
   const hasSupabase = !!(SUPABASE_URL && SUPABASE_SERVICE_KEY);
   const hasResend = !!RESEND_API_KEY;
-  const hasR2 = !!(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY);
+  const hasR2 = !!(r2Client && hasValidR2PublicUrl());
   
   const localPdfPath = path.resolve(__dirname, 'public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf');
   const hasLocalPdf = fs.existsSync(localPdfPath);
@@ -498,12 +548,13 @@ app.get('/api/programs', async (req, res) => {
       const { data, error } = await supabase
         .from('programs')
         .select('*')
+        .eq('is_published', true)
         .order('display_order', { ascending: true });
       if (!error && data) return res.json(data);
     }
-    res.json(memoryStore.programs);
+    res.json(memoryStore.programs.filter((program) => program.is_published));
   } catch {
-    res.json(memoryStore.programs);
+    res.json(memoryStore.programs.filter((program) => program.is_published));
   }
 });
 
@@ -539,6 +590,120 @@ app.get('/api/reviews', async (req, res) => {
   }
 });
 
+app.get('/api/admin/programs', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+  if (supabase) {
+    const { data, error } = await supabase.from('programs').select('*').order('display_order', { ascending: true });
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data || []);
+  }
+  return res.json(memoryStore.programs);
+});
+
+app.get('/api/admin/announcements', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
+  if (!admin) return;
+  if (supabase) {
+    const { data, error } = await supabase.from('announcements').select('*').order('display_order', { ascending: true });
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data || []);
+  }
+  return res.json(memoryStore.announcements);
+});
+
+app.get('/api/admin/reviews', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+  if (supabase) {
+    const { data, error } = await supabase.from('reviews').select('*').order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data || []);
+  }
+  return res.json(memoryStore.reviews);
+});
+
+app.post('/api/admin/reviews', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+  const { author_name, rating, review_text, source, is_published } = req.body || {};
+  if (typeof author_name !== 'string' || !author_name.trim() || author_name.length > 300
+      || typeof review_text !== 'string' || !review_text.trim() || review_text.length > 10000
+      || !Number.isInteger(rating) || rating < 1 || rating > 5
+      || (source !== undefined && source !== null && (typeof source !== 'string' || source.length > 300))
+      || (is_published !== undefined && typeof is_published !== 'boolean')) {
+    return res.status(400).json({ error: 'Provide an author name, review text, a 1–5 integer rating, and valid optional source/publication values.' });
+  }
+  const record = {
+    author_name: author_name.trim(),
+    rating,
+    review_text: review_text.trim(),
+    source: typeof source === 'string' && source.trim() ? source.trim() : null,
+    is_published: is_published !== false,
+  };
+  if (supabase) {
+    const { data, error } = await supabase.from('reviews').insert(record).select('*').single();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.status(201).json(data);
+  }
+  const created = { id: crypto.randomUUID(), ...record, created_at: new Date().toISOString() };
+  memoryStore.reviews.unshift(created);
+  return res.status(201).json(created);
+});
+
+app.put('/api/admin/reviews/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+  const { author_name, rating, review_text, source, is_published } = req.body || {};
+  const updates: Record<string, unknown> = {};
+  if (author_name !== undefined) {
+    if (typeof author_name !== 'string' || !author_name.trim() || author_name.length > 300) return res.status(400).json({ error: 'Author name is required and must be 300 characters or fewer.' });
+    updates.author_name = author_name.trim();
+  }
+  if (review_text !== undefined) {
+    if (typeof review_text !== 'string' || !review_text.trim() || review_text.length > 10000) return res.status(400).json({ error: 'Review text is required and must be 10,000 characters or fewer.' });
+    updates.review_text = review_text.trim();
+  }
+  if (rating !== undefined) {
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating must be an integer from 1 to 5.' });
+    updates.rating = rating;
+  }
+  if (source !== undefined) {
+    if (source !== null && (typeof source !== 'string' || source.length > 300)) return res.status(400).json({ error: 'Source must be 300 characters or fewer.' });
+    updates.source = typeof source === 'string' && source.trim() ? source.trim() : null;
+  }
+  if (is_published !== undefined) {
+    if (typeof is_published !== 'boolean') return res.status(400).json({ error: 'is_published must be a boolean.' });
+    updates.is_published = is_published;
+  }
+  if (!Object.keys(updates).length) return res.status(400).json({ error: 'At least one review field is required.' });
+  if (supabase) {
+    const { data, error } = await supabase.from('reviews').update(updates).eq('id', req.params.id).select('*').maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'Review not found.' });
+    return res.json(data);
+  }
+  const review = memoryStore.reviews.find((item) => item.id === req.params.id);
+  if (!review) return res.status(404).json({ error: 'Review not found.' });
+  Object.assign(review, updates);
+  return res.json(review);
+});
+
+app.delete('/api/admin/reviews/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+  if (supabase) {
+    const { data, error } = await supabase.from('reviews').delete().eq('id', req.params.id).select('id').maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'Review not found.' });
+    return res.json({ success: true });
+  }
+  const previousCount = memoryStore.reviews.length;
+  memoryStore.reviews = memoryStore.reviews.filter((item) => item.id !== req.params.id);
+  if (memoryStore.reviews.length === previousCount) return res.status(404).json({ error: 'Review not found.' });
+  return res.json({ success: true });
+});
+
 app.get('/api/media', async (req, res) => {
   try {
     if (supabase) {
@@ -565,9 +730,10 @@ app.get('/api/admin/media', async (req, res) => {
         .from('media_items')
         .select('*')
         .order('display_order', { ascending: true });
-      if (!error && data) return res.json(data);
+      if (error) return res.status(500).json({ error: error.message || 'Unable to load media items.' });
+      return res.json(data || []);
     }
-    res.json(memoryStore.media || []);
+    return res.status(503).json({ error: 'Media storage is unavailable because Supabase is not configured.' });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Unable to load media items.' });
   }
@@ -596,15 +762,22 @@ app.post('/api/admin/media', async (req, res) => {
       return res.status(400).json({ error: 'Media title is required.' });
     }
 
-    const normalizedType = media_type === 'video' ? 'video' : 'photo';
+    if (media_type !== 'photo' && media_type !== 'video') {
+      return res.status(400).json({ error: 'Media type must be photo or video.' });
+    }
+    const normalizedType = media_type;
     const cleanYoutube = toSafeYouTubeUrl(youtube_url || null);
     const youtubeVideoId = extractYouTubeVideoId(cleanYoutube || youtube_url || null);
 
-    if (normalizedType === 'video' && !cleanYoutube && !youtubeVideoId) {
+    if (normalizedType === 'video' && !youtubeVideoId) {
       return res.status(400).json({ error: 'A valid YouTube URL is required for video entries.' });
     }
 
-    let storedUrl = media_url || null;
+    if (normalizedType === 'photo' && !media_file_base64) {
+      return res.status(400).json({ error: 'Upload a photo before saving this media item.' });
+    }
+
+    let storedUrl = normalizedType === 'video' ? null : (media_url || null);
     let objectKey = null;
     if (normalizedType === 'photo' && media_file_base64) {
       const matches = media_file_base64.match(/^data:(image\/(png|jpeg|jpg|webp));base64,(.+)$/i);
@@ -617,13 +790,17 @@ app.post('/api/admin/media', async (req, res) => {
         return res.status(400).json({ error: 'Unsupported photo format. Please upload JPEG, PNG, or WebP.' });
       }
       const base64Data = matches[3];
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64Data)) {
+        return res.status(400).json({ error: 'Invalid image upload. The photo data is not valid base64.' });
+      }
       const buffer = Buffer.from(base64Data, 'base64');
+      if (buffer.length === 0) return res.status(400).json({ error: 'The uploaded photo is empty.' });
       if (buffer.length > 5 * 1024 * 1024) {
         return res.status(400).json({ error: 'Photo upload exceeds 5 MB limit.' });
       }
       const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
       const key = `media/${Date.now()}_${crypto.randomUUID()}.${ext}`;
-      const url = await uploadToR2(buffer, key, mime);
+      const url = await uploadMediaToR2(buffer, key, mime);
       storedUrl = url;
       objectKey = key;
     }
@@ -647,15 +824,27 @@ app.post('/api/admin/media', async (req, res) => {
 
     if (supabase) {
       const { data, error } = await supabase.from('media_items').insert([newItem]).select().single();
-      if (error) return res.status(500).json({ error: error.message || 'Failed to create media item.' });
+      if (error) {
+        let cleanupErrorMessage = '';
+        if (objectKey) {
+          try {
+            await deleteManagedR2Object(objectKey);
+          } catch (cleanupError: any) {
+            console.error('[Admin Media Upload Cleanup Error]', cleanupError);
+            cleanupErrorMessage = ` The uploaded photo could not be removed from R2: ${cleanupError.message || 'storage error'}`;
+          }
+        }
+        return res.status(500).json({ error: `${error.message || 'Failed to create media item.'}${cleanupErrorMessage}` });
+      }
       return res.json(data);
     }
 
-    memoryStore.media.unshift(newItem);
-    return res.json(newItem);
+    if (objectKey) await deleteManagedR2Object(objectKey);
+    return res.status(503).json({ error: 'Media storage is unavailable because Supabase is not configured.' });
   } catch (err: any) {
     console.error('[Admin Media Create Error]', err);
-    res.status(500).json({ error: err.message || 'Unable to save media item.' });
+    res.status(err.message?.includes('not configured') || err.message?.includes('public URL') ? 503 : 502)
+      .json({ error: err.message || 'Unable to save media item.' });
   }
 });
 
@@ -681,7 +870,8 @@ app.put('/api/admin/media/:id', async (req, res) => {
 
     let item: any = null;
     if (supabase) {
-      const { data } = await supabase.from('media_items').select('*').eq('id', id).single();
+      const { data, error } = await supabase.from('media_items').select('*').eq('id', id).single();
+      if (error && error.code !== 'PGRST116') return res.status(500).json({ error: error.message });
       item = data;
     } else {
       item = memoryStore.media.find((m) => m.id === id);
@@ -691,11 +881,18 @@ app.put('/api/admin/media/:id', async (req, res) => {
       return res.status(404).json({ error: 'Media item not found.' });
     }
 
-    const nextType = media_type === 'video' ? 'video' : 'photo';
+    const nextType = media_type ?? item.media_type;
+    if (nextType !== 'photo' && nextType !== 'video') {
+      return res.status(400).json({ error: 'Media type must be photo or video.' });
+    }
     const nextYoutube = toSafeYouTubeUrl((youtube_url ?? item.youtube_url) || null);
     const nextYoutubeId = extractYouTubeVideoId(nextYoutube || (youtube_url ?? item.youtube_url) || null);
-    let nextMediaUrl = media_url ?? item.media_url ?? null;
-    let nextObjectKey = item.r2_object_key ?? null;
+    if (nextType === 'video' && !nextYoutubeId) {
+      return res.status(400).json({ error: 'A valid YouTube URL is required for video entries.' });
+    }
+    let nextMediaUrl = nextType === 'video' ? null : (media_url ?? item.media_url ?? null);
+    let nextObjectKey = nextType === 'video' ? null : (item.r2_object_key ?? null);
+    let uploadedObjectKey: string | null = null;
 
     if (nextType === 'photo' && media_file_base64) {
       const matches = media_file_base64.match(/^data:(image\/(png|jpeg|jpg|webp));base64,(.+)$/i);
@@ -706,15 +903,34 @@ app.put('/api/admin/media/:id', async (req, res) => {
       if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime)) {
         return res.status(400).json({ error: 'Unsupported photo format. Please upload JPEG, PNG, or WebP.' });
       }
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(matches[3])) {
+        return res.status(400).json({ error: 'Invalid image upload. The photo data is not valid base64.' });
+      }
       const buffer = Buffer.from(matches[3], 'base64');
+      if (buffer.length === 0) return res.status(400).json({ error: 'The uploaded photo is empty.' });
       if (buffer.length > 5 * 1024 * 1024) {
         return res.status(400).json({ error: 'Photo upload exceeds 5 MB limit.' });
       }
       const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
       const key = `media/${Date.now()}_${crypto.randomUUID()}.${ext}`;
-      const url = await uploadToR2(buffer, key, mime);
+      const url = await uploadMediaToR2(buffer, key, mime);
       nextMediaUrl = url;
       nextObjectKey = key;
+      uploadedObjectKey = key;
+    }
+
+    const previousObjectKey = item.r2_object_key
+      ? getManagedR2Key(item.r2_object_key, 'media')
+      : null;
+    const isReplacingStoredObject = Boolean(item.r2_object_key && (nextType === 'video' || uploadedObjectKey));
+    const shouldRemovePreviousObject = Boolean(previousObjectKey && isReplacingStoredObject && previousObjectKey !== nextObjectKey);
+    if (isReplacingStoredObject && !previousObjectKey) {
+      if (uploadedObjectKey) await deleteManagedR2Object(uploadedObjectKey);
+      return res.status(400).json({ error: 'Stored media object key is invalid; refusing to update the media record.' });
+    }
+    if (shouldRemovePreviousObject && !r2Client) {
+      if (uploadedObjectKey) await deleteManagedR2Object(uploadedObjectKey);
+      return res.status(503).json({ error: 'Cloudflare R2 storage is not configured, so the existing media photo cannot be removed.' });
     }
 
     const updates = {
@@ -734,17 +950,37 @@ app.put('/api/admin/media/:id', async (req, res) => {
 
     if (supabase) {
       const { data, error } = await supabase.from('media_items').update(updates).eq('id', id).select().single();
-      if (error) return res.status(500).json({ error: error.message || 'Failed to update media item.' });
+      if (error) {
+        let cleanupErrorMessage = '';
+        if (uploadedObjectKey) {
+          try {
+            await deleteManagedR2Object(uploadedObjectKey);
+          } catch (cleanupError: any) {
+            console.error('[Admin Media Upload Cleanup Error]', cleanupError);
+            cleanupErrorMessage = ` The uploaded photo could not be removed from R2: ${cleanupError.message || 'storage error'}`;
+          }
+        }
+        return res.status(500).json({ error: `${error.message || 'Failed to update media item.'}${cleanupErrorMessage}` });
+      }
+      if (previousObjectKey && shouldRemovePreviousObject) {
+        try {
+          await deleteManagedR2Object(previousObjectKey);
+        } catch (cleanupError: any) {
+          console.error('[Admin Media R2 Cleanup Error]', cleanupError);
+          return res.status(502).json({ error: `Media details were saved, but the previous R2 photo could not be removed: ${cleanupError.message || 'storage error'}` });
+        }
+      }
       return res.json(data);
     }
 
     const idx = memoryStore.media.findIndex((m) => m.id === id);
     if (idx === -1) return res.status(404).json({ error: 'Media item not found.' });
-    memoryStore.media[idx] = { ...memoryStore.media[idx], ...updates };
-    return res.json(memoryStore.media[idx]);
+    if (uploadedObjectKey) await deleteManagedR2Object(uploadedObjectKey);
+    return res.status(503).json({ error: 'Media storage is unavailable because Supabase is not configured.' });
   } catch (err: any) {
     console.error('[Admin Media Update Error]', err);
-    res.status(500).json({ error: err.message || 'Unable to update media item.' });
+    res.status(err.message?.includes('not configured') || err.message?.includes('public URL') ? 503 : 502)
+      .json({ error: err.message || 'Unable to update media item.' });
   }
 });
 
@@ -755,19 +991,29 @@ app.delete('/api/admin/media/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (supabase) {
-      const { data: existing } = await supabase.from('media_items').select('*').eq('id', id).single();
-      if (existing?.r2_object_key && r2Client) {
+      const { data: existing, error: lookupError } = await supabase.from('media_items').select('*').eq('id', id).single();
+      if (lookupError) {
+        if (lookupError.code === 'PGRST116') return res.status(404).json({ error: 'Media item not found.' });
+        return res.status(500).json({ error: lookupError.message || 'Unable to load media item.' });
+      }
+      const objectKey = existing.r2_object_key ? getManagedR2Key(existing.r2_object_key, 'media') : null;
+      if (existing.r2_object_key && !objectKey) {
+        return res.status(400).json({ error: 'Stored media object key is invalid; refusing to delete the media record.' });
+      }
+      if (objectKey && !r2Client) {
+        return res.status(503).json({ error: 'Cloudflare R2 storage is not configured, so the media photo cannot be deleted.' });
+      }
+      const { data: deleted, error } = await supabase.from('media_items').delete().eq('id', id).select('id').maybeSingle();
+      if (error) return res.status(500).json({ error: error.message || 'Unable to delete media item.' });
+      if (!deleted) return res.status(404).json({ error: 'Media item not found.' });
+      if (objectKey) {
         try {
-          await r2Client.send(new (await import('@aws-sdk/client-s3')).DeleteObjectCommand({
-            Bucket: R2_BUCKET,
-            Key: existing.r2_object_key,
-          }));
-        } catch (deleteErr) {
-          console.warn('[R2 delete warning]', deleteErr);
+          await deleteManagedR2Object(objectKey);
+        } catch (deleteError: any) {
+          console.error('[Admin Media R2 Delete Error]', deleteError);
+          return res.status(502).json({ error: `Media record was deleted, but its R2 photo could not be removed: ${deleteError.message || 'storage error'}` });
         }
       }
-      const { error } = await supabase.from('media_items').delete().eq('id', id);
-      if (error) return res.status(500).json({ error: error.message || 'Unable to delete media item.' });
       return res.json({ success: true, message: 'Media item deleted.' });
     }
 
@@ -795,6 +1041,17 @@ app.get('/api/faqs', async (req, res) => {
   } catch {
     res.json(memoryStore.faqs.filter(f => f.is_published));
   }
+});
+
+app.get('/api/admin/faqs', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'super_admin');
+  if (!admin) return;
+  if (supabase) {
+    const { data, error } = await supabase.from('faqs').select('*').order('display_order', { ascending: true });
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data || []);
+  }
+  return res.json(memoryStore.faqs);
 });
 
 app.get('/api/branding', async (req, res) => {
@@ -1138,7 +1395,7 @@ app.post('/api/approve-application', async (req, res) => {
 
 // POST Retry Failed Notification
 app.post('/api/retry-notification', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'staff');
+  const admin = await requireAdminAuth(req, res, 'super_admin');
   if (!admin) return;
 
   try {
@@ -1296,31 +1553,93 @@ app.get('/api/admin/applications', async (req, res) => {
   if (!admin) return;
 
   if (supabase) {
-    const { data } = await supabase.from('applications').select('*').order('created_at', { ascending: false });
+    const { data, error } = await supabase.from('applications').select('*').order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message || 'Unable to load applications.' });
     return res.json(data || []);
   }
   res.json(memoryStore.applications);
 });
 
+app.put('/api/admin/applications/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+  if (!UUID_PATTERN.test(req.params.id)) return res.status(400).json({ error: 'Application ID must be a valid UUID.' });
+  if (req.body?.status !== 'Pending') {
+    return res.status(400).json({ error: 'Applications can only be returned to Pending here; use the approval action to accept an application.' });
+  }
+
+  if (supabase) {
+    const { data, error } = await supabase.from('applications')
+      .update({ status: 'Pending', approved_by_user_id: null, approved_by_name: null, approved_at: null })
+      .eq('id', req.params.id)
+      .select('*')
+      .maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'Application record not found.' });
+    return res.json(data);
+  }
+
+  const application = memoryStore.applications.find((item) => item.id === req.params.id);
+  if (!application) return res.status(404).json({ error: 'Application record not found.' });
+  Object.assign(application, { status: 'Pending', approved_by_user_id: null, approved_by_name: null, approved_at: null });
+  return res.json(application);
+});
+
 app.delete('/api/admin/applications/:id', async (req, res) => {
   const admin = await requireAdminAuth(req, res, 'super_admin');
   if (!admin) return;
+  if (!UUID_PATTERN.test(req.params.id)) return res.status(400).json({ error: 'Application ID must be a valid UUID.' });
 
   const { id } = req.params;
   if (supabase) {
-    await supabase.from('applications').delete().eq('id', id);
-  } else {
-    memoryStore.applications = memoryStore.applications.filter(a => a.id !== id);
+    const { data: application, error: readError } = await supabase
+      .from('applications').select('id, photo_object_key').eq('id', id).maybeSingle();
+    if (readError) return res.status(500).json({ error: `Unable to load application: ${readError.message}` });
+    if (!application) return res.status(404).json({ error: 'Application not found.' });
+
+    const photoKey = application.photo_object_key
+      ? getManagedR2Key(application.photo_object_key, 'applications')
+      : null;
+    if (application.photo_object_key && !photoKey) {
+      return res.status(500).json({ error: 'Stored application photo R2 object key is invalid; refusing to delete the row.' });
+    }
+    if (photoKey) {
+      try {
+        await deleteManagedR2Object(photoKey);
+      } catch (deleteError: any) {
+        return res.status(502).json({
+          error: 'Unable to remove the application photo; the application record was not deleted.',
+          storage_error: deleteError.message || 'R2 storage error',
+        });
+      }
+    }
+
+    const { data: deleted, error } = await supabase.from('applications').delete().eq('id', id).select('id').maybeSingle();
+    if (error) {
+      return res.status(500).json({
+        error: photoKey
+          ? `The application photo was removed, but the application record could not be deleted: ${error.message}`
+          : `Unable to delete application: ${error.message}`,
+        photo_removed: Boolean(photoKey),
+      });
+    }
+    if (!deleted) return res.status(404).json({ error: 'Application not found.' });
+    return res.json({ success: true, message: 'Application deleted successfully.' });
   }
-  res.json({ success: true, message: 'Application deleted successfully.' });
+
+  const initialCount = memoryStore.applications.length;
+  memoryStore.applications = memoryStore.applications.filter(a => a.id !== id);
+  if (memoryStore.applications.length === initialCount) return res.status(404).json({ error: 'Application not found.' });
+  return res.json({ success: true, message: 'Application deleted successfully.' });
 });
 
 app.get('/api/admin/notifications', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'staff');
+  const admin = await requireAdminAuth(req, res, 'super_admin');
   if (!admin) return;
 
   if (supabase) {
-    const { data } = await supabase.from('application_notifications').select('*').order('created_at', { ascending: false });
+    const { data, error } = await supabase.from('application_notifications').select('*').order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message || 'Unable to load notifications.' });
     return res.json(data || []);
   }
   res.json(memoryStore.notifications);
@@ -1331,10 +1650,32 @@ app.get('/api/admin/callbacks', async (req, res) => {
   if (!admin) return;
 
   if (supabase) {
-    const { data } = await supabase.from('callback_requests').select('*').order('created_at', { ascending: false });
+    const { data, error } = await supabase.from('callback_requests').select('*').order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message || 'Unable to load callback requests.' });
     return res.json(data || []);
   }
   res.json(memoryStore.callbacks);
+});
+
+app.put('/api/admin/callbacks/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+  if (!UUID_PATTERN.test(req.params.id)) return res.status(400).json({ error: 'Callback request ID must be a valid UUID.' });
+  const { status } = req.body || {};
+  if (!['New', 'Contacted', 'Resolved'].includes(status)) {
+    return res.status(400).json({ error: 'Callback status must be New, Contacted, or Resolved.' });
+  }
+  if (supabase) {
+    const { data, error } = await supabase.from('callback_requests')
+      .update({ status }).eq('id', req.params.id).select('*').maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'Callback request not found.' });
+    return res.json(data);
+  }
+  const record = memoryStore.callbacks.find((item) => item.id === req.params.id);
+  if (!record) return res.status(404).json({ error: 'Callback request not found.' });
+  record.status = status;
+  return res.json(record);
 });
 
 app.get('/api/admin/contacts', async (req, res) => {
@@ -1342,10 +1683,32 @@ app.get('/api/admin/contacts', async (req, res) => {
   if (!admin) return;
 
   if (supabase) {
-    const { data } = await supabase.from('contact_enquiries').select('*').order('created_at', { ascending: false });
+    const { data, error } = await supabase.from('contact_enquiries').select('*').order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message || 'Unable to load contact enquiries.' });
     return res.json(data || []);
   }
   res.json(memoryStore.contacts);
+});
+
+app.put('/api/admin/contacts/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'staff');
+  if (!admin) return;
+  if (!UUID_PATTERN.test(req.params.id)) return res.status(400).json({ error: 'Contact enquiry ID must be a valid UUID.' });
+  const { status } = req.body || {};
+  if (!['New', 'Replied', 'Archived'].includes(status)) {
+    return res.status(400).json({ error: 'Contact enquiry status must be New, Replied, or Archived.' });
+  }
+  if (supabase) {
+    const { data, error } = await supabase.from('contact_enquiries')
+      .update({ status }).eq('id', req.params.id).select('*').maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'Contact enquiry not found.' });
+    return res.json(data);
+  }
+  const record = memoryStore.contacts.find((item) => item.id === req.params.id);
+  if (!record) return res.status(404).json({ error: 'Contact enquiry not found.' });
+  record.status = status;
+  return res.json(record);
 });
 
 // Admin Profiles Management (Super Admin only)
@@ -1507,11 +1870,15 @@ app.delete('/api/admin/programs/:id', async (req, res) => {
 
   const { id } = req.params;
   if (supabase) {
-    await supabase.from('programs').delete().eq('id', id);
-  } else {
-    memoryStore.programs = memoryStore.programs.filter(p => p.id !== id);
+    const { data, error } = await supabase.from('programs').delete().eq('id', id).select('id').maybeSingle();
+    if (error) return res.status(500).json({ error: error.message || 'Unable to delete program.' });
+    if (!data) return res.status(404).json({ error: 'Program not found.' });
+    return res.json({ success: true });
   }
-  res.json({ success: true });
+  const previousCount = memoryStore.programs.length;
+  memoryStore.programs = memoryStore.programs.filter(p => p.id !== id);
+  if (memoryStore.programs.length === previousCount) return res.status(404).json({ error: 'Program not found.' });
+  return res.json({ success: true });
 });
 
 // Announcement Admin CRUD (Admin & Super Admin)
@@ -1528,8 +1895,9 @@ app.post('/api/admin/announcements', async (req, res) => {
     created_at: new Date().toISOString(),
   };
   if (supabase) {
-    const { data } = await supabase.from('announcements').insert([item]).select().single();
-    return res.json(data || item);
+    const { data, error } = await supabase.from('announcements').insert([item]).select().single();
+    if (error) return res.status(500).json({ error: error.message || 'Unable to create announcement.' });
+    return res.json(data);
   }
   memoryStore.announcements.push(item);
   res.json(item);
@@ -1560,11 +1928,15 @@ app.delete('/api/admin/announcements/:id', async (req, res) => {
 
   const { id } = req.params;
   if (supabase) {
-    await supabase.from('announcements').delete().eq('id', id);
-  } else {
-    memoryStore.announcements = memoryStore.announcements.filter(a => a.id !== id);
+    const { data, error } = await supabase.from('announcements').delete().eq('id', id).select('id').maybeSingle();
+    if (error) return res.status(500).json({ error: error.message || 'Unable to delete announcement.' });
+    if (!data) return res.status(404).json({ error: 'Announcement not found.' });
+    return res.json({ success: true });
   }
-  res.json({ success: true });
+  const previousCount = memoryStore.announcements.length;
+  memoryStore.announcements = memoryStore.announcements.filter(a => a.id !== id);
+  if (memoryStore.announcements.length === previousCount) return res.status(404).json({ error: 'Announcement not found.' });
+  return res.json({ success: true });
 });
 
 // FAQs Admin CRUD (Super Admin only)
@@ -1616,11 +1988,15 @@ app.delete('/api/admin/faqs/:id', async (req, res) => {
 
   const { id } = req.params;
   if (supabase) {
-    await supabase.from('faqs').delete().eq('id', id);
-  } else {
-    memoryStore.faqs = memoryStore.faqs.filter(f => f.id !== id);
+    const { data, error } = await supabase.from('faqs').delete().eq('id', id).select('id').maybeSingle();
+    if (error) return res.status(500).json({ error: error.message || 'Unable to delete FAQ.' });
+    if (!data) return res.status(404).json({ error: 'FAQ not found.' });
+    return res.json({ success: true });
   }
-  res.json({ success: true });
+  const previousCount = memoryStore.faqs.length;
+  memoryStore.faqs = memoryStore.faqs.filter(f => f.id !== id);
+  if (memoryStore.faqs.length === previousCount) return res.status(404).json({ error: 'FAQ not found.' });
+  return res.json({ success: true });
 });
 
 // -------------------------------------------------------------

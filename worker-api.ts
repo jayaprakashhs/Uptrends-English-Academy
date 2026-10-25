@@ -3,6 +3,7 @@ import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 
 interface Env {
+  SUPABASE_URL?: string;
   VITE_SUPABASE_URL?: string;
   VITE_SUPABASE_ANON_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
@@ -48,8 +49,10 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 
 const errorResponse = (error: string, status: number) => json({ error }, status);
 
+const getSupabaseUrl = (env: Env): string => env.SUPABASE_URL || env.VITE_SUPABASE_URL || '';
+
 const getSupabaseClient = (env: Env, privileged = false): SupabaseClient | null => {
-  const url = env.VITE_SUPABASE_URL || '';
+  const url = getSupabaseUrl(env);
   const key = privileged ? env.SUPABASE_SERVICE_ROLE_KEY || '' : env.VITE_SUPABASE_ANON_KEY || '';
   if (!url || !key) return null;
 
@@ -344,7 +347,7 @@ const READ_COLUMNS = {
   reviews: 'id,author_name,rating,review_text,source,is_published,created_at,updated_at',
   media: 'id,media_type,title,caption,r2_object_key,media_url,youtube_url,youtube_video_id,cover_image_url,alt_text,is_published,display_order,created_at,updated_at',
   faqs: 'id,question,answer,is_published,display_order,created_at,updated_at',
-  applications: 'id,application_reference,student_name,mobile,email,qualification,program_name,address,photo_data_url,message,status,created_at',
+  applications: 'id,application_reference,student_name,mobile,email,qualification,program_name,date_of_birth,address,photo_object_key,photo_data_url,message,status,approved_by_name,approved_at,created_at',
   notifications: 'id,application_id,notification_type,recipient_email,status,attempt_count,provider_message_id,error_message,pdf_attached,sent_at,created_at,updated_at',
   callbacks: 'id,full_name,mobile,email,program_name,preferred_contact_time,message,consent,status,created_at,updated_at',
   contacts: 'id,full_name,email,mobile,subject,message,consent,status,created_at,updated_at',
@@ -1035,7 +1038,7 @@ const approveApplication = async (request: Request, env: Env): Promise<Response>
 };
 
 const retryNotification = async (request: Request, env: Env): Promise<Response> => {
-  const auth = await requireAdmin(request, env, 'staff');
+  const auth = await requireAdmin(request, env, 'super_admin');
   if (isResponse(auth)) return auth;
   const body = await parseJson(request);
   if (isResponse(body)) return body;
@@ -1138,6 +1141,53 @@ const deleteApplication = async (request: Request, env: Env, id: string): Promis
   return json({ success: true, message: 'Application deleted successfully.' });
 };
 
+const updateApplicationStatus = async (request: Request, env: Env, id: string): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'staff');
+  if (isResponse(auth)) return auth;
+  const body = await parseJson(request);
+  if (isResponse(body)) return body;
+  if (body.status !== 'Pending') {
+    return errorResponse('Applications can only be returned to Pending here; use the approval action to accept an application.', 400);
+  }
+
+  const { data, error } = await auth.supabase.from('applications')
+    .update({
+      status: 'Pending',
+      approved_by_user_id: null,
+      approved_by_name: null,
+      approved_at: null,
+    })
+    .eq('id', id)
+    .select(READ_COLUMNS.applications)
+    .maybeSingle();
+  if (error) return errorResponse(`Unable to update application status: ${error.message}`, 500);
+  return data ? json(data) : errorResponse('Application record not found.', 404);
+};
+
+const updateRequestStatus = async (
+  request: Request,
+  env: Env,
+  table: 'callback_requests' | 'contact_enquiries',
+  id: string,
+  allowedStatuses: readonly string[],
+): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'staff');
+  if (isResponse(auth)) return auth;
+  const body = await parseJson(request);
+  if (isResponse(body)) return body;
+  if (typeof body.status !== 'string' || !allowedStatuses.includes(body.status)) {
+    return errorResponse(`status must be one of: ${allowedStatuses.join(', ')}.`, 400);
+  }
+
+  const { data, error } = await auth.supabase.from(table)
+    .update({ status: body.status })
+    .eq('id', id)
+    .select('*')
+    .maybeSingle();
+  if (error) return errorResponse(`Unable to update request status: ${error.message}`, 500);
+  return data ? json(data) : errorResponse('Request record not found.', 404);
+};
+
 const updateBranding = async (request: Request, env: Env): Promise<Response> => {
   const auth = await requireAdmin(request, env, 'super_admin');
   if (isResponse(auth)) return auth;
@@ -1220,8 +1270,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const hasPdfAsset = pdfAsset.ok;
       return json({
         supabase: {
-          configured: Boolean(env.VITE_SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY),
-          url: env.VITE_SUPABASE_URL ? `${env.VITE_SUPABASE_URL.slice(0, 15)}...` : 'Not set',
+          configured: Boolean(getSupabaseClient(env, true)),
+          url: getSupabaseUrl(env) ? `${getSupabaseUrl(env).slice(0, 15)}...` : 'Not set',
         },
         resend: { configured: Boolean(env.RESEND_API_KEY) },
         r2_storage: { configured: Boolean(createR2Client(env) && env.CLOUDFLARE_R2_PUBLIC_URL) },
@@ -1290,7 +1340,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       return methodNotAllowed(['GET', 'POST']);
     }
 
-    const idRoute = pathname.match(/^\/api\/admin\/(programs|announcements|reviews|faqs|media|applications|profiles)\/([^/]+)$/);
+    const idRoute = pathname.match(/^\/api\/admin\/(programs|announcements|reviews|faqs|media|applications|callbacks|contacts|profiles)\/([^/]+)$/);
     if (idRoute) {
       let id: string;
       try { id = decodeURIComponent(idRoute[2]); } catch { return errorResponse('Invalid resource ID.', 400); }
@@ -1321,13 +1371,23 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         if (method === 'DELETE') return deleteMedia(request, env, id);
         return methodNotAllowed(['PUT', 'DELETE']);
       }
-      if (resource === 'applications' && method === 'DELETE') return deleteApplication(request, env, id);
+      if (resource === 'applications') {
+        if (method === 'PUT') return updateApplicationStatus(request, env, id);
+        if (method === 'DELETE') return deleteApplication(request, env, id);
+        return methodNotAllowed(['PUT', 'DELETE']);
+      }
+      if (resource === 'callbacks' && method === 'PUT') {
+        return updateRequestStatus(request, env, 'callback_requests', id, ['New', 'Contacted', 'Resolved']);
+      }
+      if (resource === 'contacts' && method === 'PUT') {
+        return updateRequestStatus(request, env, 'contact_enquiries', id, ['New', 'Replied', 'Archived']);
+      }
       if (resource === 'profiles' && method === 'PUT') return updateProfile(request, env, id);
-      return methodNotAllowed(resource === 'profiles' ? ['PUT'] : ['DELETE']);
+      return methodNotAllowed(resource === 'profiles' ? ['PUT'] : ['PUT', 'DELETE']);
     }
 
     if (pathname === '/api/admin/applications' && method === 'GET') return adminTable(request, env, 'applications', READ_COLUMNS.applications, 'created_at');
-    if (pathname === '/api/admin/notifications' && method === 'GET') return adminTable(request, env, 'application_notifications', READ_COLUMNS.notifications, 'created_at');
+    if (pathname === '/api/admin/notifications' && method === 'GET') return adminTable(request, env, 'application_notifications', READ_COLUMNS.notifications, 'created_at', false, 'super_admin');
     if (pathname === '/api/admin/callbacks' && method === 'GET') return adminTable(request, env, 'callback_requests', READ_COLUMNS.callbacks, 'created_at');
     if (pathname === '/api/admin/contacts' && method === 'GET') return adminTable(request, env, 'contact_enquiries', READ_COLUMNS.contacts, 'created_at');
     if (pathname === '/api/admin/profiles' && method === 'GET') return adminTable(request, env, 'admin_profiles', READ_COLUMNS.profiles, 'created_at', true, 'super_admin');

@@ -45,6 +45,7 @@ import {
   Palette,
   ShieldCheck,
 } from 'lucide-react';
+import { extractYouTubeId } from '../lib/youtube';
 
 interface AdminPortalProps {
   currentAdmin: AdminProfile;
@@ -69,8 +70,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [editingReview, setEditingReview] = useState<Partial<Review> | null>(null);
+  const [reviewSort, setReviewSort] = useState<'latest' | 'oldest'>('latest');
+  const [reviewRatingFilter, setReviewRatingFilter] = useState<'All' | '1' | '2' | '3' | '4' | '5'>('All');
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
+  const [editingFaq, setEditingFaq] = useState<Partial<FAQ> | null>(null);
   const [systemStatus, setSystemStatus] = useState<any>(null);
   const [branding, setBranding] = useState<SiteBranding | null>(null);
   const [editingBranding, setEditingBranding] = useState<Partial<SiteBranding> | null>(null);
@@ -93,10 +97,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   // Selected item modal preview states
   const [selectedApp, setSelectedApp] = useState<StudentApplication | null>(null);
+  const [selectedCallback, setSelectedCallback] = useState<CallbackRequest | null>(null);
+  const [selectedContact, setSelectedContact] = useState<ContactEnquiry | null>(null);
   const [appPhotoModal, setAppPhotoModal] = useState<string | null>(null);
 
   // Program Edit Modal State
   const [editingProgram, setEditingProgram] = useState<Partial<Program> | null>(null);
+  const [viewingProgram, setViewingProgram] = useState<Program | null>(null);
 
   // Announcement New/Edit Modal State
   const [editingAnnouncement, setEditingAnnouncement] = useState<Partial<Announcement> | null>(null);
@@ -104,6 +111,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   // Search and filter states
   const [appSearch, setAppSearch] = useState('');
   const [appFilterStatus, setAppFilterStatus] = useState<'All' | 'Pending' | 'Accepted'>('All');
+  const [callbackSearch, setCallbackSearch] = useState('');
+  const [callbackFilterStatus, setCallbackFilterStatus] = useState<'All' | CallbackRequest['status']>('All');
+  const [contactSearch, setContactSearch] = useState('');
+  const [contactFilterStatus, setContactFilterStatus] = useState<'All' | ContactEnquiry['status']>('All');
   const [notifFilterStatus, setNotifFilterStatus] = useState<'All' | 'Pending' | 'Sent' | 'Failed'>('All');
 
   // Role permissions checking
@@ -121,9 +132,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     return headers;
   };
 
+  const requestJson = async (url: string, init?: RequestInit): Promise<any> => {
+    const response = await fetch(url, init);
+    let data: any;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    if (!response.ok) {
+      const message = data?.error || `Request failed (${response.status}).`;
+      if (response.status === 401) throw new Error(`Your admin session has expired. Sign in again. (${message})`);
+      if (response.status === 403) throw new Error(`You are not authorized to perform this action. (${message})`);
+      throw new Error(message);
+    }
+    return data;
+  };
+
+  const notifyPublicDataChanged = () => window.dispatchEvent(new Event('admin-data-updated'));
+
   const fetchAllData = async () => {
     setLoading(true);
-    setActionMessage(null);
     try {
       const headers = getAuthHeaders();
       const [
@@ -140,21 +169,21 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         brandingRes,
         profilesRes,
       ] = await Promise.all([
-        fetch('/api/admin/applications', { headers }).then((r) => r.json()),
-        fetch('/api/admin/notifications', { headers }).then((r) => r.json()),
-        fetch('/api/admin/callbacks', { headers }).then((r) => r.json()),
-        fetch('/api/admin/contacts', { headers }).then((r) => r.json()),
-        fetch(isAdminOrHigher ? '/api/admin/programs' : '/api/programs', isAdminOrHigher ? { headers } : undefined).then((r) => r.json()),
-        fetch(isAdminOrHigher ? '/api/admin/announcements' : '/api/announcements', isAdminOrHigher ? { headers } : undefined).then((r) => r.json()),
-        fetch('/api/admin/reviews', { headers }).then((r) => r.json()),
-        fetch('/api/admin/media', { headers }).then((r) => r.json()),
+        requestJson('/api/admin/applications', { headers }),
+        isSuperAdmin ? requestJson('/api/admin/notifications', { headers }) : Promise.resolve([]),
+        requestJson('/api/admin/callbacks', { headers }),
+        requestJson('/api/admin/contacts', { headers }),
+        requestJson(isAdminOrHigher ? '/api/admin/programs' : '/api/programs', isAdminOrHigher ? { headers } : undefined),
+        requestJson(isAdminOrHigher ? '/api/admin/announcements' : '/api/announcements', isAdminOrHigher ? { headers } : undefined),
+        requestJson('/api/admin/reviews', { headers }),
+        isAdminOrHigher ? requestJson('/api/admin/media', { headers }) : Promise.resolve([]),
         isSuperAdmin
-          ? fetch('/api/admin/faqs', { headers }).then((r) => r.json())
-          : fetch('/api/faqs').then((r) => r.json()),
-        fetch('/api/system-status').then((r) => r.json()),
-        fetch('/api/branding').then((r) => r.json()),
+          ? requestJson('/api/admin/faqs', { headers })
+          : requestJson('/api/faqs'),
+        requestJson('/api/system-status'),
+        requestJson('/api/branding'),
         isSuperAdmin
-          ? fetch('/api/admin/profiles', { headers }).then((r) => r.json()).catch(() => [])
+          ? requestJson('/api/admin/profiles', { headers })
           : Promise.resolve([]),
       ]);
 
@@ -180,6 +209,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       if (Array.isArray(profilesRes)) setAdminProfiles(profilesRes);
     } catch (err: any) {
       console.error('Error fetching admin data:', err);
+      setActionMessage({ type: 'error', text: err.message || 'Unable to load admin data. Please refresh and try again.' });
     } finally {
       setLoading(false);
     }
@@ -247,6 +277,63 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     }
   };
 
+  const handleMarkApplicationPending = async (appId: string) => {
+    setLoading(true);
+    setActionMessage(null);
+    try {
+      const updated = await requestJson(`/api/admin/applications/${appId}`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ status: 'Pending' }),
+      });
+      setApplications((items) => items.map((item) => item.id === appId ? updated : item));
+      setSelectedApp(updated);
+      setActionMessage({ type: 'success', text: 'Application returned to Pending.' });
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to update application status.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCallbackStatusChange = async (callback: CallbackRequest, status: CallbackRequest['status']) => {
+    setLoading(true);
+    setActionMessage(null);
+    try {
+      const updated = await requestJson(`/api/admin/callbacks/${callback.id}`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ status }),
+      });
+      setCallbacks((items) => items.map((item) => item.id === callback.id ? updated : item));
+      setSelectedCallback(updated);
+      setActionMessage({ type: 'success', text: `Callback request marked ${status}.` });
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to update callback request.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleContactStatusChange = async (contact: ContactEnquiry, status: ContactEnquiry['status']) => {
+    setLoading(true);
+    setActionMessage(null);
+    try {
+      const updated = await requestJson(`/api/admin/contacts/${contact.id}`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ status }),
+      });
+      setContacts((items) => items.map((item) => item.id === contact.id ? updated : item));
+      setSelectedContact(updated);
+      setActionMessage({ type: 'success', text: `Contact enquiry marked ${status}.` });
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to update contact enquiry.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Action: Retry Email Notification
   const handleRetryNotification = async (notifId: string) => {
     setActionMessage(null);
@@ -274,7 +361,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   // Action: Save Program
   const handleSaveProgram = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingProgram || !editingProgram.title) return;
+    if (!editingProgram) return;
+    if (!editingProgram.title?.trim() || !editingProgram.short_description?.trim()
+        || !editingProgram.description?.trim() || !editingProgram.target_audience?.trim()) {
+      setActionMessage({ type: 'error', text: 'Title, short description, full description, and target audience are required.' });
+      return;
+    }
     setLoading(true);
     try {
       const method = editingProgram.id ? 'PUT' : 'POST';
@@ -288,6 +380,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       if (!res.ok) throw new Error(data.error || 'Failed to save program');
       setEditingProgram(null);
       setActionMessage({ type: 'success', text: 'Program updated successfully!' });
+      notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message });
@@ -310,6 +403,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         throw new Error(err.error || 'Failed to delete program');
       }
       setActionMessage({ type: 'success', text: 'Program deleted.' });
+      notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message });
@@ -321,7 +415,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   // Action: Save Announcement
   const handleSaveAnnouncement = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingAnnouncement || !editingAnnouncement.content) return;
+    if (!editingAnnouncement) return;
+    if (!editingAnnouncement.content?.trim()) {
+      setActionMessage({ type: 'error', text: 'Announcement text is required.' });
+      return;
+    }
     setLoading(true);
     try {
       const method = editingAnnouncement.id ? 'PUT' : 'POST';
@@ -329,12 +427,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       const res = await fetch(url, {
         method,
         headers: getAuthHeaders(),
-        body: JSON.stringify(editingAnnouncement),
+        body: JSON.stringify({ ...editingAnnouncement, content: editingAnnouncement.content.trim() }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save announcement');
       setEditingAnnouncement(null);
       setActionMessage({ type: 'success', text: 'Announcement updated successfully!' });
+      notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message });
@@ -357,9 +456,70 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         throw new Error(err.error || 'Failed to delete announcement');
       }
       setActionMessage({ type: 'success', text: 'Announcement deleted.' });
+      notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleToggleAnnouncement = async (announcement: Announcement) => {
+    setLoading(true);
+    setActionMessage(null);
+    try {
+      const updated = await requestJson(`/api/admin/announcements/${announcement.id}`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ is_active: !announcement.is_active }),
+      });
+      setAnnouncements((items) => items.map((item) => item.id === announcement.id ? updated : item));
+      notifyPublicDataChanged();
+      setActionMessage({ type: 'success', text: `Announcement ${updated.is_active ? 'published' : 'unpublished'}.` });
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to update announcement.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveFaq = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingFaq) return;
+    setLoading(true);
+    setActionMessage(null);
+    try {
+      const url = editingFaq.id ? `/api/admin/faqs/${editingFaq.id}` : '/api/admin/faqs';
+      const saved = await requestJson(url, {
+        method: editingFaq.id ? 'PUT' : 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(editingFaq),
+      });
+      setFaqs((items) => editingFaq.id
+        ? items.map((item) => item.id === saved.id ? saved : item)
+        : [...items, saved]);
+      setEditingFaq(null);
+      notifyPublicDataChanged();
+      setActionMessage({ type: 'success', text: 'FAQ saved.' });
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to save FAQ.' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteFaq = async (faqId: string) => {
+    if (!confirm('Delete this FAQ? This cannot be undone.')) return;
+    setLoading(true);
+    setActionMessage(null);
+    try {
+      await requestJson(`/api/admin/faqs/${faqId}`, { method: 'DELETE', headers: getAuthHeaders() });
+      setFaqs((items) => items.filter((item) => item.id !== faqId));
+      notifyPublicDataChanged();
+      setActionMessage({ type: 'success', text: 'FAQ deleted.' });
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Unable to delete FAQ.' });
     } finally {
       setLoading(false);
     }
@@ -380,6 +540,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       if (!res.ok) throw new Error(data.error || 'Unable to save review.');
       setEditingReview(null);
       setActionMessage({ type: 'success', text: 'Review saved.' });
+      notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message || 'Unable to save review.' });
@@ -399,6 +560,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to delete review.');
       setActionMessage({ type: 'success', text: 'Review deleted.' });
+      notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message || 'Unable to delete review.' });
@@ -422,6 +584,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       if (!res.ok) throw new Error(data.error || 'Failed to update branding');
       setBranding(data);
       setActionMessage({ type: 'success', text: 'Branding and logo configurations updated successfully!' });
+      notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message });
@@ -468,8 +631,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const handleMediaFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      setMediaError('Please upload a valid image file for photo entries.');
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setMediaError('Please upload a JPEG, PNG, or WebP image.');
       return;
     }
     if (file.size > 5 * 1024 * 1024) {
@@ -486,6 +649,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         media_file_mime: file.type,
       }));
     };
+    reader.onerror = () => setMediaError('Unable to read this image. Please choose another file.');
     reader.readAsDataURL(file);
   };
 
@@ -495,8 +659,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     setMediaError(null);
 
     try {
+      const { media_file_base64, ...mediaDetails } = mediaForm;
       const payload = {
-        ...mediaForm,
+        ...mediaDetails,
+        ...(media_file_base64 ? { media_file_base64 } : {}),
         media_type: mediaForm.media_type || 'photo',
         title: mediaForm.title?.trim(),
         caption: mediaForm.caption?.trim() || '',
@@ -509,6 +675,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
       if (!payload.title) {
         throw new Error('Media title is required.');
+      }
+
+      if (payload.media_type === 'photo' && !media_file_base64 && !mediaForm.media_url) {
+        throw new Error('Upload a photo before saving this gallery entry.');
       }
 
       if (payload.media_type === 'video' && !payload.youtube_url) {
@@ -527,6 +697,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
       setActionMessage({ type: 'success', text: editingMediaId ? 'Media item updated successfully.' : 'Media item created successfully.' });
       resetMediaForm();
+      notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
       setMediaError(err.message || 'Unable to save media item.');
@@ -548,6 +719,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to delete media item.');
       setActionMessage({ type: 'success', text: 'Media item deleted.' });
+      notifyPublicDataChanged();
       await fetchAllData();
       if (editingMediaId === itemId) resetMediaForm();
     } catch (err: any) {
@@ -568,6 +740,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to update publication status.');
       setActionMessage({ type: 'success', text: `Media marked as ${!item.is_published ? 'published' : 'draft'}.` });
+      notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message || 'Unable to update media status.' });
@@ -611,6 +784,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     const matchesStatus = appFilterStatus === 'All' || app.status === appFilterStatus;
     return matchesSearch && matchesStatus;
   });
+
+  const filteredCallbacks = callbacks.filter((callback) => {
+    const query = callbackSearch.toLowerCase();
+    const matchesSearch = [callback.full_name, callback.mobile, callback.email || '', callback.program_name, callback.message || '']
+      .some((value) => value.toLowerCase().includes(query));
+    return matchesSearch && (callbackFilterStatus === 'All' || callback.status === callbackFilterStatus);
+  });
+
+  const filteredContacts = contacts.filter((contact) => {
+    const query = contactSearch.toLowerCase();
+    const matchesSearch = [contact.full_name, contact.email, contact.mobile || '', contact.subject, contact.message]
+      .some((value) => value.toLowerCase().includes(query));
+    return matchesSearch && (contactFilterStatus === 'All' || contact.status === contactFilterStatus);
+  });
+
+  const filteredReviews = reviews
+    .filter((review) => reviewRatingFilter === 'All' || String(review.rating) === reviewRatingFilter)
+    .sort((left, right) => {
+      const dateDifference = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+      return reviewSort === 'latest' ? -dateDifference : dateDifference;
+    });
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col">
@@ -899,6 +1093,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-semibold disabled:opacity-60">
+                    Refresh Applications
+                  </button>
                   <span className="text-xs font-semibold text-slate-500">Filter Status:</span>
                   {(['All', 'Pending', 'Accepted'] as const).map((status) => (
                     <button
@@ -995,23 +1192,29 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             </td>
                             <td className="px-5 py-4 text-right space-x-2">
                               <button
+                                type="button"
+                                disabled={loading}
                                 onClick={() => setSelectedApp(app)}
-                                className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold cursor-pointer"
+                                className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold cursor-pointer disabled:opacity-50"
                               >
                                 Review
                               </button>
                               {app.status === 'Pending' && (
                                 <button
+                                  type="button"
+                                  disabled={loading}
                                   onClick={() => handleApproveApp(app.id)}
-                                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer shadow-xs"
+                                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer shadow-xs disabled:opacity-50"
                                 >
                                   Approve
                                 </button>
                               )}
                               {isSuperAdmin && (
                                 <button
+                                  type="button"
+                                  disabled={loading}
                                   onClick={() => handleDeleteApplication(app.id)}
-                                  className="px-2 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold cursor-pointer"
+                                  className="px-2 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold cursor-pointer disabled:opacity-50"
                                   title="Permanently Delete Application (Super Admin only)"
                                 >
                                   <Trash2 className="w-3.5 h-3.5 inline" />
@@ -1023,7 +1226,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                       ) : (
                         <tr>
                           <td colSpan={7} className="text-center py-12 text-slate-400">
-                            No applications found matching your criteria.
+                            {loading ? 'Loading applications...' : 'No applications found matching your criteria.'}
                           </td>
                         </tr>
                       )}
@@ -1037,8 +1240,26 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
           {/* TAB 3: CALLBACK REQUESTS */}
           {activeTab === 'callbacks' && (
             <div className="space-y-6">
-              <h1 className="text-2xl font-extrabold text-slate-950">Callback Requests</h1>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h1 className="text-2xl font-extrabold text-slate-950">Callback Requests</h1>
+                  <p className="text-xs text-slate-500 mt-1">Track callback requests using the existing New, Contacted, and Resolved statuses.</p>
+                </div>
+                <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold disabled:opacity-60">
+                  Refresh Callbacks
+                </button>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <label className="relative flex-1">
+                  <Search aria-hidden="true" className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input aria-label="Search callback requests" value={callbackSearch} onChange={(event) => setCallbackSearch(event.target.value)} placeholder="Search name, phone, email, program, or message" className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-lg text-xs" />
+                </label>
+                <select aria-label="Filter callback requests by status" value={callbackFilterStatus} onChange={(event) => setCallbackFilterStatus(event.target.value as typeof callbackFilterStatus)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs">
+                  {(['All', 'New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+                </select>
+              </div>
               <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+                <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[11px] border-b border-slate-200">
                     <tr>
@@ -1048,10 +1269,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                       <th className="px-5 py-3.5">Preferred Time</th>
                       <th className="px-5 py-3.5">Message</th>
                       <th className="px-5 py-3.5">Received</th>
+                      <th className="px-5 py-3.5">Status</th>
+                      <th className="px-5 py-3.5">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700">
-                    {callbacks.map((cb) => (
+                    {filteredCallbacks.map((cb) => (
                       <tr key={cb.id} className="hover:bg-slate-50">
                         <td className="px-5 py-4 font-bold text-slate-900">{cb.full_name}</td>
                         <td className="px-5 py-4 font-medium text-emerald-700">{cb.mobile}</td>
@@ -1067,10 +1290,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                         <td className="px-5 py-4 text-slate-400 text-[11px]">
                           {new Date(cb.created_at).toLocaleDateString('en-IN')}
                         </td>
+                        <td className="px-5 py-4">
+                          <select aria-label={`Status for ${cb.full_name}`} value={cb.status} disabled={loading} onChange={(event) => handleCallbackStatusChange(cb, event.target.value as CallbackRequest['status'])} className="px-2 py-1 border border-slate-200 rounded-lg bg-white">
+                            {(['New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+                          </select>
+                        </td>
+                        <td className="px-5 py-4">
+                          <button type="button" disabled={loading} onClick={() => setSelectedCallback(cb)} className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold disabled:opacity-60">View</button>
+                        </td>
                       </tr>
                     ))}
+                    {!filteredCallbacks.length && <tr><td colSpan={8} className="text-center py-12 text-slate-400">{loading ? 'Loading callback requests...' : callbacks.length ? 'No callback requests match your filters.' : 'No callback requests yet.'}</td></tr>}
                   </tbody>
                 </table>
+                </div>
               </div>
             </div>
           )}
@@ -1078,8 +1311,26 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
           {/* TAB 4: CONTACT ENQUIRIES */}
           {activeTab === 'contacts' && (
             <div className="space-y-6">
-              <h1 className="text-2xl font-extrabold text-slate-950">Contact Enquiries</h1>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h1 className="text-2xl font-extrabold text-slate-950">Contact Enquiries</h1>
+                  <p className="text-xs text-slate-500 mt-1">Track enquiries using the existing New, Replied, and Archived statuses.</p>
+                </div>
+                <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold disabled:opacity-60">
+                  Refresh Enquiries
+                </button>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <label className="relative flex-1">
+                  <Search aria-hidden="true" className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input aria-label="Search contact enquiries" value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder="Search sender, email, subject, or message" className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-lg text-xs" />
+                </label>
+                <select aria-label="Filter contact enquiries by status" value={contactFilterStatus} onChange={(event) => setContactFilterStatus(event.target.value as typeof contactFilterStatus)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs">
+                  {(['All', 'New', 'Replied', 'Archived'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+                </select>
+              </div>
               <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+                <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[11px] border-b border-slate-200">
                     <tr>
@@ -1087,10 +1338,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                       <th className="px-5 py-3.5">Subject</th>
                       <th className="px-5 py-3.5">Message</th>
                       <th className="px-5 py-3.5">Date</th>
+                      <th className="px-5 py-3.5">Status</th>
+                      <th className="px-5 py-3.5">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700">
-                    {contacts.map((cnt) => (
+                    {filteredContacts.map((cnt) => (
                       <tr key={cnt.id} className="hover:bg-slate-50">
                         <td className="px-5 py-4">
                           <div className="font-bold text-slate-900">{cnt.full_name}</div>
@@ -1103,28 +1356,60 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                         <td className="px-5 py-4 text-slate-400 text-[11px]">
                           {new Date(cnt.created_at).toLocaleDateString('en-IN')}
                         </td>
+                        <td className="px-5 py-4">
+                          <select aria-label={`Status for ${cnt.full_name}`} value={cnt.status} disabled={loading} onChange={(event) => handleContactStatusChange(cnt, event.target.value as ContactEnquiry['status'])} className="px-2 py-1 border border-slate-200 rounded-lg bg-white">
+                            {(['New', 'Replied', 'Archived'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+                          </select>
+                        </td>
+                        <td className="px-5 py-4">
+                          <button type="button" disabled={loading} onClick={() => setSelectedContact(cnt)} className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold disabled:opacity-60">View</button>
+                        </td>
                       </tr>
                     ))}
+                    {!filteredContacts.length && <tr><td colSpan={6} className="text-center py-12 text-slate-400">{loading ? 'Loading contact enquiries...' : contacts.length ? 'No contact enquiries match your filters.' : 'No contact enquiries yet.'}</td></tr>}
                   </tbody>
                 </table>
+                </div>
               </div>
             </div>
           )}
 
           {activeTab === 'reviews' && (
             <div className="space-y-6">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <h1 className="text-2xl font-extrabold text-slate-950">Review Management</h1>
                   <p className="text-xs text-slate-500 mt-1">Create reviews and control which ones appear publicly.</p>
                 </div>
-                <button
-                  onClick={() => setEditingReview({ author_name: '', rating: 5, review_text: '', source: 'Verified Student Review', is_published: true })}
-                  className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Add Review</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold disabled:opacity-60">Refresh Reviews</button>
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => setEditingReview({ author_name: '', rating: 5, review_text: '', source: 'Verified Student Review', is_published: true })}
+                    className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-60"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Add Review</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  Rating
+                  <select aria-label="Filter reviews by rating" value={reviewRatingFilter} onChange={(event) => setReviewRatingFilter(event.target.value as typeof reviewRatingFilter)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg">
+                    <option value="All">All ratings</option>
+                    {[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} stars</option>)}
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  Sort
+                  <select aria-label="Sort reviews by date" value={reviewSort} onChange={(event) => setReviewSort(event.target.value as typeof reviewSort)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg">
+                    <option value="latest">Latest</option>
+                    <option value="oldest">Oldest</option>
+                  </select>
+                </label>
               </div>
 
               {editingReview && (
@@ -1153,13 +1438,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   </label>
                   <div className="flex gap-2">
                     <button disabled={loading} type="submit" className="px-4 py-2 bg-orange-600 text-white text-xs font-bold rounded-lg disabled:opacity-60">{loading ? 'Saving...' : editingReview.id ? 'Save Review' : 'Create Review'}</button>
-                    <button type="button" onClick={() => setEditingReview(null)} className="px-4 py-2 bg-slate-100 text-slate-700 text-xs font-bold rounded-lg">Cancel</button>
+                    <button disabled={loading} type="button" onClick={() => setEditingReview(null)} className="px-4 py-2 bg-slate-100 text-slate-700 text-xs font-bold rounded-lg disabled:opacity-60">Cancel</button>
                   </div>
                 </form>
               )}
 
               <div className="bg-white rounded-2xl border border-slate-200 shadow-xs divide-y divide-slate-100">
-                {reviews.length ? reviews.map((review) => (
+                {filteredReviews.length ? filteredReviews.map((review) => (
                   <div key={review.id} className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
                     <div className="min-w-0 space-y-1">
                       <div className="flex items-center gap-2">
@@ -1169,13 +1454,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                       </div>
                       <p className="text-slate-600">{review.review_text}</p>
                       {review.source && <p className="text-slate-400">{review.source}</p>}
+                      <p className="text-slate-400">{new Date(review.created_at).toLocaleDateString('en-IN')}</p>
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
-                      <button onClick={() => setEditingReview(review)} className="font-bold text-orange-600 hover:underline">Edit</button>
-                      <button onClick={() => handleDeleteReview(review.id)} className="font-bold text-rose-600 hover:underline">Delete</button>
+                      <button disabled={loading} onClick={() => setEditingReview(review)} className="font-bold text-orange-600 hover:underline disabled:opacity-50">Edit</button>
+                      <button disabled={loading} onClick={() => handleDeleteReview(review.id)} className="font-bold text-rose-600 hover:underline disabled:opacity-50">Delete</button>
                     </div>
                   </div>
-                )) : <p className="p-8 text-center text-xs text-slate-400">No reviews found.</p>}
+                )) : <p className="p-8 text-center text-xs text-slate-400">{loading ? 'Loading reviews...' : reviews.length ? 'No reviews match the selected rating.' : 'No reviews found.'}</p>}
               </div>
             </div>
           )}
@@ -1183,14 +1469,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
           {/* TAB 5: PROGRAMS MANAGEMENT (Admin/Super Admin only) */}
           {activeTab === 'programs' && (
             <div className="space-y-6">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <h1 className="text-2xl font-extrabold text-slate-950">Programs Management</h1>
                   <p className="text-xs text-slate-500 mt-1">
                     Manage course catalogue, descriptions, audience, and publication status.
                   </p>
                 </div>
+                <div className="flex gap-2">
+                <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold disabled:opacity-60">
+                  Refresh Programs
+                </button>
                 <button
+                  type="button"
+                  disabled={loading}
                   onClick={() =>
                     setEditingProgram({
                       title: '',
@@ -1207,6 +1499,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   <Plus className="w-4 h-4" />
                   <span>Add New Program</span>
                 </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1233,20 +1526,33 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
                     <div className="pt-4 mt-4 border-t border-slate-100 flex items-center justify-between">
                       <button
+                        type="button"
+                        disabled={loading}
+                        onClick={() => setViewingProgram(prog)}
+                        className="text-xs font-bold text-slate-600 hover:underline cursor-pointer disabled:opacity-50"
+                      >
+                        View
+                      </button>
+                      <button
+                        type="button"
+                        disabled={loading}
                         onClick={() => setEditingProgram(prog)}
-                        className="text-xs font-bold text-orange-600 hover:underline cursor-pointer"
+                        className="text-xs font-bold text-orange-600 hover:underline cursor-pointer disabled:opacity-50"
                       >
                         Edit Details
                       </button>
                       <button
+                        type="button"
+                        disabled={loading}
                         onClick={() => handleDeleteProgram(prog.id)}
-                        className="text-xs font-bold text-rose-600 hover:underline cursor-pointer"
+                        className="text-xs font-bold text-rose-600 hover:underline cursor-pointer disabled:opacity-50"
                       >
                         Delete
                       </button>
                     </div>
                   </div>
                 ))}
+                {!programs.length && <p className="col-span-full p-8 text-center text-xs text-slate-400">{loading ? 'Loading programs...' : 'No programs found.'}</p>}
               </div>
             </div>
           )}
@@ -1261,16 +1567,37 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     Manage published and draft photo and YouTube video entries for the public academy gallery.
                   </p>
                 </div>
+                <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-semibold disabled:opacity-60">
+                  Refresh Gallery
+                </button>
                 <button
+                  type="button"
+                  disabled={loading}
                   onClick={() => {
                     resetMediaForm();
+                    setMediaForm((current) => ({ ...current, media_type: 'photo' }));
                     setActiveTab('media');
                   }}
                   className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>Add Media</span>
+                  <span>Add Photo</span>
                 </button>
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => {
+                    resetMediaForm();
+                    setMediaForm((current) => ({ ...current, media_type: 'video' }));
+                    setActiveTab('media');
+                  }}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-60"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Add YouTube Video</span>
+                </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-6">
@@ -1286,11 +1613,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                         <div key={item.id} className="border border-slate-200 rounded-2xl p-3">
                           <div className="flex items-start gap-3">
                             <div className="w-20 h-16 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 shrink-0">
-                              <img
-                                src={item.media_type === 'video' ? (item.cover_image_url || item.media_url || `https://img.youtube.com/vi/${item.youtube_video_id || 'dQw4w9WgXcQ'}/hqdefault.jpg`) : (item.cover_image_url || item.media_url || '')}
-                                alt={item.alt_text || item.title}
-                                className="w-full h-full object-cover"
-                              />
+                              {(item.cover_image_url || item.media_url || (item.media_type === 'video' && item.youtube_video_id))
+                                ? <img
+                                    src={item.cover_image_url || item.media_url || `https://img.youtube.com/vi/${item.youtube_video_id}/hqdefault.jpg`}
+                                    alt={item.alt_text || item.title}
+                                    className="w-full h-full object-cover"
+                                  />
+                                : <div className="w-full h-full flex items-center justify-center text-slate-400"><Video className="w-6 h-6" aria-label="No preview available" /></div>}
                             </div>
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center justify-between gap-2">
@@ -1306,12 +1635,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
                           <div className="mt-3 flex items-center justify-end gap-2">
                             <button
+                              disabled={loading}
                               onClick={() => handleToggleMediaPublished(item)}
-                              className="px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-700 font-semibold text-[11px] cursor-pointer"
+                              className="px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-700 font-semibold text-[11px] cursor-pointer disabled:opacity-50"
                             >
                               {item.is_published ? 'Unpublish' : 'Publish'}
                             </button>
                             <button
+                              disabled={loading}
                               onClick={() => {
                                 setEditingMediaId(item.id);
                                 setMediaForm({
@@ -1321,13 +1652,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                                 });
                                 setMediaError(null);
                               }}
-                              className="px-2.5 py-1.5 rounded-lg bg-orange-50 text-orange-700 font-semibold text-[11px] cursor-pointer"
+                              className="px-2.5 py-1.5 rounded-lg bg-orange-50 text-orange-700 font-semibold text-[11px] cursor-pointer disabled:opacity-50"
                             >
                               Edit
                             </button>
                             <button
+                              disabled={loading}
                               onClick={() => handleDeleteMedia(item.id)}
-                              className="px-2.5 py-1.5 rounded-lg bg-rose-50 text-rose-700 font-semibold text-[11px] cursor-pointer"
+                              className="px-2.5 py-1.5 rounded-lg bg-rose-50 text-rose-700 font-semibold text-[11px] cursor-pointer disabled:opacity-50"
                             >
                               Delete
                             </button>
@@ -1335,7 +1667,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                         </div>
                       ))
                     ) : (
-                      <div className="text-center py-12 text-slate-400 text-xs">No media entries found yet.</div>
+                      <div className="text-center py-12 text-slate-400 text-xs">{loading ? 'Loading gallery...' : 'No media entries found yet.'}</div>
                     )}
                   </div>
                 </div>
@@ -1343,15 +1675,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 <form onSubmit={handleSaveMedia} className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 space-y-4">
                   <div className="flex items-center justify-between">
                     <h2 className="text-lg font-bold text-slate-900">{editingMediaId ? 'Edit Media' : 'Add Media'}</h2>
-                    {editingMediaId && (
-                      <button
-                        type="button"
-                        onClick={resetMediaForm}
-                        className="text-[11px] font-semibold text-slate-500 hover:text-slate-700"
-                      >
-                        Cancel
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      disabled={loading}
+                      onClick={resetMediaForm}
+                      className="text-[11px] font-semibold text-slate-500 hover:text-slate-700 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
                   </div>
 
                   <div className="space-y-2">
@@ -1404,9 +1735,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                         onChange={handleMediaFileChange}
                         className="w-full text-[11px] text-slate-600"
                       />
-                      {mediaForm.media_url && (
+                      {(mediaForm.media_file_base64 || mediaForm.media_url) && (
                         <div className="mt-2 rounded-xl overflow-hidden border border-slate-200">
-                          <img src={mediaForm.media_url} alt={mediaForm.alt_text || mediaForm.title || 'Media preview'} className="w-full h-36 object-cover" />
+                          <img src={mediaForm.media_file_base64 || mediaForm.media_url || ''} alt={mediaForm.alt_text || mediaForm.title || 'Photo preview'} className="w-full h-36 object-cover" />
+                          {mediaForm.media_file_base64 && <p className="px-2 py-1 text-[10px] text-amber-700 bg-amber-50">Local preview — not saved until confirmed by the server.</p>}
                         </div>
                       )}
                     </div>
@@ -1422,6 +1754,17 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                           placeholder="https://www.youtube.com/watch?v=..."
                         />
                       </div>
+                      {extractYouTubeId(mediaForm.youtube_url) && (
+                        <div className="aspect-video overflow-hidden rounded-xl border border-slate-200">
+                          <iframe
+                            title={`${mediaForm.title || 'YouTube video'} preview`}
+                            src={`https://www.youtube-nocookie.com/embed/${extractYouTubeId(mediaForm.youtube_url)}`}
+                            className="w-full h-full"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                            allowFullScreen
+                          />
+                        </div>
+                      )}
                       <div>
                         <label className="block text-[11px] font-bold text-slate-700 mb-1">Cover Image URL (optional)</label>
                         <input
@@ -1491,13 +1834,18 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     Control active scrolling announcements displayed on the public website header.
                   </p>
                 </div>
-                <button
-                  onClick={() => setEditingAnnouncement({ content: '', is_active: true })}
-                  className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Add Announcement</span>
-                </button>
+                <div className="flex gap-2">
+                  <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-semibold disabled:opacity-60">Refresh Announcements</button>
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => setEditingAnnouncement({ content: '', is_active: true })}
+                    className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-60"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Add Announcement</span>
+                  </button>
+                </div>
               </div>
 
               <div className="bg-white rounded-2xl border border-slate-200 shadow-xs divide-y divide-slate-100">
@@ -1515,20 +1863,89 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <button
+                        type="button"
+                        disabled={loading}
+                        onClick={() => handleToggleAnnouncement(ann)}
+                        className="px-3 py-1.5 bg-slate-100 rounded-lg text-slate-700 font-semibold hover:bg-slate-200 cursor-pointer disabled:opacity-50"
+                      >
+                        {ann.is_active ? 'Unpublish' : 'Publish'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={loading}
                         onClick={() => setEditingAnnouncement(ann)}
-                        className="px-3 py-1.5 bg-slate-100 rounded-lg text-slate-700 font-semibold hover:bg-slate-200 cursor-pointer"
+                        className="px-3 py-1.5 bg-slate-100 rounded-lg text-slate-700 font-semibold hover:bg-slate-200 cursor-pointer disabled:opacity-50"
                       >
                         Edit
                       </button>
                       <button
+                        type="button"
+                        disabled={loading}
                         onClick={() => handleDeleteAnnouncement(ann.id)}
-                        className="px-3 py-1.5 bg-rose-50 text-rose-700 rounded-lg font-semibold hover:bg-rose-100 cursor-pointer"
+                        className="px-3 py-1.5 bg-rose-50 text-rose-700 rounded-lg font-semibold hover:bg-rose-100 cursor-pointer disabled:opacity-50"
                       >
                         Delete
                       </button>
                     </div>
                   </div>
                 ))}
+                {!announcements.length && <p className="p-8 text-center text-xs text-slate-400">{loading ? 'Loading announcements...' : 'No announcements found.'}</p>}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'faqs' && isSuperAdmin && (
+            <div className="space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h1 className="text-2xl font-extrabold text-slate-950">FAQ Management</h1>
+                  <p className="text-xs text-slate-500 mt-1">Manage the existing public FAQ catalogue.</p>
+                </div>
+                <div className="flex gap-2">
+                  <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold disabled:opacity-60">Refresh FAQs</button>
+                  <button type="button" disabled={loading} onClick={() => setEditingFaq({ question: '', answer: '', is_published: true, display_order: faqs.length + 1 })} className="px-4 py-2 bg-orange-600 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 disabled:opacity-60">
+                    <Plus className="w-4 h-4" /> Add FAQ
+                  </button>
+                </div>
+              </div>
+
+              {editingFaq && (
+                <form onSubmit={handleSaveFaq} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+                  <label className="block text-xs font-semibold text-slate-700">
+                    Question
+                    <input required maxLength={1000} value={editingFaq.question || ''} onChange={(event) => setEditingFaq({ ...editingFaq, question: event.target.value })} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-lg" />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-700">
+                    Answer
+                    <textarea required maxLength={10000} rows={5} value={editingFaq.answer || ''} onChange={(event) => setEditingFaq({ ...editingFaq, answer: event.target.value })} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-lg" />
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700">
+                    <input type="checkbox" checked={editingFaq.is_published !== false} onChange={(event) => setEditingFaq({ ...editingFaq, is_published: event.target.checked })} />
+                    Published on public FAQs
+                  </label>
+                  <div className="flex gap-2">
+                    <button type="submit" disabled={loading} className="px-4 py-2 bg-orange-600 text-white text-xs font-bold rounded-lg disabled:opacity-60">{loading ? 'Saving...' : 'Save FAQ'}</button>
+                    <button type="button" disabled={loading} onClick={() => setEditingFaq(null)} className="px-4 py-2 bg-slate-100 text-slate-700 text-xs font-bold rounded-lg disabled:opacity-60">Cancel</button>
+                  </div>
+                </form>
+              )}
+
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs divide-y divide-slate-100">
+                {faqs.length ? faqs.map((faq) => (
+                  <article key={faq.id} className="p-5 flex flex-col sm:flex-row sm:items-start justify-between gap-4 text-xs">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <h2 className="font-bold text-slate-900">{faq.question}</h2>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${faq.is_published ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'}`}>{faq.is_published ? 'Published' : 'Draft'}</span>
+                      </div>
+                      <p className="text-slate-600 whitespace-pre-wrap">{faq.answer}</p>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <button type="button" disabled={loading} onClick={() => setEditingFaq(faq)} className="font-bold text-orange-600 hover:underline disabled:opacity-50">Edit</button>
+                      <button type="button" disabled={loading} onClick={() => handleDeleteFaq(faq.id)} className="font-bold text-rose-600 hover:underline disabled:opacity-50">Delete</button>
+                    </div>
+                  </article>
+                )) : <p className="p-8 text-center text-xs text-slate-400">{loading ? 'Loading FAQs...' : 'No FAQs found.'}</p>}
               </div>
             </div>
           )}
@@ -1908,6 +2325,55 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         </main>
       </div>
 
+      {selectedCallback && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70" role="presentation">
+          <section role="dialog" aria-modal="true" aria-labelledby="callback-detail-title" className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center">
+              <h2 id="callback-detail-title" className="text-lg font-bold text-slate-900">Callback Request</h2>
+              <button type="button" aria-label="Close callback details" onClick={() => setSelectedCallback(null)} className="p-2 rounded-lg hover:bg-slate-100"><X className="w-4 h-4" /></button>
+            </div>
+            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div><dt className="text-slate-500">Name</dt><dd className="font-semibold text-slate-900">{selectedCallback.full_name}</dd></div>
+              <div><dt className="text-slate-500">Mobile</dt><dd className="font-semibold text-slate-900">{selectedCallback.mobile}</dd></div>
+              <div><dt className="text-slate-500">Email</dt><dd className="font-semibold text-slate-900">{selectedCallback.email || '—'}</dd></div>
+              <div><dt className="text-slate-500">Program</dt><dd className="font-semibold text-slate-900">{selectedCallback.program_name}</dd></div>
+              <div><dt className="text-slate-500">Preferred time</dt><dd className="font-semibold text-slate-900">{selectedCallback.preferred_contact_time}</dd></div>
+              <div><dt className="text-slate-500">Received</dt><dd className="font-semibold text-slate-900">{new Date(selectedCallback.created_at).toLocaleString('en-IN')}</dd></div>
+            </dl>
+            <p className="p-3 bg-slate-50 rounded-xl text-xs text-slate-700 whitespace-pre-wrap">{selectedCallback.message || 'No message provided.'}</p>
+            <label className="block text-xs font-semibold text-slate-700">Status
+              <select value={selectedCallback.status} disabled={loading} onChange={(event) => handleCallbackStatusChange(selectedCallback, event.target.value as CallbackRequest['status'])} className="ml-2 px-3 py-2 border border-slate-200 rounded-lg">
+                {(['New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+              </select>
+            </label>
+          </section>
+        </div>
+      )}
+
+      {selectedContact && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70" role="presentation">
+          <section role="dialog" aria-modal="true" aria-labelledby="contact-detail-title" className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center">
+              <h2 id="contact-detail-title" className="text-lg font-bold text-slate-900">Contact Enquiry</h2>
+              <button type="button" aria-label="Close contact details" onClick={() => setSelectedContact(null)} className="p-2 rounded-lg hover:bg-slate-100"><X className="w-4 h-4" /></button>
+            </div>
+            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div><dt className="text-slate-500">Name</dt><dd className="font-semibold text-slate-900">{selectedContact.full_name}</dd></div>
+              <div><dt className="text-slate-500">Email</dt><dd className="font-semibold text-slate-900">{selectedContact.email}</dd></div>
+              <div><dt className="text-slate-500">Mobile</dt><dd className="font-semibold text-slate-900">{selectedContact.mobile || '—'}</dd></div>
+              <div><dt className="text-slate-500">Received</dt><dd className="font-semibold text-slate-900">{new Date(selectedContact.created_at).toLocaleString('en-IN')}</dd></div>
+            </dl>
+            <h3 className="font-bold text-sm text-slate-900">{selectedContact.subject}</h3>
+            <p className="p-3 bg-slate-50 rounded-xl text-xs text-slate-700 whitespace-pre-wrap">{selectedContact.message}</p>
+            <label className="block text-xs font-semibold text-slate-700">Status
+              <select value={selectedContact.status} disabled={loading} onChange={(event) => handleContactStatusChange(selectedContact, event.target.value as ContactEnquiry['status'])} className="ml-2 px-3 py-2 border border-slate-200 rounded-lg">
+                {(['New', 'Replied', 'Archived'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+              </select>
+            </label>
+          </section>
+        </div>
+      )}
+
       {/* Application Review Details Modal */}
       {selectedApp && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in">
@@ -1952,6 +2418,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 <span className="text-slate-500 block">Qualification</span>
                 <span className="font-bold text-slate-900">{selectedApp.qualification}</span>
               </div>
+              {selectedApp.date_of_birth && (
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-slate-500 block">Date of Birth</span>
+                  <span className="font-bold text-slate-900">{selectedApp.date_of_birth}</span>
+                </div>
+              )}
               <div className="p-3 bg-slate-50 rounded-xl">
                 <span className="text-slate-500 block">Submission Date</span>
                 <span className="font-bold text-slate-900">
@@ -1977,11 +2449,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             {selectedApp.photo_data_url && (
               <div className="text-xs">
                 <span className="text-slate-500 block font-semibold mb-2">Student Passport Photo</span>
-                <img
-                  src={selectedApp.photo_data_url}
-                  alt="Student Passport"
-                  className="w-28 h-36 object-cover rounded-xl border border-slate-300 shadow-xs"
-                />
+                <button type="button" onClick={() => setAppPhotoModal(selectedApp.photo_data_url || null)} className="block rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500">
+                  <img
+                    src={selectedApp.photo_data_url}
+                    alt="View student passport photo"
+                    className="w-28 h-36 object-cover rounded-xl border border-slate-300 shadow-xs"
+                  />
+                </button>
               </div>
             )}
 
@@ -1993,8 +2467,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               <div className="flex items-center gap-2">
                 {isSuperAdmin && (
                   <button
+                    type="button"
+                    disabled={loading}
                     onClick={() => handleDeleteApplication(selectedApp.id)}
-                    className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl cursor-pointer flex items-center gap-1.5"
+                    className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     <span>Delete Record</span>
@@ -2003,11 +2479,23 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
                 {selectedApp.status === 'Pending' && (
                   <button
+                    type="button"
+                    disabled={loading}
                     onClick={() => handleApproveApp(selectedApp.id)}
-                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md cursor-pointer flex items-center gap-1.5"
+                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                   >
                     <CheckCircle className="w-4 h-4" />
                     <span>Confirm Approval & Send Official PDF</span>
+                  </button>
+                )}
+                {selectedApp.status === 'Accepted' && (
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => handleMarkApplicationPending(selectedApp.id)}
+                    className="px-4 py-2 bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold text-xs rounded-xl disabled:opacity-50"
+                  >
+                    Mark Pending
                   </button>
                 )}
               </div>
@@ -2032,6 +2520,33 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       )}
 
       {/* Program Add/Edit Modal */}
+      {viewingProgram && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" role="presentation">
+          <section role="dialog" aria-modal="true" aria-labelledby="program-detail-title" className="bg-white rounded-3xl max-w-lg w-full p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 id="program-detail-title" className="font-bold text-lg text-slate-900">{viewingProgram.title}</h2>
+                <p className="text-xs text-slate-500">{viewingProgram.is_published ? 'Published' : 'Draft'}</p>
+              </div>
+              <button type="button" aria-label="Close program details" onClick={() => setViewingProgram(null)} className="p-2 rounded-lg hover:bg-slate-100"><X className="w-4 h-4" /></button>
+            </div>
+            {viewingProgram.image_url && <img src={viewingProgram.image_url} alt="" className="w-full max-h-48 object-cover rounded-xl" />}
+            <p className="text-sm text-slate-700">{viewingProgram.short_description}</p>
+            <p className="text-xs text-slate-600 whitespace-pre-wrap">{viewingProgram.description}</p>
+            <dl className="grid grid-cols-2 gap-3 text-xs">
+              <div><dt className="text-slate-500">Level</dt><dd className="font-semibold">{viewingProgram.level || '—'}</dd></div>
+              <div><dt className="text-slate-500">Duration</dt><dd className="font-semibold">{viewingProgram.duration || '—'}</dd></div>
+              <div><dt className="text-slate-500">Target audience</dt><dd className="font-semibold">{viewingProgram.target_audience}</dd></div>
+              <div><dt className="text-slate-500">Age range</dt><dd className="font-semibold">{viewingProgram.age_range || '—'}</dd></div>
+            </dl>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setViewingProgram(null)} className="px-4 py-2 border rounded-xl text-slate-600">Close</button>
+              <button type="button" onClick={() => { setEditingProgram(viewingProgram); setViewingProgram(null); }} className="px-4 py-2 bg-orange-600 text-white font-bold rounded-xl">Edit Program</button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {editingProgram && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
           <div className="bg-white rounded-3xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
@@ -2112,16 +2627,18 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               <div className="pt-4 flex justify-end gap-2">
                 <button
                   type="button"
+                  disabled={loading}
                   onClick={() => setEditingProgram(null)}
-                  className="px-4 py-2 border rounded-xl text-slate-600"
+                  className="px-4 py-2 border rounded-xl text-slate-600 disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-orange-600 text-white font-bold rounded-xl"
+                  disabled={loading}
+                  className="px-4 py-2 bg-orange-600 text-white font-bold rounded-xl disabled:opacity-50"
                 >
-                  Save Program
+                  {loading ? 'Saving...' : 'Save Program'}
                 </button>
               </div>
             </form>
@@ -2161,16 +2678,18 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               <div className="pt-4 flex justify-end gap-2">
                 <button
                   type="button"
+                  disabled={loading}
                   onClick={() => setEditingAnnouncement(null)}
-                  className="px-4 py-2 border rounded-xl text-slate-600"
+                  className="px-4 py-2 border rounded-xl text-slate-600 disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-orange-600 text-white font-bold rounded-xl"
+                  disabled={loading}
+                  className="px-4 py-2 bg-orange-600 text-white font-bold rounded-xl disabled:opacity-50"
                 >
-                  Save Notice
+                  {loading ? 'Saving...' : 'Save Notice'}
                 </button>
               </div>
             </form>

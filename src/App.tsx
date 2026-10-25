@@ -94,6 +94,42 @@ export function App() {
       .catch((e) => console.error('Error fetching faqs:', e));
   }, []);
 
+  useEffect(() => {
+    const refreshCollection = async <T,>(
+      url: string,
+      setData: React.Dispatch<React.SetStateAction<T[]>>,
+    ) => {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Request failed (${response.status}).`);
+        const data: unknown = await response.json();
+        if (Array.isArray(data)) setData(data as T[]);
+      } catch (error) {
+        console.error(`Failed to refresh public data from ${url}:`, error);
+      }
+    };
+
+    const refreshPublicCatalogue = async () => {
+      await Promise.all([
+        refreshCollection<Program>('/api/programs', setPrograms),
+        refreshCollection<Review>('/api/reviews', setReviews),
+        refreshCollection<MediaItem>('/api/media', setMediaItems),
+        refreshCollection<FAQ>('/api/faqs', setFaqs),
+      ]);
+      try {
+        const response = await fetch('/api/branding');
+        if (!response.ok) throw new Error(`Request failed (${response.status}).`);
+        const data = await response.json();
+        if (data?.academy_name) setBranding(data);
+      } catch (error) {
+        console.error('Failed to refresh public branding:', error);
+      }
+    };
+
+    window.addEventListener('admin-data-updated', refreshPublicCatalogue);
+    return () => window.removeEventListener('admin-data-updated', refreshPublicCatalogue);
+  }, []);
+
   const openCallbackModal = (progName?: string) => {
     setCallbackProgram(progName || 'General English Training');
     setCallbackOpen(true);
