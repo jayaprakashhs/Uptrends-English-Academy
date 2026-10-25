@@ -1,10 +1,16 @@
+
 @import "tailwindcss";
+
+/* ==============================
+   Marquee animation
+   ============================== */
 
 @layer utilities {
   @keyframes marquee {
     0% {
       transform: translateX(0%);
     }
+
     100% {
       transform: translateX(-50%);
     }
@@ -17,9 +23,143 @@
   }
 }
 
+/* ==============================
+   Global page defaults
+   ============================== */
+
+html {
+  min-width: 320px;
+  scroll-padding-top: 6rem;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
-  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  min-width: 320px;
+  margin: 0;
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
   color: #0f172a;
   background-color: #f8fafc;
-  overflow-x: hidden;
+  overflow-x: clip;
+}
+
+/* Consistent element sizing */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Prevent media from overflowing containers */
+img,
+video,
+canvas,
+iframe,
+svg {
+  max-width: 100%;
+}
+
+img,
+video {
+  height: auto;
+}
+
+/* ==============================
+   Main logo sizing
+   ============================== */
+
+.main-logo {
+  display: block;
+  width: auto;
+  height: 48px;
+  max-width: 180px;
+  object-fit: contain;
+}
+
+@media (max-width: 640px) {
+  .main-logo {
+    height: 38px;
+    max-width: 145px;
+  }
+}
+
+/* ==============================
+   Cursor and interaction states
+   ============================== */
+
+button:not(:disabled),
+input[type="button"]:not(:disabled),
+input[type="submit"]:not(:disabled),
+input[type="reset"]:not(:disabled),
+select:not(:disabled),
+a[href],
+summary,
+[role="button"]:not([aria-disabled="true"]),
+[role="link"]:not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* Consistent, responsive form controls */
+button,
+input,
+select,
+textarea {
+  max-width: 100%;
+  font: inherit;
+}
+
+textarea {
+  resize: vertical;
+}
+
+/* Prevent long content from widening layouts */
+pre,
+code,
+td,
+th,
+p,
+label,
+a {
+  overflow-wrap: anywhere;
+}
+
+/* ==============================
+   Mobile and tablet adjustments
+   ============================== */
+
+@media (max-width: 640px) {
+  html {
+    scroll-padding-top: 5rem;
+  }
+
+  button,
+  input[type="button"],
+  input[type="submit"],
+  input[type="reset"],
+  select {
+    touch-action: manipulation;
+  }
+}
+
+/* ==============================
+   Accessibility: reduced motion
+   ============================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

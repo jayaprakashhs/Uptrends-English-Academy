@@ -19,27 +19,27 @@ export const Logo: React.FC<LogoProps> = ({
   logoUrl,
   altText = "Uptrend's English Academy Davangere Logo",
 }) => {
-  // Display dimensions for the logo.
+  // Responsive logo dimensions.
   const customLogoSizes = {
-    sm: 'w-[280px] h-[64px]',
-    md: 'w-[350px] h-[80px]',
-    lg: 'w-[350px] h-[80px]',
+    sm: 'w-[120px] h-[32px] sm:w-[140px] sm:h-[40px]',
+    md: 'w-[140px] h-[40px] sm:w-[160px] sm:h-[46px] lg:w-[180px] lg:h-[52px]',
+    lg: 'w-[160px] h-[46px] sm:w-[180px] sm:h-[52px] lg:w-[200px] lg:h-[58px]',
   };
 
-  // An Admin Portal logo takes priority over the default logo.
+  // The supplied logo URL takes priority over the default logo.
   const effectiveLogoUrl = logoUrl?.trim() || DEFAULT_LOGO_URL;
 
   return (
-    <div className={`flex items-center gap-3 select-none ${className}`}>
+    <div className={`flex min-w-0 items-center gap-3 select-none ${className}`}>
       <div
-        className={`relative flex items-center justify-center shrink-0 ${customLogoSizes[size]}`}
+        className={`relative flex shrink-0 items-center justify-center ${customLogoSizes[size]}`}
       >
         <img
           src={effectiveLogoUrl}
           alt={altText}
-          width={350}
-          height={80}
-          className="block w-full h-full object-contain"
+          width={200}
+          height={58}
+          className="block h-full w-full object-contain"
           loading="eager"
           onError={(event) => {
             event.currentTarget.style.visibility = 'hidden';
