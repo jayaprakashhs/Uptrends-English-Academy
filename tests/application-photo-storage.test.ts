@@ -51,6 +51,40 @@ test('accepts only managed application R2 keys and their configured public URL f
   );
 });
 
+test('accepts only managed program image R2 keys', () => {
+  const key = 'programs/11111111-1111-1111-1111-111111111103.webp';
+
+  assert.equal(managedR2ObjectKeyFromMetadata(key, undefined, 'programs'), key);
+  assert.equal(
+    managedR2ObjectKeyFromMetadata(
+      `https://media.example/${key}`,
+      'https://media.example/',
+      'programs',
+    ),
+    key,
+  );
+  assert.equal(
+    managedR2ObjectKeyFromMetadata('media/photo.webp', undefined, 'programs'),
+    null,
+  );
+  assert.equal(
+    managedR2ObjectKeyFromMetadata('applications/photo.jpg', undefined, 'programs'),
+    null,
+  );
+  assert.equal(
+    managedR2ObjectKeyFromMetadata('programs/../../private.jpg', undefined, 'programs'),
+    null,
+  );
+  assert.equal(
+    managedR2ObjectKeyFromMetadata(
+      'https://untrusted.example/programs/photo.jpg',
+      'https://media.example',
+      'programs',
+    ),
+    null,
+  );
+});
+
 test('removes a verified legacy upload only from the configured upload directory', async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'academy-uploads-'));
   const uploadDirectory = path.join(tempRoot, 'public', 'uploads');

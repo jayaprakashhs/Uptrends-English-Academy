@@ -129,7 +129,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [appPhotoModal, setAppPhotoModal] = useState<string | null>(null);
 
   // Program Edit Modal State
-  const [editingProgram, setEditingProgram] = useState<Partial<Program> | null>(null);
+  const [editingProgram, setEditingProgram] = useState<(Partial<Program> & { image_file_base64?: string }) | null>(null);
   const [viewingProgram, setViewingProgram] = useState<Program | null>(null);
 
   // Announcement New/Edit Modal State
@@ -651,6 +651,41 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     });
     setEditingMediaId(null);
     setMediaError(null);
+  };
+
+  const handleProgramImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setActionMessage({ type: 'error', text: 'Please select a JPEG, PNG, or WebP image.' });
+      event.target.value = '';
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      setActionMessage({ type: 'error', text: 'Program images must be 5 MB or smaller.' });
+      event.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      if (!result.startsWith('data:image/')) {
+        setActionMessage({ type: 'error', text: 'Unable to read this image. Please choose another file.' });
+        return;
+      }
+      setEditingProgram((current) => current ? {
+        ...current,
+        image_file_base64: result,
+      } : current);
+      setActionMessage(null);
+    };
+    reader.onerror = () => {
+      setActionMessage({ type: 'error', text: 'Unable to read this image. Please choose another file.' });
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleMediaFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1548,6 +1583,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 {programs.map((prog) => (
                   <div key={prog.id} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex flex-col justify-between">
                     <div>
+                      <img
+                        src={prog.image_url || 'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80'}
+                        alt={`${prog.title} program`}
+                        loading="lazy"
+                        className="mb-4 h-40 w-full rounded-xl object-cover bg-slate-100"
+                      />
                       <div className="flex items-center justify-between mb-2">
                         <span
                           className={`text-[10px] font-bold px-2 py-0.5 rounded ${
@@ -2608,7 +2649,32 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             <h3 className="font-bold text-lg text-slate-900">
               {editingProgram.id ? 'Edit Program' : 'Add New Program'}
             </h3>
-            <form onSubmit={handleSaveProgram} className="space-y-3 text-xs">
+            <form onSubmit={handleSaveProgram} className="space-y-3 text-xs max-h-[75vh] overflow-y-auto pr-1">
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Program Image</label>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={handleProgramImageChange}
+                  disabled={loading}
+                  className="block w-full rounded-xl border border-slate-200 p-2 text-xs"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  JPEG, PNG, or WebP; maximum 5 MB. Leave empty to keep the current image.
+                </p>
+                {(editingProgram.image_file_base64 || editingProgram.image_url) && (
+                  <img
+                    src={editingProgram.image_file_base64 || editingProgram.image_url}
+                    alt="Program image preview"
+                    className="mt-3 h-40 w-full rounded-xl object-cover bg-slate-100"
+                  />
+                )}
+                {editingProgram.image_file_base64 && (
+                  <p className="mt-1 text-[11px] font-semibold text-emerald-700">
+                    New image selected — it will replace the current image when saved.
+                  </p>
+                )}
+              </div>
               <div>
                 <label className="font-bold text-slate-700 block mb-1">Title</label>
                 <input

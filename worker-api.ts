@@ -343,40 +343,51 @@ const decodeImage = (value: unknown, maxBytes: number): ImagePayload | Response 
   }
 };
 
-const bucketForPrefix = (env: Env, prefix: 'applications' | 'media'): R2BucketBinding | undefined =>
+const bucketForPrefix = (
+  env: Env,
+  prefix: 'applications' | 'media' | 'programs',
+): R2BucketBinding | undefined =>
   prefix === 'applications' ? env.APPLICATION_MEDIA : env.PUBLIC_MEDIA;
 
 function uploadToR2(env: Env, image: ImagePayload, prefix: 'applications'): Promise<{ key: string } | Response>;
-function uploadToR2(env: Env, image: ImagePayload, prefix: 'media'): Promise<{ key: string; url: string } | Response>;
+function uploadToR2(env: Env, image: ImagePayload, prefix: 'media' | 'programs'): Promise<{ key: string; url: string } | Response>;
 async function uploadToR2(
   env: Env,
   image: ImagePayload,
-  prefix: 'applications' | 'media',
+  prefix: 'applications' | 'media' | 'programs',
 ): Promise<{ key: string; url?: string } | Response> {
   const bucket = bucketForPrefix(env, prefix);
   const publicUrl = env.CLOUDFLARE_R2_PUBLIC_URL?.replace(/\/+$/, '');
+
   if (!bucket) {
     return errorResponse(prefix === 'applications'
       ? 'Private application photo storage is not configured.'
-      : 'Public gallery media storage is not configured.', 503);
+      : 'Public R2 media storage is not configured.', 503);
   }
-  if (prefix === 'media' && (!publicUrl || !URL.canParse(publicUrl) || new URL(publicUrl).protocol !== 'https:')) {
-    return errorResponse('A valid HTTPS R2 public URL is not configured, so uploaded photos cannot be served.', 503);
+
+  if (
+    prefix !== 'applications' &&
+    (!publicUrl || !URL.canParse(publicUrl) || new URL(publicUrl).protocol !== 'https:')
+  ) {
+    return errorResponse('A valid HTTPS R2 public URL is not configured, so uploaded images cannot be served.', 503);
   }
 
   const extension = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg';
   const key = `${prefix}/${crypto.randomUUID()}.${extension}`;
+
   try {
     await bucket.put(key, image.bytes, { httpMetadata: { contentType: image.mime } });
-    return prefix === 'media'
-      ? { key, url: `${publicUrl}/${key}` }
-      : { key };
+    return prefix === 'applications' ? { key } : { key, url: `${publicUrl}/${key}` };
   } catch (error) {
     return errorResponse(`R2 upload failed: ${messageOf(error)}`, 502);
   }
 }
 
-const deleteFromR2 = async (env: Env, key: string, prefix: 'applications' | 'media'): Promise<void> => {
+const deleteFromR2 = async (
+  env: Env,
+  key: string,
+  prefix: 'applications' | 'media' | 'programs',
+): Promise<void> => {
   if (managedR2ObjectKeyFromMetadata(key, undefined, prefix) !== key) {
     throw new Error('R2 object key is invalid.');
   }
@@ -385,7 +396,11 @@ const deleteFromR2 = async (env: Env, key: string, prefix: 'applications' | 'med
   await bucket.delete(key);
 };
 
-const objectKeyFromMetadata = (env: Env, value: unknown, expectedPrefix: 'applications' | 'media'): string | null => {
+const objectKeyFromMetadata = (
+  env: Env,
+  value: unknown,
+  expectedPrefix: 'applications' | 'media' | 'programs',
+): string | null => {
   return managedR2ObjectKeyFromMetadata(value, env.CLOUDFLARE_R2_PUBLIC_URL, expectedPrefix);
 };
 
@@ -559,6 +574,7 @@ const createProgram = async (request: Request, env: Env): Promise<Response> => {
   if (isResponse(suppliedSlug)) return suppliedSlug;
   const slug = (suppliedSlug || validated.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')).toLowerCase();
   if (!slug) return errorResponse('A valid program slug is required.', 400);
+
   let displayOrder = 0;
   if (Number.isInteger(body.display_order)) {
     displayOrder = Number(body.display_order);
@@ -569,27 +585,51 @@ const createProgram = async (request: Request, env: Env): Promise<Response> => {
     displayOrder = (lastProgram?.display_order || 0) + 1;
   }
 
+  const duration = optionalString(body.duration, 'duration', 200);
+  const level = optionalString(body.level, 'level', 200);
+  const ageRange = optionalString(body.age_range, 'age range', 200);
+  const suppliedImageUrl = optionalString(body.image_url, 'image URL', 2048);
+  if (isResponse(duration)) return duration;
+  if (isResponse(level)) return level;
+  if (isResponse(ageRange)) return ageRange;
+  if (isResponse(suppliedImageUrl)) return suppliedImageUrl;
+
+  let imageUrl = suppliedImageUrl || 'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80';
+  let imageObjectKey: string | null = null;
+
+  if (body.image_file_base64 !== undefined) {
+    const image = decodeImage(body.image_file_base64, MAX_MEDIA_BYTES);
+    if (isResponse(image)) return image;
+    const upload = await uploadToR2(env, image, 'programs');
+    if (isResponse(upload)) return upload;
+    imageUrl = upload.url;
+    imageObjectKey = upload.key;
+  } else if (body.image_object_key !== undefined && body.image_object_key !== null && body.image_object_key !== '') {
+    return errorResponse('An image object key can only be set by uploading a program image.', 400);
+  }
+
   const row = {
     title: validated.title,
     slug,
     short_description: validated.short_description,
     description: validated.description,
     target_audience: validated.target_audience,
-    duration: optionalString(body.duration, 'duration', 200),
-    level: optionalString(body.level, 'level', 200),
-    age_range: optionalString(body.age_range, 'age range', 200),
-    image_url: optionalString(body.image_url, 'image URL', 2048),
-    image_object_key: optionalString(body.image_object_key, 'image object key', 512),
+    duration,
+    level,
+    age_range: ageRange,
+    image_url: imageUrl,
+    image_object_key: imageObjectKey,
     is_published: body.is_published === true,
     display_order: displayOrder,
   };
-  for (const field of ['duration', 'level', 'age_range', 'image_url', 'image_object_key'] as const) {
-    if (isResponse(row[field])) return row[field];
-  }
-  if (!row.image_url) row.image_url = 'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80';
 
   const { data, error } = await auth.supabase.from('programs').insert(row).select().single();
-  if (error) return errorResponse(`Failed to create program: ${error.message}`, 500);
+  if (error) {
+    if (imageObjectKey) {
+      try { await deleteFromR2(env, imageObjectKey, 'programs'); } catch {}
+    }
+    return errorResponse(`Failed to create program: ${error.message}`, 500);
+  }
   return json(data, 201);
 };
 
@@ -598,29 +638,90 @@ const updateProgram = async (request: Request, env: Env, id: string): Promise<Re
   if (isResponse(auth)) return auth;
   const body = await parseJson(request);
   if (isResponse(body)) return body;
-  const updates: Record<string, unknown> = {};
 
-  for (const field of ['title', 'slug', 'short_description', 'description', 'target_audience', 'duration', 'level', 'age_range', 'image_url', 'image_object_key'] as const) {
+  const { data: current, error: currentError } = await auth.supabase
+    .from('programs')
+    .select('id,image_url,image_object_key')
+    .eq('id', id)
+    .maybeSingle();
+  if (currentError) return errorResponse(`Failed to load program: ${currentError.message}`, 500);
+  if (!current) return errorResponse('Program not found.', 404);
+
+  const updates: Record<string, unknown> = {};
+  for (const field of ['title', 'slug', 'short_description', 'description', 'target_audience', 'duration', 'level', 'age_range', 'image_url'] as const) {
     if (body[field] === undefined) continue;
-    const value = field === 'duration' || field === 'level' || field === 'age_range' || field === 'image_url' || field === 'image_object_key'
-      ? optionalString(body[field], field.replaceAll('_', ' '), field === 'image_url' ? 2048 : 10000)
+    const value = field === 'duration' || field === 'level' || field === 'age_range' || field === 'image_url'
+      ? optionalString(body[field], field.replaceAll('_', ' '), field === 'image_url' ? 2048 : 200)
       : requiredString(body[field], field.replaceAll('_', ' '), field === 'description' ? 10000 : 500);
     if (isResponse(value)) return value;
     updates[field] = value;
   }
+
+  if (body.image_object_key !== undefined) {
+    return errorResponse('An image object key can only be changed by uploading a program image.', 400);
+  }
+
+  let newImageObjectKey: string | null = null;
+  if (body.image_file_base64 !== undefined) {
+    const image = decodeImage(body.image_file_base64, MAX_MEDIA_BYTES);
+    if (isResponse(image)) return image;
+
+    const upload = await uploadToR2(env, image, 'programs');
+    if (isResponse(upload)) return upload;
+
+    newImageObjectKey = upload.key;
+    updates.image_url = upload.url;
+    updates.image_object_key = upload.key;
+  }
+
   if (body.is_published !== undefined) {
-    if (typeof body.is_published !== 'boolean') return errorResponse('is_published must be a boolean.', 400);
+    if (typeof body.is_published !== 'boolean') {
+      if (newImageObjectKey) {
+        try { await deleteFromR2(env, newImageObjectKey, 'programs'); } catch {}
+      }
+      return errorResponse('is_published must be a boolean.', 400);
+    }
     updates.is_published = body.is_published;
   }
+
   if (body.display_order !== undefined) {
-    if (!Number.isInteger(body.display_order)) return errorResponse('display_order must be an integer.', 400);
+    if (!Number.isInteger(body.display_order)) {
+      if (newImageObjectKey) {
+        try { await deleteFromR2(env, newImageObjectKey, 'programs'); } catch {}
+      }
+      return errorResponse('display_order must be an integer.', 400);
+    }
     updates.display_order = body.display_order;
   }
-  if (!Object.keys(updates).length) return errorResponse('At least one editable program field is required.', 400);
 
-  const { data, error } = await auth.supabase.from('programs').update(updates).eq('id', id).select().maybeSingle();
-  if (error) return errorResponse(`Failed to update program: ${error.message}`, 500);
-  return data ? json(data) : errorResponse('Program not found.', 404);
+  if (!Object.keys(updates).length) {
+    return errorResponse('At least one editable program field is required.', 400);
+  }
+
+  const { data, error } = await auth.supabase
+    .from('programs').update(updates).eq('id', id).select().maybeSingle();
+
+  if (error || !data) {
+    if (newImageObjectKey) {
+      try { await deleteFromR2(env, newImageObjectKey, 'programs'); } catch {}
+    }
+    if (error) return errorResponse(`Failed to update program: ${error.message}`, 500);
+    return errorResponse('Program not found.', 404);
+  }
+
+  if (newImageObjectKey) {
+    const previousReference = current.image_object_key || current.image_url;
+    const previousKey = objectKeyFromMetadata(env, previousReference, 'programs');
+    if (previousKey && previousKey !== newImageObjectKey) {
+      try {
+        await deleteFromR2(env, previousKey, 'programs');
+      } catch {
+        // Preserve the successful program update if old-image cleanup fails.
+      }
+    }
+  }
+
+  return json(data);
 };
 
 const deleteRow = async (request: Request, env: Env, table: string, id: string, minimumRole: AdminProfile['role'], label: string): Promise<Response> => {

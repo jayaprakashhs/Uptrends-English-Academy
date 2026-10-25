@@ -12,7 +12,7 @@ export const legacyUploadFilenameFromMetadata = (value: unknown): string | null 
 export const managedR2ObjectKeyFromMetadata = (
   value: unknown,
   publicUrl: string | undefined,
-  expectedPrefix: 'applications' | 'media',
+  expectedPrefix: 'applications' | 'media' | 'programs',
 ): string | null => {
   if (typeof value !== 'string' || !value) return null;
   const normalizedPublicUrl = publicUrl?.replace(/\/+$/, '');
