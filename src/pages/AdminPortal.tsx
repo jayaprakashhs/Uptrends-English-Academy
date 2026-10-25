@@ -46,6 +46,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { extractYouTubeId } from '../lib/youtube';
+import { fetchSystemStatus, type IntegrationHealth, type SystemStatus } from '../lib/systemStatus';
 
 interface AdminPortalProps {
   currentAdmin: AdminProfile;
@@ -53,22 +54,29 @@ interface AdminPortalProps {
   setCurrentPage: (page: string) => void;
 }
 
-interface IntegrationHealth {
-  configured: boolean;
-  connected: boolean;
-  error_category?: string;
-  available?: boolean;
-}
-
 const integrationStatusLabel = (health: IntegrationHealth | undefined, missingLabel: string): string => {
   if (!health) return 'Checking...';
   if (health.connected) return 'Connected';
+  if (
+    health.error_category &&
+    health.error_category !== 'missing_configuration' &&
+    health.error_category !== 'missing_or_invalid_configuration'
+  ) {
+    return `Issue: ${health.error_category}`;
+  }
   if (!health.configured) return missingLabel;
   return `Issue: ${health.error_category || 'unavailable'}`;
 };
 
 const integrationStatusClass = (health: IntegrationHealth | undefined): string => {
   if (health?.connected) return 'bg-emerald-100 text-emerald-800';
+  if (
+    health?.error_category &&
+    health.error_category !== 'missing_configuration' &&
+    health.error_category !== 'missing_or_invalid_configuration'
+  ) {
+    return 'bg-amber-100 text-amber-800';
+  }
   return health?.configured ? 'bg-amber-100 text-amber-800' : 'bg-slate-200 text-slate-700';
 };
 
@@ -94,12 +102,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [editingFaq, setEditingFaq] = useState<Partial<FAQ> | null>(null);
-  const [systemStatus, setSystemStatus] = useState<{
-    supabase?: IntegrationHealth;
-    resend?: IntegrationHealth;
-    r2_storage?: IntegrationHealth;
-    official_pdf?: IntegrationHealth;
-  } | null>(null);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [branding, setBranding] = useState<SiteBranding | null>(null);
   const [editingBranding, setEditingBranding] = useState<Partial<SiteBranding> | null>(null);
   const [adminProfiles, setAdminProfiles] = useState<AdminProfile[]>([]);
@@ -176,6 +179,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const notifyPublicDataChanged = () => window.dispatchEvent(new Event('admin-data-updated'));
 
   const fetchAllData = async () => {
+    void fetchSystemStatus().then(setSystemStatus);
     setLoading(true);
     try {
       const headers = getAuthHeaders();
@@ -189,7 +193,6 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         revsRes,
         mediaRes,
         faqsRes,
-        sysRes,
         brandingRes,
         profilesRes,
       ] = await Promise.all([
@@ -204,7 +207,6 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         isSuperAdmin
           ? requestJson('/api/admin/faqs', { headers })
           : requestJson('/api/faqs'),
-        requestJson('/api/system-status'),
         requestJson('/api/branding'),
         isSuperAdmin
           ? requestJson('/api/admin/profiles', { headers })
@@ -220,7 +222,6 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       if (Array.isArray(revsRes)) setReviews(revsRes);
       if (Array.isArray(mediaRes)) setMediaItems(mediaRes);
       if (Array.isArray(faqsRes)) setFaqs(faqsRes);
-      if (sysRes) setSystemStatus(sysRes);
       if (brandingRes && brandingRes.academy_name) {
         setBranding(brandingRes);
         setEditingBranding({

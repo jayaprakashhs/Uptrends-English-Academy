@@ -43,12 +43,15 @@ In accordance with security rules, public admin registration is disabled. To pro
 1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com/) and go to **R2**.
 2. Click **Create Bucket** and name it `uptrends-academy-media`.
 3. Under **Manage R2 API Tokens**, create a token with **Object Read & Write** permissions.
-4. Copy the following credentials into your `.env` file:
+4. For local Express development, copy the following credentials into your `.env` file:
    - `CLOUDFLARE_R2_ACCOUNT_ID`
    - `CLOUDFLARE_R2_ACCESS_KEY_ID`
    - `CLOUDFLARE_R2_SECRET_ACCESS_KEY`
    - `CLOUDFLARE_R2_BUCKET_NAME`
+   - `CLOUDFLARE_R2_PUBLIC_URL`
 5. Student passport photographs are client-side compressed to ≤ 300 KB before upload and protected by server-side credentials.
+
+For production Worker configuration, use the exact Production binding names and types in Section 8. A native R2 bucket binding is not consumed by the current S3-compatible R2 implementation.
 
 ---
 
@@ -142,9 +145,34 @@ Start Wrangler locally with `npx wrangler dev --local --port 8787`. First verify
 
 `GET /api/system-status` performs non-mutating health checks: a one-row Supabase read, Resend domain API request, R2 bucket HEAD request, and PDF HEAD/file check. It returns only configured/connected flags and safe error categories, never credentials or raw service errors. R2 health depends on the configured token allowing a bucket HEAD request; Resend domain health requires permission to read domain status. A denied diagnostic check is reported as a permission category rather than exposing the provider response.
 
-Before deploying, add the Worker runtime bindings in **Cloudflare Dashboard → Workers & Pages → uptrends-english-academy → Settings → Variables and Secrets**. Add `SUPABASE_URL` as a Worker variable, using the HTTPS project URL from the same Supabase project that issued the service-role key. Add `SUPABASE_SERVICE_ROLE_KEY` as an encrypted secret. The Worker also needs `VITE_SUPABASE_ANON_KEY` as a Worker variable for its public database endpoints; the anon key is public. R2 access/secret keys and `RESEND_API_KEY` must also be encrypted secrets. Set the R2 account ID/bucket/public URL, email sender/recipient, and optional PDF URL as Worker variables.
+For the Cloudflare Worker Production environment, add bindings in **Cloudflare Dashboard → Workers & Pages → `uptrends-english-academy` → Settings → Variables and Secrets → Production**. Use these exact names and types:
+
+| Binding | Cloudflare type | Required by |
+| --- | --- | --- |
+| `SUPABASE_URL` | Text variable (HTTPS Supabase project URL) | Supabase public/admin APIs and health check |
+| `VITE_SUPABASE_URL` | Text variable (fallback only if `SUPABASE_URL` is absent) | Supabase URL fallback |
+| `VITE_SUPABASE_ANON_KEY` | Text variable (publishable/anon key) | Public Supabase API routes |
+| `SUPABASE_SERVICE_ROLE_KEY` | Secret (server-side only) | Admin/server Supabase APIs and Supabase health check |
+| `RESEND_API_KEY` | Secret | Resend email sending and health check |
+| `RESEND_FROM_EMAIL` | Text variable (optional; code has a default sender) | Resend email sender |
+| `CLOUDFLARE_R2_ACCOUNT_ID` | Text variable | R2 S3-compatible endpoint |
+| `CLOUDFLARE_R2_ACCESS_KEY_ID` | Secret | R2 S3-compatible authentication |
+| `CLOUDFLARE_R2_SECRET_ACCESS_KEY` | Secret | R2 S3-compatible authentication |
+| `CLOUDFLARE_R2_BUCKET_NAME` | Text variable (optional; defaults to `uptrends-academy-media`) | R2 bucket |
+| `CLOUDFLARE_R2_PUBLIC_URL` | Text variable (HTTPS URL) | Required for R2 health and serving uploaded objects |
+| `APPROVED_FEE_STRUCTURE_PDF_URL` | Text variable (optional) | External official PDF; otherwise the Worker `ASSETS` binding is checked |
+
+The R2 implementation uses the S3-compatible API with account ID and access credentials. It does **not** read a native Cloudflare R2 bucket binding; adding a bucket binding in place of the listed R2 variables will not configure this code. `ASSETS` is a separate static-assets binding generated from `wrangler.json`.
 
 Separately make `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` available to the machine/CI job running `npm run deploy`, because Vite embeds these public values into the client bundle at build time. These build-time values do not become Worker runtime bindings. Do not put `SUPABASE_SERVICE_ROLE_KEY` in a `VITE_*` variable, frontend `.env` file, or client build configuration. The Worker accepts `SUPABASE_URL` as its server-side project URL; `VITE_SUPABASE_URL` remains a backward-compatible Worker URL binding, but configure `SUPABASE_URL` going forward. `wrangler.json` declares the `ASSETS` binding. The Worker uses the S3-compatible R2 API through Smithy's Fetch handler, so no Node compatibility flag or public R2 binding is required. API calls are same-origin only; cross-origin requests are rejected and no wildcard CORS policy is enabled.
+
+For production `503` responses from Supabase-backed Worker routes, verify the bindings in the Worker's **Production** environment (not only Preview, local `.dev.vars`, or the frontend build environment):
+
+- `SUPABASE_URL` must be the HTTPS URL for the Supabase project.
+- `VITE_SUPABASE_ANON_KEY` must be a Worker variable for public data routes.
+- `SUPABASE_SERVICE_ROLE_KEY` must be an encrypted Worker secret for admin and server-side operations.
+
+Public routes fail closed with JSON `503` if the URL or public key is missing or the Supabase client cannot be initialized. Admin routes fail closed with JSON `503` if the URL or service-role key is missing or the client cannot be initialized. The Worker emits safe `api_diagnostic` log entries with an operation, error category, and (for missing configuration) binding name only. It never logs binding values. After changing Production bindings, deploy the Worker and verify `/api/system-status`, `/api/programs`, and an admin API request with a valid admin session. Do not treat a successful Worker deployment as proof that runtime bindings are present.
 
 The source Worker entry is `worker.ts`. Vite builds the deployable bundle and generates `dist/uptrends_english_academy/wrangler.json`, whose `main` is the compiled Worker and whose assets directory points at `dist/client`. After review and configuration, `npm run deploy` builds first and deploys using that generated config. Do not deploy using the root `wrangler.json` directly; it is the Vite plugin's source configuration, not the final bundle/assets layout.
 

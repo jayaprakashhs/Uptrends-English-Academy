@@ -51,16 +51,47 @@ const errorResponse = (error: string, status: number) => json({ error }, status)
 
 const getSupabaseUrl = (env: Env): string => env.SUPABASE_URL || env.VITE_SUPABASE_URL || '';
 
-const getSupabaseClient = (env: Env, privileged = false): SupabaseClient | null => {
+const logApiDiagnostic = (
+  operation: string,
+  errorCategory: string,
+  bindingNames?: string[],
+  bindingIssue: 'missing' | 'invalid' = 'missing',
+): void => {
+  console.error(JSON.stringify({
+    event: 'api_diagnostic',
+    operation,
+    error_category: errorCategory,
+    ...(bindingNames
+      ? { [bindingIssue === 'missing' ? 'missing_bindings' : 'invalid_bindings']: bindingNames }
+      : {}),
+  }));
+};
+
+const getSupabaseClient = (
+  env: Env,
+  privileged = false,
+  operation = 'supabase.request',
+): SupabaseClient | null => {
   const url = getSupabaseUrl(env);
   const key = privileged ? env.SUPABASE_SERVICE_ROLE_KEY || '' : env.VITE_SUPABASE_ANON_KEY || '';
-  if (!url || !key) return null;
+  const missingBindings: string[] = [];
+  if (!url) {
+    missingBindings.push('SUPABASE_URL', 'VITE_SUPABASE_URL');
+  }
+  if (!key) {
+    missingBindings.push(privileged ? 'SUPABASE_SERVICE_ROLE_KEY' : 'VITE_SUPABASE_ANON_KEY');
+  }
+  if (missingBindings.length) {
+    logApiDiagnostic(operation, 'missing_configuration', missingBindings);
+    return null;
+  }
 
   try {
     return createClient(url, key, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
   } catch {
+    logApiDiagnostic(operation, 'invalid_configuration');
     return null;
   }
 };
@@ -83,7 +114,7 @@ const supabaseErrorCategory = (error: unknown): string => {
 
 const checkSupabaseHealth = async (env: Env): Promise<IntegrationHealth> => {
   const configured = Boolean(getSupabaseUrl(env) && env.SUPABASE_SERVICE_ROLE_KEY);
-  const client = getSupabaseClient(env, true);
+  const client = getSupabaseClient(env, true, 'system_status.supabase');
   if (!client) return { configured, connected: false, error_category: configured ? 'invalid_configuration' : 'missing_configuration' };
   try {
     const { error } = await client.from('site_branding').select('id').limit(1).abortSignal(AbortSignal.timeout(5000));
@@ -99,7 +130,10 @@ const checkSupabaseHealth = async (env: Env): Promise<IntegrationHealth> => {
 };
 
 const checkResendHealth = async (env: Env): Promise<IntegrationHealth> => {
-  if (!env.RESEND_API_KEY) return { configured: false, connected: false, error_category: 'missing_configuration' };
+  if (!env.RESEND_API_KEY) {
+    logApiDiagnostic('system_status.resend', 'missing_configuration', ['RESEND_API_KEY']);
+    return { configured: false, connected: false, error_category: 'missing_configuration' };
+  }
   try {
     const response = await fetch('https://api.resend.com/domains', {
       headers: { Authorization: `Bearer ${env.RESEND_API_KEY}` },
@@ -130,6 +164,24 @@ const checkR2Health = async (env: Env): Promise<IntegrationHealth> => {
   }
   const configured = Boolean(client && publicUrlIsValid);
   if (!client || !publicUrlIsValid) {
+    const missingBindings = [
+      ...(!env.CLOUDFLARE_R2_ACCOUNT_ID ? ['CLOUDFLARE_R2_ACCOUNT_ID'] : []),
+      ...(!env.CLOUDFLARE_R2_ACCESS_KEY_ID ? ['CLOUDFLARE_R2_ACCESS_KEY_ID'] : []),
+      ...(!env.CLOUDFLARE_R2_SECRET_ACCESS_KEY ? ['CLOUDFLARE_R2_SECRET_ACCESS_KEY'] : []),
+      ...(!env.CLOUDFLARE_R2_PUBLIC_URL ? ['CLOUDFLARE_R2_PUBLIC_URL'] : []),
+    ];
+    const invalidBindings = [
+      ...(env.CLOUDFLARE_R2_ACCOUNT_ID && !/^[a-z0-9-]+$/i.test(env.CLOUDFLARE_R2_ACCOUNT_ID)
+        ? ['CLOUDFLARE_R2_ACCOUNT_ID']
+        : []),
+      ...(env.CLOUDFLARE_R2_PUBLIC_URL && !publicUrlIsValid ? ['CLOUDFLARE_R2_PUBLIC_URL'] : []),
+    ];
+    logApiDiagnostic(
+      'system_status.r2_storage',
+      'missing_or_invalid_configuration',
+      missingBindings.length ? missingBindings : invalidBindings.length ? invalidBindings : undefined,
+      missingBindings.length ? 'missing' : 'invalid',
+    );
     return { configured, connected: false, error_category: configured ? undefined : 'missing_or_invalid_configuration' };
   }
   try {
@@ -188,7 +240,7 @@ const requireAdmin = async (
   env: Env,
   minimumRole: AdminProfile['role'] = 'staff',
 ): Promise<{ profile: AdminProfile; supabase: SupabaseClient } | Response> => {
-  const supabase = getSupabaseClient(env, true);
+  const supabase = getSupabaseClient(env, true, 'admin.authentication');
   if (!supabase) return errorResponse('Admin APIs are unavailable because Supabase service credentials are not configured.', 503);
 
   const token = getBearerToken(request);
@@ -906,7 +958,7 @@ const deleteMedia = async (request: Request, env: Env, id: string): Promise<Resp
 const submitApplication = async (request: Request, env: Env): Promise<Response> => {
   const body = await parseJson(request);
   if (isResponse(body)) return body;
-  const supabase = getSupabaseClient(env, true);
+  const supabase = getSupabaseClient(env, true, 'applications.submit');
   if (!supabase) return errorResponse('Application submission is unavailable because Supabase is not configured.', 503);
 
   const requiredFields = ['student_name', 'mobile', 'email', 'qualification', 'program_name'] as const;
@@ -1015,7 +1067,7 @@ const submitCallback = async (request: Request, env: Env): Promise<Response> => 
   const body = await parseJson(request);
   if (isResponse(body)) return body;
   if (body.consent !== true) return errorResponse('Consent is required to submit this request.', 400);
-  const supabase = getSupabaseClient(env, true);
+  const supabase = getSupabaseClient(env, true, 'callbacks.submit');
   if (!supabase) return errorResponse('Callback requests are unavailable because Supabase is not configured.', 503);
 
   const fullName = requiredString(body.full_name, 'Full name', 300);
@@ -1059,7 +1111,7 @@ const submitContact = async (request: Request, env: Env): Promise<Response> => {
   const body = await parseJson(request);
   if (isResponse(body)) return body;
   if (body.consent !== true) return errorResponse('Consent is required to submit this request.', 400);
-  const supabase = getSupabaseClient(env, true);
+  const supabase = getSupabaseClient(env, true, 'contacts.submit');
   if (!supabase) return errorResponse('Contact enquiries are unavailable because Supabase is not configured.', 503);
 
   const fullName = requiredString(body.full_name, 'Full name', 300);
@@ -1392,27 +1444,27 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     if (pathname === '/api/programs' && method === 'GET') {
-      const supabase = getSupabaseClient(env);
+      const supabase = getSupabaseClient(env, false, 'public.programs.read');
       return supabase ? readTable(supabase, 'programs', READ_COLUMNS.programs, { publishedColumn: 'is_published', orderColumn: 'display_order' }) : errorResponse('Supabase is not configured.', 503);
     }
     if (pathname === '/api/announcements' && method === 'GET') {
-      const supabase = getSupabaseClient(env);
+      const supabase = getSupabaseClient(env, false, 'public.announcements.read');
       return supabase ? readTable(supabase, 'announcements', READ_COLUMNS.announcements, { publishedColumn: 'is_active', orderColumn: 'display_order' }) : errorResponse('Supabase is not configured.', 503);
     }
     if (pathname === '/api/reviews' && method === 'GET') {
-      const supabase = getSupabaseClient(env);
+      const supabase = getSupabaseClient(env, false, 'public.reviews.read');
       return supabase ? readTable(supabase, 'reviews', READ_COLUMNS.reviews, { publishedColumn: 'is_published', orderColumn: 'created_at', ascending: false }) : errorResponse('Supabase is not configured.', 503);
     }
     if (pathname === '/api/media' && method === 'GET') {
-      const supabase = getSupabaseClient(env);
+      const supabase = getSupabaseClient(env, false, 'public.media.read');
       return supabase ? readTable(supabase, 'media_items', READ_COLUMNS.media, { publishedColumn: 'is_published', orderColumn: 'display_order' }) : errorResponse('Supabase is not configured.', 503);
     }
     if (pathname === '/api/faqs' && method === 'GET') {
-      const supabase = getSupabaseClient(env);
+      const supabase = getSupabaseClient(env, false, 'public.faqs.read');
       return supabase ? readTable(supabase, 'faqs', READ_COLUMNS.faqs, { publishedColumn: 'is_published', orderColumn: 'display_order' }) : errorResponse('Supabase is not configured.', 503);
     }
     if (pathname === '/api/branding' && method === 'GET') {
-      const supabase = getSupabaseClient(env);
+      const supabase = getSupabaseClient(env, false, 'public.branding.read');
       if (!supabase) return errorResponse('Supabase is not configured.', 503);
       const { data, error } = await supabase.from('site_branding').select('id,academy_name,tagline,logo_url,logo_alt,favicon_url,footer_logo_url,primary_orange,primary_green,official_pdf_url,updated_at').limit(1).maybeSingle();
       if (error) return errorResponse(`Unable to read branding: ${error.message}`, 500);
@@ -1536,6 +1588,15 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
     return errorResponse('Not an API request.', 404);
   } catch (error) {
-    return errorResponse(messageOf(error), 500);
+    const resource = pathname.match(/^\/api\/admin\/(programs|announcements|reviews|faqs|media|applications|callbacks|contacts|profiles)(?:\/|$)/)?.[1];
+    const operation = pathname === '/api/system-status'
+      ? 'system_status'
+      : pathname.startsWith('/api/admin/')
+        ? `admin.${resource || 'request'}`
+        : pathname.startsWith('/api/')
+          ? `public.${pathname.slice('/api/'.length).split('/')[0] || 'request'}`
+          : 'api.request';
+    logApiDiagnostic(operation, 'unhandled_exception');
+    return errorResponse('The API request could not be completed.', 500);
   }
 }
