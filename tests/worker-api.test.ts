@@ -8,11 +8,14 @@ const requestFor = (path: string) => new Request(`https://academy.example${path}
 async function withCapturedLogs<T>(run: (logs: string[]) => Promise<T>): Promise<T> {
   const logs: string[] = [];
   const originalError = console.error;
+  const originalInfo = console.info;
   console.error = (...values: unknown[]) => logs.push(values.map(String).join(' '));
+  console.info = (...values: unknown[]) => logs.push(values.map(String).join(' '));
   try {
     return await run(logs);
   } finally {
     console.error = originalError;
+    console.info = originalInfo;
   }
 }
 
@@ -45,6 +48,10 @@ test('system status returns the expected JSON shape when Supabase bindings are m
     return captured;
   });
   assert.ok(logs.some((line) => line.includes('"operation":"system_status.supabase"')));
+  const bindingPresence = logs.find((line) => line.includes('"event":"worker_binding_presence"'));
+  assert.ok(bindingPresence);
+  assert.match(bindingPresence, /"SUPABASE_SERVICE_ROLE_KEY":false/);
+  assert.ok(!bindingPresence.includes('test-service-role-key'));
 });
 
 test('system status recognizes all documented runtime bindings as configured', async () => {
@@ -60,24 +67,34 @@ test('system status recognizes all documented runtime bindings as configured', a
   };
 
   try {
-    const response = await worker.fetch(requestFor('/api/system-status'), {
-      VITE_SUPABASE_URL: 'https://project.example',
-      VITE_SUPABASE_ANON_KEY: 'test-public-key',
-      SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
-      RESEND_API_KEY: 'test-resend-api-key',
-      CLOUDFLARE_R2_ACCOUNT_ID: 'test-account',
-      CLOUDFLARE_R2_ACCESS_KEY_ID: 'test-access-key',
-      CLOUDFLARE_R2_SECRET_ACCESS_KEY: 'test-secret-key',
-      CLOUDFLARE_R2_BUCKET_NAME: 'test-bucket',
-      CLOUDFLARE_R2_PUBLIC_URL: 'https://media.example',
-      ASSETS: { fetch: async () => new Response(null, { status: 200 }) },
+    const logs = await withCapturedLogs(async (captured) => {
+      const response = await worker.fetch(requestFor('/api/system-status'), {
+        VITE_SUPABASE_URL: 'https://project.example',
+        VITE_SUPABASE_ANON_KEY: 'test-public-key',
+        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+        RESEND_API_KEY: 'test-resend-api-key',
+        CLOUDFLARE_R2_ACCOUNT_ID: 'test-account',
+        CLOUDFLARE_R2_ACCESS_KEY_ID: 'test-access-key',
+        CLOUDFLARE_R2_SECRET_ACCESS_KEY: 'test-secret-key',
+        CLOUDFLARE_R2_BUCKET_NAME: 'test-bucket',
+        CLOUDFLARE_R2_PUBLIC_URL: 'https://media.example',
+        ASSETS: { fetch: async () => new Response(null, { status: 200 }) },
+      });
+      assert.equal(response.status, 200);
+      const body = await response.json() as Record<string, { configured: boolean; connected: boolean }>;
+      for (const service of ['supabase', 'resend', 'r2_storage', 'official_pdf']) {
+        assert.equal(body[service].configured, true, service);
+        assert.equal(body[service].connected, true, service);
+      }
+      return captured;
     });
-    assert.equal(response.status, 200);
-    const body = await response.json() as Record<string, { configured: boolean; connected: boolean }>;
-    for (const service of ['supabase', 'resend', 'r2_storage', 'official_pdf']) {
-      assert.equal(body[service].configured, true, service);
-      assert.equal(body[service].connected, true, service);
-    }
+    const bindingPresence = logs.find((line) => line.includes('"event":"worker_binding_presence"'));
+    assert.ok(bindingPresence);
+    assert.match(bindingPresence, /"SUPABASE_URL":false/);
+    assert.match(bindingPresence, /"VITE_SUPABASE_URL":true/);
+    assert.match(bindingPresence, /"SUPABASE_SERVICE_ROLE_KEY":true/);
+    assert.ok(!bindingPresence.includes('test-service-role-key'));
+    assert.ok(!bindingPresence.includes('test-secret-key'));
   } finally {
     globalThis.fetch = originalFetch;
   }

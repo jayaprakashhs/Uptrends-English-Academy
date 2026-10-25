@@ -1,8 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "uptrends-english-academy",
+  "name": "uptrend-english-academy",
   "main": "./worker.ts",
   "compatibility_date": "2026-10-24",
+  "keep_vars": true,
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS"

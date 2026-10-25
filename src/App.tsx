@@ -18,8 +18,21 @@ import { ApplyNow } from './pages/ApplyNow';
 import { AdminLogin } from './pages/AdminLogin';
 import { AdminPortal } from './pages/AdminPortal';
 import { NotFound } from './pages/NotFound';
+import { fetchPublicJson, getPublicApiErrorMessage, PublicApiError } from './lib/publicApi';
 
 import { Program, Review, MediaItem, TeamMember, FAQ, AdminProfile, SiteBranding } from './types';
+
+type PublicResource = 'branding' | 'programs' | 'reviews' | 'media' | 'faqs';
+type PublicResourceStatus = { loading: boolean; error: string | null };
+type PublicResourceStatuses = Record<PublicResource, PublicResourceStatus>;
+
+const emptyPublicStatuses: PublicResourceStatuses = {
+  branding: { loading: true, error: null },
+  programs: { loading: true, error: null },
+  reviews: { loading: true, error: null },
+  media: { loading: true, error: null },
+  faqs: { loading: true, error: null },
+};
 
 export function App() {
   const [currentPage, setCurrentPage] = useState<string>('home');
@@ -44,90 +57,72 @@ export function App() {
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [branding, setBranding] = useState<SiteBranding | null>(null);
+  const [publicStatuses, setPublicStatuses] = useState<PublicResourceStatuses>(emptyPublicStatuses);
 
-  // Initial Data Fetch
-  useEffect(() => {
-    fetch('/api/branding')
-      .then((r) => r.json())
-      .then((data) => {
-        if (data && data.academy_name) {
-          setBranding(data);
-          if (data.favicon_url) {
-            let link = document.querySelector("link[rel*='icon']") as HTMLLinkElement | null;
-            if (!link) {
-              link = document.createElement('link');
-              link.rel = 'shortcut icon';
-              document.head.appendChild(link);
-            }
-            link.href = data.favicon_url;
+  const loadPublicResource = async (
+    resource: PublicResource,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    setPublicStatuses((statuses) => ({
+      ...statuses,
+      [resource]: { loading: true, error: null },
+    }));
+
+    try {
+      const data: unknown = await fetchPublicJson(`/api/${resource}`, signal);
+      if (resource === 'branding') {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new PublicApiError('unexpected_response');
+        const nextBranding = data as SiteBranding;
+        if (nextBranding.academy_name) setBranding(nextBranding);
+        if (nextBranding.favicon_url) {
+          let link = document.querySelector("link[rel*='icon']") as HTMLLinkElement | null;
+          if (!link) {
+            link = document.createElement('link');
+            link.rel = 'shortcut icon';
+            document.head.appendChild(link);
           }
+          link.href = nextBranding.favicon_url;
         }
-      })
-      .catch((e) => console.error('Error fetching branding:', e));
+      } else {
+        if (!Array.isArray(data)) throw new PublicApiError('unexpected_response');
+        if (resource === 'programs') setPrograms(data as Program[]);
+        if (resource === 'reviews') setReviews(data as Review[]);
+        if (resource === 'media') setMediaItems(data as MediaItem[]);
+        if (resource === 'faqs') setFaqs(data as FAQ[]);
+      }
+      setPublicStatuses((statuses) => ({
+        ...statuses,
+        [resource]: { loading: false, error: null },
+      }));
+    } catch (error) {
+      if (signal?.aborted) return;
+      setPublicStatuses((statuses) => ({
+        ...statuses,
+        [resource]: { loading: false, error: getPublicApiErrorMessage(error) },
+      }));
+    }
+  };
 
-    fetch('/api/programs')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) setPrograms(data);
-      })
-      .catch((e) => console.error('Error fetching programs:', e));
-
-    fetch('/api/reviews')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) setReviews(data);
-      })
-      .catch((e) => console.error('Error fetching reviews:', e));
-
-    fetch('/api/media')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) setMediaItems(data);
-      })
-      .catch((e) => console.error('Error fetching media:', e));
-
-    fetch('/api/faqs')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) setFaqs(data);
-      })
-      .catch((e) => console.error('Error fetching faqs:', e));
-  }, []);
+  const refreshPublicCatalogue = async () => {
+    await Promise.all(
+      (['branding', 'programs', 'reviews', 'media', 'faqs'] as const).map((resource) =>
+        loadPublicResource(resource),
+      ),
+    );
+  };
 
   useEffect(() => {
-    const refreshCollection = async <T,>(
-      url: string,
-      setData: React.Dispatch<React.SetStateAction<T[]>>,
-    ) => {
-      try {
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`Request failed (${response.status}).`);
-        const data: unknown = await response.json();
-        if (Array.isArray(data)) setData(data as T[]);
-      } catch (error) {
-        console.error(`Failed to refresh public data from ${url}:`, error);
-      }
-    };
-
-    const refreshPublicCatalogue = async () => {
-      await Promise.all([
-        refreshCollection<Program>('/api/programs', setPrograms),
-        refreshCollection<Review>('/api/reviews', setReviews),
-        refreshCollection<MediaItem>('/api/media', setMediaItems),
-        refreshCollection<FAQ>('/api/faqs', setFaqs),
-      ]);
-      try {
-        const response = await fetch('/api/branding');
-        if (!response.ok) throw new Error(`Request failed (${response.status}).`);
-        const data = await response.json();
-        if (data?.academy_name) setBranding(data);
-      } catch (error) {
-        console.error('Failed to refresh public branding:', error);
-      }
-    };
-
+    const controller = new AbortController();
+    void Promise.all(
+      (['branding', 'programs', 'reviews', 'media', 'faqs'] as const).map((resource) =>
+        loadPublicResource(resource, controller.signal),
+      ),
+    );
     window.addEventListener('admin-data-updated', refreshPublicCatalogue);
-    return () => window.removeEventListener('admin-data-updated', refreshPublicCatalogue);
+    return () => {
+      controller.abort();
+      window.removeEventListener('admin-data-updated', refreshPublicCatalogue);
+    };
   }, []);
 
   const openCallbackModal = (progName?: string) => {
@@ -185,6 +180,27 @@ export function App() {
         branding={branding}
       />
 
+      {Object.entries(publicStatuses).some(([, status]) => status.error) && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-3 text-sm text-amber-900" role="status" aria-live="polite">
+          <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
+            <span>
+              Some academy content could not be loaded:{' '}
+              {Object.entries(publicStatuses)
+                .filter(([, status]) => status.error)
+                .map(([resource, status]) => `${resource}: ${status.error}`)
+                .join(' · ')}
+            </span>
+            <button
+              type="button"
+              onClick={() => void refreshPublicCatalogue()}
+              className="font-semibold underline underline-offset-2"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Page Routing */}
       <main className="flex-1">
         {currentPage === 'home' && (
@@ -192,6 +208,8 @@ export function App() {
             programs={programs}
             reviews={reviews}
             mediaItems={mediaItems}
+            dataStatuses={publicStatuses}
+            onRetryData={(resource) => void loadPublicResource(resource)}
             setCurrentPage={setCurrentPage}
             setSelectedProgram={setSelectedProgram}
             openCallbackModal={openCallbackModal}

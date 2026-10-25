@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Volume2 } from 'lucide-react';
 import { Announcement } from '../types';
+import { fetchPublicJson, getPublicApiErrorMessage, PublicApiError } from '../lib/publicApi';
 
 interface AnnouncementBannerProps {
   initialAnnouncements?: Announcement[];
@@ -8,23 +9,40 @@ interface AnnouncementBannerProps {
 
 export const AnnouncementBanner: React.FC<AnnouncementBannerProps> = ({ initialAnnouncements }) => {
   const [announcements, setAnnouncements] = useState<Announcement[]>(initialAnnouncements || []);
+  const [loading, setLoading] = useState(!initialAnnouncements);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetch('/api/announcements')
-      .then((res) => {
-        if (!res.ok) throw new Error(`Announcement request failed (${res.status}).`);
-        return res.json();
-      })
-      .then((data) => {
-        setAnnouncements(Array.isArray(data) ? data.filter((item: Announcement) => item.is_active) : []);
-      })
-      .catch((err) => {
-        console.error('Failed to load announcements:', err);
-        setAnnouncements([]);
-      });
+  const loadAnnouncements = useCallback(async (signal?: AbortSignal) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchPublicJson('/api/announcements', signal);
+      if (!Array.isArray(data)) throw new PublicApiError('unexpected_response');
+      setAnnouncements(data.filter((item: Announcement) => item.is_active));
+    } catch (loadError) {
+      setError(getPublicApiErrorMessage(loadError));
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  if (announcements.length === 0) return null;
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadAnnouncements(controller.signal);
+    return () => controller.abort();
+  }, [loadAnnouncements]);
+
+  if (error) {
+    return (
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-center text-sm text-amber-900" role="status" aria-live="polite">
+        Announcements could not be loaded. {error}{' '}
+        <button type="button" onClick={() => void loadAnnouncements()} disabled={loading} className="font-semibold underline underline-offset-2 disabled:opacity-60">
+          {loading ? 'Retrying…' : 'Retry'}
+        </button>
+      </div>
+    );
+  }
+  if (announcements.length === 0) return loading ? <div className="sr-only" role="status" aria-live="polite">Loading announcements…</div> : null;
 
   const combinedText = announcements.map((a) => a.content).join('  ✦  ');
 

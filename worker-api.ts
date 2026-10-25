@@ -51,6 +51,27 @@ const errorResponse = (error: string, status: number) => json({ error }, status)
 
 const getSupabaseUrl = (env: Env): string => env.SUPABASE_URL || env.VITE_SUPABASE_URL || '';
 
+const logBindingPresence = (env: Env): void => {
+  console.info(JSON.stringify({
+    event: 'worker_binding_presence',
+    bindings: {
+      SUPABASE_URL: Boolean(env.SUPABASE_URL),
+      VITE_SUPABASE_URL: Boolean(env.VITE_SUPABASE_URL),
+      VITE_SUPABASE_ANON_KEY: Boolean(env.VITE_SUPABASE_ANON_KEY),
+      SUPABASE_SERVICE_ROLE_KEY: Boolean(env.SUPABASE_SERVICE_ROLE_KEY),
+      RESEND_API_KEY: Boolean(env.RESEND_API_KEY),
+      RESEND_FROM_EMAIL: Boolean(env.RESEND_FROM_EMAIL),
+      CLOUDFLARE_R2_ACCOUNT_ID: Boolean(env.CLOUDFLARE_R2_ACCOUNT_ID),
+      CLOUDFLARE_R2_ACCESS_KEY_ID: Boolean(env.CLOUDFLARE_R2_ACCESS_KEY_ID),
+      CLOUDFLARE_R2_SECRET_ACCESS_KEY: Boolean(env.CLOUDFLARE_R2_SECRET_ACCESS_KEY),
+      CLOUDFLARE_R2_BUCKET_NAME: Boolean(env.CLOUDFLARE_R2_BUCKET_NAME),
+      CLOUDFLARE_R2_PUBLIC_URL: Boolean(env.CLOUDFLARE_R2_PUBLIC_URL),
+      APPROVED_FEE_STRUCTURE_PDF_URL: Boolean(env.APPROVED_FEE_STRUCTURE_PDF_URL),
+      ASSETS: Boolean(env.ASSETS),
+    },
+  }));
+};
+
 const logApiDiagnostic = (
   operation: string,
   errorCategory: string,
@@ -1428,6 +1449,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     if (pathname === '/api/system-status' && method === 'GET') {
+      logBindingPresence(env);
       const [supabaseHealth, resendHealth, r2Health, pdfHealth] = await Promise.all([
         checkSupabaseHealth(env),
         checkResendHealth(env),

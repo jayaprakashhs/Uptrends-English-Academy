@@ -2,11 +2,18 @@ import React, { useState } from 'react';
 import { Program, Review, MediaItem } from '../types';
 import { ArrowRight, PhoneCall, Sparkles, CheckCircle2, Play, Users, MessageSquareQuote, Compass, BookOpen, Clock, Award } from 'lucide-react';
 import { extractYouTubeId, getYouTubeThumbnail } from '../lib/youtube';
+import { PublicApiError } from '../lib/publicApi';
 
 interface HomeProps {
   programs: Program[];
   reviews: Review[];
   mediaItems: MediaItem[];
+  dataStatuses: {
+    programs: { loading: boolean; error: string | null };
+    reviews: { loading: boolean; error: string | null };
+    media: { loading: boolean; error: string | null };
+  };
+  onRetryData: (resource: 'programs' | 'reviews' | 'media') => void;
   setCurrentPage: (page: string) => void;
   setSelectedProgram: (program: Program) => void;
   openCallbackModal: (programName?: string) => void;
@@ -17,6 +24,8 @@ export const Home: React.FC<HomeProps> = ({
   programs,
   reviews,
   mediaItems,
+  dataStatuses,
+  onRetryData,
   setCurrentPage,
   setSelectedProgram,
   openCallbackModal,
@@ -25,6 +34,24 @@ export const Home: React.FC<HomeProps> = ({
   const publishedPrograms = programs.filter((p) => p.is_published);
   const publishedReviews = reviews.filter((r) => r.is_published).slice(0, 3);
   const previewMedia = mediaItems.filter((m) => m.is_published).slice(0, 3);
+
+  const renderResourceState = (resource: 'programs' | 'reviews' | 'media') => {
+    const status = dataStatuses[resource];
+    if (status.loading) return <p className="py-6 text-center text-sm text-slate-500" role="status">Loading {resource}…</p>;
+    if (!status.error) return null;
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="alert">
+        <p>{status.error}</p>
+        <button
+          type="button"
+          onClick={() => onRetryData(resource)}
+          className="mt-2 font-semibold underline underline-offset-2"
+        >
+          Retry loading {resource}
+        </button>
+      </div>
+    );
+  };
 
   const handleProgramClick = (prog: Program) => {
     setSelectedProgram(prog);
@@ -170,68 +197,72 @@ export const Home: React.FC<HomeProps> = ({
         </div>
 
         {/* Program Cards Grid (Strictly no batches, schedules, or invented fees) */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {publishedPrograms.map((prog) => (
-            <div
-              key={prog.id}
-              className="bg-white rounded-2xl border border-slate-200/80 shadow-xs hover:shadow-xl transition-all duration-300 flex flex-col overflow-hidden group"
-            >
-              <div className="relative aspect-16/10 overflow-hidden bg-slate-100">
-                <img
-                  src={
-                    prog.image_url ||
-                    'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80'
-                  }
-                  alt={prog.title}
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                />
-                {prog.level && (
-                  <div className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-slate-950/80 backdrop-blur-xs text-white text-[11px] font-semibold">
-                    {prog.level}
-                  </div>
-                )}
-              </div>
-
-              <div className="p-5 flex-1 flex flex-col">
-                <h3 className="font-bold text-slate-900 text-lg leading-snug mb-2 group-hover:text-orange-600 transition-colors">
-                  {prog.title}
-                </h3>
-                <p className="text-xs text-slate-600 line-clamp-2 mb-4 leading-relaxed">
-                  {prog.short_description}
-                </p>
-
-                <div className="mt-auto space-y-2 pt-3 border-t border-slate-100 text-xs text-slate-600">
-                  <div className="flex items-center gap-2">
-                    <Users className="w-3.5 h-3.5 text-orange-500 shrink-0" />
-                    <span className="truncate"><strong>Audience:</strong> {prog.target_audience}</span>
-                  </div>
-                  {prog.duration && (
-                    <div className="flex items-center gap-2">
-                      <Clock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                      <span><strong>Duration:</strong> {prog.duration}</span>
+        {renderResourceState('programs') || (publishedPrograms.length === 0 ? (
+          <p className="py-6 text-center text-sm text-slate-500">No published programs are currently available.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+            {publishedPrograms.map((prog) => (
+              <div
+                key={prog.id}
+                className="bg-white rounded-2xl border border-slate-200/80 shadow-xs hover:shadow-xl transition-all duration-300 flex flex-col overflow-hidden group"
+              >
+                <div className="relative aspect-16/10 overflow-hidden bg-slate-100">
+                  <img
+                    src={
+                      prog.image_url ||
+                      'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80'
+                    }
+                    alt={prog.title}
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                  />
+                  {prog.level && (
+                    <div className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-slate-950/80 backdrop-blur-xs text-white text-[11px] font-semibold">
+                      {prog.level}
                     </div>
                   )}
                 </div>
 
-                <div className="pt-5 mt-4 grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => handleProgramClick(prog)}
-                    className="w-full py-2 px-3 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold text-center transition-colors cursor-pointer"
-                  >
-                    View Program
-                  </button>
-                  <button
-                    onClick={() => openCallbackModal(prog.title)}
-                    className="w-full py-2 px-3 rounded-lg border border-orange-500 hover:bg-orange-50 text-orange-600 text-xs font-bold text-center transition-colors flex items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <PhoneCall className="w-3 h-3" />
-                    <span>Request Call</span>
-                  </button>
+                <div className="p-5 flex-1 flex flex-col">
+                  <h3 className="font-bold text-slate-900 text-lg leading-snug mb-2 group-hover:text-orange-600 transition-colors">
+                    {prog.title}
+                  </h3>
+                  <p className="text-xs text-slate-600 line-clamp-2 mb-4 leading-relaxed">
+                    {prog.short_description}
+                  </p>
+
+                  <div className="mt-auto space-y-2 pt-3 border-t border-slate-100 text-xs text-slate-600">
+                    <div className="flex items-center gap-2">
+                      <Users className="w-3.5 h-3.5 text-orange-500 shrink-0" />
+                      <span className="truncate"><strong>Audience:</strong> {prog.target_audience}</span>
+                    </div>
+                    {prog.duration && (
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span><strong>Duration:</strong> {prog.duration}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="pt-5 mt-4 grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => handleProgramClick(prog)}
+                      className="w-full py-2 px-3 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold text-center transition-colors cursor-pointer"
+                    >
+                      View Program
+                    </button>
+                    <button
+                      onClick={() => openCallbackModal(prog.title)}
+                      className="w-full py-2 px-3 rounded-lg border border-orange-500 hover:bg-orange-50 text-orange-600 text-xs font-bold text-center transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      <PhoneCall className="w-3 h-3" />
+                      <span>Request Call</span>
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        ))}
       </section>
 
       {/* E. WHY CHOOSE US */}
@@ -313,7 +344,7 @@ export const Home: React.FC<HomeProps> = ({
       </section>
 
       {/* G. REVIEWS PREVIEW */}
-      {publishedReviews.length > 0 && (
+      {(publishedReviews.length > 0 || dataStatuses.reviews.loading || dataStatuses.reviews.error) && (
         <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between mb-8">
             <div>
@@ -337,7 +368,9 @@ export const Home: React.FC<HomeProps> = ({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {renderResourceState('reviews') || (publishedReviews.length === 0 ? (
+            <p className="py-6 text-center text-sm text-slate-500">No published reviews are currently available.</p>
+          ) : <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {publishedReviews.map((rev) => (
               <div
                 key={rev.id}
@@ -361,12 +394,12 @@ export const Home: React.FC<HomeProps> = ({
                 </div>
               </div>
             ))}
-          </div>
+          </div>)}
         </section>
       )}
 
       {/* H. MEDIA GALLERY PREVIEW (With Proper Video Cover Fix) */}
-      {previewMedia.length > 0 && (
+      {(previewMedia.length > 0 || dataStatuses.media.loading || dataStatuses.media.error) && (
         <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between mb-8">
             <div>
@@ -389,7 +422,9 @@ export const Home: React.FC<HomeProps> = ({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {renderResourceState('media') || (previewMedia.length === 0 ? (
+            <p className="py-6 text-center text-sm text-slate-500">No published media is currently available.</p>
+          ) : <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {previewMedia.map((item) => {
               const isVideo = item.media_type === 'video';
               const yId = isVideo ? extractYouTubeId(item.youtube_url || item.youtube_video_id) : null;
@@ -428,7 +463,7 @@ export const Home: React.FC<HomeProps> = ({
                 </div>
               );
             })}
-          </div>
+          </div>)}
         </section>
       )}
 
