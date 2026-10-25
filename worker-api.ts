@@ -808,6 +808,7 @@ const createMedia = async (request: Request, env: Env): Promise<Response> => {
   }
 
   let uploaded: { key: string; url: string } | null = null;
+  let uploadedCover: { key: string; url: string } | null = null;
   let mediaUrl = optionalString(body.media_url, 'media_url', 2048);
   if (isResponse(mediaUrl)) return mediaUrl;
   if (mediaType === 'photo' && body.media_file_base64 !== undefined) {
@@ -818,6 +819,23 @@ const createMedia = async (request: Request, env: Env): Promise<Response> => {
     uploaded = upload;
     mediaUrl = upload.url;
   }
+  if (body.cover_file_base64 !== undefined) {
+    const image = decodeImage(body.cover_file_base64, MAX_MEDIA_BYTES);
+    if (isResponse(image)) {
+      if (uploaded) {
+        try { await deleteFromR2(env, uploaded.key, 'media'); } catch {}
+      }
+      return image;
+    }
+    const upload = await uploadToR2(env, image, 'media');
+    if (isResponse(upload)) {
+      if (uploaded) {
+        try { await deleteFromR2(env, uploaded.key, 'media'); } catch {}
+      }
+      return upload;
+    }
+    uploadedCover = upload;
+  }
 
   const { data, error } = await auth.supabase.from('media_items').insert({
     media_type: mediaType,
@@ -827,19 +845,27 @@ const createMedia = async (request: Request, env: Env): Promise<Response> => {
     media_url: mediaType === 'video' ? null : mediaUrl,
     youtube_url: youtube?.url || null,
     youtube_video_id: youtube?.id || null,
-    cover_image_url: coverImageUrl,
+    cover_image_url: uploadedCover?.url || coverImageUrl,
     alt_text: altText || title,
     is_published: body.is_published !== false,
     display_order: Number.isInteger(body.display_order) ? body.display_order : 0,
   }).select().single();
 
   if (error) {
-    if (uploaded) {
+    const orphaned: string[] = [];
+    for (const file of [uploaded, uploadedCover]) {
+      if (!file) continue;
       try {
-        await deleteFromR2(env, uploaded.key, 'media');
-      } catch (cleanupError) {
-        return json({ error: `Failed to create media item: ${error.message}`, cleanup_error: messageOf(cleanupError), orphaned_object_key: uploaded.key }, 502);
+        await deleteFromR2(env, file.key, 'media');
+      } catch {
+        orphaned.push(file.key);
       }
+    }
+    if (orphaned.length) {
+      return json({
+        error: `Failed to create media item: ${error.message}`,
+        orphaned_object_keys: orphaned,
+      }, 502);
     }
     return errorResponse(`Failed to create media item: ${error.message}`, 500);
   }
@@ -894,39 +920,87 @@ const updateMedia = async (request: Request, env: Env, id: string): Promise<Resp
   }
 
   let newObjectKey: string | null = null;
-  if (mediaType === 'photo' && body.media_file_base64 !== undefined) {
-    const image = decodeImage(body.media_file_base64, MAX_MEDIA_BYTES);
+  let newCoverObject: { key: string; url: string } | null = null;
+  if (body.cover_file_base64 !== undefined) {
+    const image = decodeImage(body.cover_file_base64, MAX_MEDIA_BYTES);
     if (isResponse(image)) return image;
     const upload = await uploadToR2(env, image, 'media');
     if (isResponse(upload)) return upload;
+    newCoverObject = upload;
+    updates.cover_image_url = upload.url;
+  }
+
+  if (mediaType === 'photo' && body.media_file_base64 !== undefined) {
+    const image = decodeImage(body.media_file_base64, MAX_MEDIA_BYTES);
+    if (isResponse(image)) {
+      if (newCoverObject) {
+        try { await deleteFromR2(env, newCoverObject.key, 'media'); } catch (cleanupError) {
+          console.error('[Worker Media Cover Cleanup Error]', cleanupError);
+        }
+      }
+      return image;
+    }
+
+    const upload = await uploadToR2(env, image, 'media');
+    if (isResponse(upload)) {
+      if (newCoverObject) {
+        try { await deleteFromR2(env, newCoverObject.key, 'media'); } catch (cleanupError) {
+          console.error('[Worker Media Cover Cleanup Error]', cleanupError);
+        }
+      }
+      return upload;
+    }
     newObjectKey = upload.key;
     updates.r2_object_key = upload.key;
     updates.media_url = upload.url;
   } else if (mediaType === 'photo') {
     const mediaUrl = body.media_url === undefined ? current.media_url : optionalString(body.media_url, 'media_url', 2048);
-    if (isResponse(mediaUrl)) return mediaUrl;
+    if (isResponse(mediaUrl)) {
+      if (newCoverObject) {
+        try { await deleteFromR2(env, newCoverObject.key, 'media'); } catch (cleanupError) {
+          console.error('[Worker Media Cover Cleanup Error]', cleanupError);
+        }
+      }
+      return mediaUrl;
+    }
     updates.media_url = mediaUrl;
     updates.r2_object_key = current.media_type === 'photo' ? current.r2_object_key : null;
   }
 
   const { data: saved, error } = await auth.supabase.from('media_items').update(updates).eq('id', id).select().maybeSingle();
   if (error) {
-    if (newObjectKey) {
+    const orphaned: string[] = [];
+    for (const fileKey of [newObjectKey, newCoverObject?.key || null]) {
+      if (!fileKey) continue;
       try {
-        await deleteFromR2(env, newObjectKey, 'media');
-      } catch (cleanupError) {
-        return json({ error: `Failed to update media item: ${error.message}`, cleanup_error: messageOf(cleanupError), orphaned_object_key: newObjectKey }, 502);
+        await deleteFromR2(env, fileKey, 'media');
+      } catch {
+        orphaned.push(fileKey);
       }
+    }
+    if (orphaned.length) {
+      return json({
+        error: `Failed to update media item: ${error.message}`,
+        orphaned_object_keys: orphaned,
+      }, 502);
     }
     return errorResponse(`Failed to update media item: ${error.message}`, 500);
   }
   if (!saved) {
-    if (newObjectKey) {
+    const orphaned: string[] = [];
+    for (const fileKey of [newObjectKey, newCoverObject?.key || null]) {
+      if (!fileKey) continue;
       try {
-        await deleteFromR2(env, newObjectKey, 'media');
-      } catch (cleanupError) {
-        return json({ error: 'Media item disappeared before its update completed.', cleanup_error: messageOf(cleanupError), orphaned_object_key: newObjectKey }, 502);
+        await deleteFromR2(env, fileKey, 'media');
+      } catch {
+        orphaned.push(fileKey);
       }
+    }
+    if (orphaned.length) {
+      return json({
+        error: 'Media item disappeared before its update completed.',
+        orphaned_object_keys: orphaned,
+      }, 502);
     }
     return errorResponse('Media item not found.', 404);
   }

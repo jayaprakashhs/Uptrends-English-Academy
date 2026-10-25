@@ -106,7 +106,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [branding, setBranding] = useState<SiteBranding | null>(null);
   const [editingBranding, setEditingBranding] = useState<Partial<SiteBranding> | null>(null);
   const [adminProfiles, setAdminProfiles] = useState<AdminProfile[]>([]);
-  const [mediaForm, setMediaForm] = useState<Partial<MediaItem> & { media_file_base64?: string; media_file_mime?: string }>({
+  const [mediaForm, setMediaForm] = useState<Partial<MediaItem> & { media_file_base64?: string; media_file_mime?: string; cover_file_base64?: string; cover_file_mime?: string }>({
     media_type: 'photo',
     title: '',
     caption: '',
@@ -678,16 +678,45 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     reader.readAsDataURL(file);
   };
 
+  const handleCoverFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setMediaError('Cover image must be JPEG, PNG, or WebP.');
+      event.target.value = '';
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setMediaError('Cover image must be under 5 MB.');
+      event.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setMediaError(null);
+      setMediaForm((prev) => ({
+        ...prev,
+        cover_file_base64: String(reader.result || ''),
+        cover_file_mime: file.type,
+      }));
+    };
+    reader.onerror = () => setMediaError('Unable to read this cover image.');
+    reader.readAsDataURL(file);
+  };
+
   const handleSaveMedia = async (event: React.FormEvent) => {
     event.preventDefault();
     setLoading(true);
     setMediaError(null);
 
     try {
-      const { media_file_base64, ...mediaDetails } = mediaForm;
+      const { media_file_base64, cover_file_base64, ...mediaDetails } = mediaForm;
       const payload = {
         ...mediaDetails,
         ...(media_file_base64 ? { media_file_base64 } : {}),
+        ...(cover_file_base64 ? { cover_file_base64 } : {}),
         media_type: mediaForm.media_type || 'photo',
         title: mediaForm.title?.trim(),
         caption: mediaForm.caption?.trim() || '',
@@ -1779,14 +1808,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                         </div>
                       )}
                       <div>
-                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Cover Image URL (optional)</label>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Cover Image (optional)</label>
                         <input
-                          type="url"
-                          value={mediaForm.cover_image_url || ''}
-                          onChange={(e) => setMediaForm((prev) => ({ ...prev, cover_image_url: e.target.value }))}
-                          className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
-                          placeholder="https://example.com/cover.jpg"
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          onChange={handleCoverFileChange}
+                          className="w-full text-[11px] text-slate-600"
                         />
+                        {(mediaForm.cover_file_base64 || mediaForm.cover_image_url) && (
+                          <div className="mt-2 rounded-xl overflow-hidden border border-slate-200">
+                            <img
+                              src={mediaForm.cover_file_base64 || mediaForm.cover_image_url || ''}
+                              alt="Cover image preview"
+                              className="w-full h-36 object-cover"
+                            />
+                            {mediaForm.cover_file_base64 && (
+                              <p className="px-2 py-1 text-[10px] text-amber-700 bg-amber-50">
+                                Preview only — uploaded when you save.
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </>
                   )}

@@ -841,6 +841,7 @@ app.post('/api/admin/media', async (req, res) => {
       media_file_base64,
       media_file_mime,
       media_url,
+      cover_file_base64,
     } = req.body || {};
 
     if (!title || !title.trim()) {
@@ -890,6 +891,48 @@ app.post('/api/admin/media', async (req, res) => {
       objectKey = key;
     }
 
+    let coverObjectKey: string | null = null;
+    let storedCoverUrl = cover_image_url || null;
+
+    if (cover_file_base64 !== undefined && cover_file_base64 !== null && cover_file_base64 !== '') {
+      const matches = typeof cover_file_base64 === 'string'
+        ? cover_file_base64.match(/^data:(image\/(png|jpeg|jpg|webp));base64,(.+)$/i)
+        : null;
+
+      if (!matches) {
+        if (objectKey) await deleteManagedR2Object(objectKey);
+        return res.status(400).json({ error: 'Invalid cover image. Please use PNG, JPG, or WebP.' });
+      }
+
+      const mime = matches[1].toLowerCase();
+      const base64Data = matches[3];
+
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime) ||
+          !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64Data)) {
+        if (objectKey) await deleteManagedR2Object(objectKey);
+        return res.status(400).json({ error: 'Invalid cover image format or base64 data.' });
+      }
+
+      const buffer = Buffer.from(base64Data, 'base64');
+      if (buffer.length === 0 || buffer.length > 5 * 1024 * 1024) {
+        if (objectKey) await deleteManagedR2Object(objectKey);
+        return res.status(400).json({ error: 'Cover image must be larger than 0 bytes and no more than 5 MB.' });
+      }
+
+      const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+      coverObjectKey = `media/${Date.now()}_${crypto.randomUUID()}.${ext}`;
+      try {
+        storedCoverUrl = await uploadMediaToR2(buffer, coverObjectKey, mime);
+      } catch (error) {
+        if (objectKey) {
+          try { await deleteManagedR2Object(objectKey); } catch (cleanupError) {
+            console.error('[Admin Media Main Upload Cleanup Error]', cleanupError);
+          }
+        }
+        throw error;
+      }
+    }
+
     const newItem = {
       id: crypto.randomUUID(),
       media_type: normalizedType,
@@ -899,7 +942,7 @@ app.post('/api/admin/media', async (req, res) => {
       media_url: storedUrl,
       youtube_url: cleanYoutube || null,
       youtube_video_id: youtubeVideoId,
-      cover_image_url: cover_image_url || null,
+      cover_image_url: storedCoverUrl,
       alt_text: alt_text || title.trim(),
       is_published: is_published !== false,
       display_order: Number(display_order || 0),
@@ -911,12 +954,13 @@ app.post('/api/admin/media', async (req, res) => {
       const { data, error } = await supabase.from('media_items').insert([newItem]).select().single();
       if (error) {
         let cleanupErrorMessage = '';
-        if (objectKey) {
+        for (const key of [objectKey, coverObjectKey]) {
+          if (!key) continue;
           try {
-            await deleteManagedR2Object(objectKey);
+            await deleteManagedR2Object(key);
           } catch (cleanupError: any) {
             console.error('[Admin Media Upload Cleanup Error]', cleanupError);
-            cleanupErrorMessage = ` The uploaded photo could not be removed from R2: ${cleanupError.message || 'storage error'}`;
+            cleanupErrorMessage += ` Uploaded object ${key} could not be removed from R2.`;
           }
         }
         return res.status(500).json({ error: `${error.message || 'Failed to create media item.'}${cleanupErrorMessage}` });
@@ -924,7 +968,9 @@ app.post('/api/admin/media', async (req, res) => {
       return res.json(data);
     }
 
-    if (objectKey) await deleteManagedR2Object(objectKey);
+    for (const key of [objectKey, coverObjectKey]) {
+      if (key) await deleteManagedR2Object(key);
+    }
     return res.status(503).json({ error: 'Media storage is unavailable because Supabase is not configured.' });
   } catch (err: any) {
     console.error('[Admin Media Create Error]', err);
@@ -951,6 +997,7 @@ app.put('/api/admin/media/:id', async (req, res) => {
       media_file_base64,
       media_file_mime,
       media_url,
+      cover_file_base64,
     } = req.body || {};
 
     let item: any = null;
@@ -1004,17 +1051,94 @@ app.put('/api/admin/media/:id', async (req, res) => {
       uploadedObjectKey = key;
     }
 
+    let uploadedCoverObjectKey: string | null = null;
+    let nextCoverImageUrl = cover_image_url !== undefined ? cover_image_url : item.cover_image_url;
+
+    if (cover_file_base64 !== undefined && cover_file_base64 !== null && cover_file_base64 !== '') {
+      const matches = typeof cover_file_base64 === 'string'
+        ? cover_file_base64.match(/^data:(image\/(png|jpeg|jpg|webp));base64,(.+)$/i)
+        : null;
+
+      if (!matches) {
+      for (const key of [uploadedObjectKey, uploadedCoverObjectKey]) {
+        if (!key) continue;
+        try {
+          await deleteManagedR2Object(key);
+        } catch (cleanupError) {
+          console.error('[Admin Media Upload Cleanup Error]', cleanupError);
+        }
+      }
+        return res.status(400).json({ error: 'Invalid cover image. Please use PNG, JPG, or WebP.' });
+      }
+
+      const mime = matches[1].toLowerCase();
+      const base64Data = matches[3];
+
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime) ||
+          !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64Data)) {
+      for (const key of [uploadedObjectKey, uploadedCoverObjectKey]) {
+        if (!key) continue;
+        try {
+          await deleteManagedR2Object(key);
+        } catch (cleanupError) {
+          console.error('[Admin Media Upload Cleanup Error]', cleanupError);
+        }
+      }
+        return res.status(400).json({ error: 'Invalid cover image format or base64 data.' });
+      }
+
+      const buffer = Buffer.from(base64Data, 'base64');
+      if (buffer.length === 0 || buffer.length > 5 * 1024 * 1024) {
+      for (const key of [uploadedObjectKey, uploadedCoverObjectKey]) {
+        if (!key) continue;
+        try {
+          await deleteManagedR2Object(key);
+        } catch (cleanupError) {
+          console.error('[Admin Media Upload Cleanup Error]', cleanupError);
+        }
+      }
+        return res.status(400).json({ error: 'Cover image must be larger than 0 bytes and no more than 5 MB.' });
+      }
+
+      const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+      uploadedCoverObjectKey = `media/${Date.now()}_${crypto.randomUUID()}.${ext}`;
+      try {
+        nextCoverImageUrl = await uploadMediaToR2(buffer, uploadedCoverObjectKey, mime);
+      } catch (error) {
+        if (uploadedObjectKey) {
+          try { await deleteManagedR2Object(uploadedObjectKey); } catch (cleanupError) {
+            console.error('[Admin Media Main Upload Cleanup Error]', cleanupError);
+          }
+        }
+        throw error;
+      }
+    }
+
     const previousObjectKey = item.r2_object_key
       ? getManagedR2Key(item.r2_object_key, 'media')
       : null;
     const isReplacingStoredObject = Boolean(item.r2_object_key && (nextType === 'video' || uploadedObjectKey));
     const shouldRemovePreviousObject = Boolean(previousObjectKey && isReplacingStoredObject && previousObjectKey !== nextObjectKey);
     if (isReplacingStoredObject && !previousObjectKey) {
-      if (uploadedObjectKey) await deleteManagedR2Object(uploadedObjectKey);
+      for (const key of [uploadedObjectKey, uploadedCoverObjectKey]) {
+        if (!key) continue;
+        try {
+          await deleteManagedR2Object(key);
+        } catch (cleanupError) {
+          console.error('[Admin Media Upload Cleanup Error]', cleanupError);
+        }
+      }
       return res.status(400).json({ error: 'Stored media object key is invalid; refusing to update the media record.' });
     }
     if (shouldRemovePreviousObject && !r2Client) {
-      if (uploadedObjectKey) await deleteManagedR2Object(uploadedObjectKey);
+      for (const key of [uploadedObjectKey, uploadedCoverObjectKey]) {
+        if (!key) continue;
+        try {
+          await deleteManagedR2Object(key);
+        } catch (cleanupError) {
+          console.error('[Admin Media Upload Cleanup Error]', cleanupError);
+        }
+      }
       return res.status(503).json({ error: 'Cloudflare R2 storage is not configured, so the existing media photo cannot be removed.' });
     }
 
@@ -1027,7 +1151,7 @@ app.put('/api/admin/media/:id', async (req, res) => {
       r2_object_key: nextObjectKey,
       youtube_url: nextYoutube || null,
       youtube_video_id: nextYoutubeId,
-      cover_image_url: cover_image_url !== undefined ? cover_image_url : item.cover_image_url,
+      cover_image_url: nextCoverImageUrl,
       is_published: is_published !== undefined ? Boolean(is_published) : item.is_published,
       display_order: display_order !== undefined ? Number(display_order) : item.display_order,
       updated_at: new Date().toISOString(),
@@ -1037,12 +1161,13 @@ app.put('/api/admin/media/:id', async (req, res) => {
       const { data, error } = await supabase.from('media_items').update(updates).eq('id', id).select().single();
       if (error) {
         let cleanupErrorMessage = '';
-        if (uploadedObjectKey) {
+        for (const key of [uploadedObjectKey, uploadedCoverObjectKey]) {
+          if (!key) continue;
           try {
-            await deleteManagedR2Object(uploadedObjectKey);
+            await deleteManagedR2Object(key);
           } catch (cleanupError: any) {
             console.error('[Admin Media Upload Cleanup Error]', cleanupError);
-            cleanupErrorMessage = ` The uploaded photo could not be removed from R2: ${cleanupError.message || 'storage error'}`;
+            cleanupErrorMessage += ` Uploaded object ${key} could not be removed from R2.`;
           }
         }
         return res.status(500).json({ error: `${error.message || 'Failed to update media item.'}${cleanupErrorMessage}` });
@@ -1060,7 +1185,9 @@ app.put('/api/admin/media/:id', async (req, res) => {
 
     const idx = memoryStore.media.findIndex((m) => m.id === id);
     if (idx === -1) return res.status(404).json({ error: 'Media item not found.' });
-    if (uploadedObjectKey) await deleteManagedR2Object(uploadedObjectKey);
+    for (const key of [uploadedObjectKey, uploadedCoverObjectKey]) {
+      if (key) await deleteManagedR2Object(key);
+    }
     return res.status(503).json({ error: 'Media storage is unavailable because Supabase is not configured.' });
   } catch (err: any) {
     console.error('[Admin Media Update Error]', err);
