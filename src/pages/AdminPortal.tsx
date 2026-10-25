@@ -396,11 +396,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     try {
       const method = editingProgram.id ? 'PUT' : 'POST';
       const url = editingProgram.id ? `/api/admin/programs/${editingProgram.id}` : '/api/admin/programs';
-      const res = await fetch(url, {
-        method,
-        headers: getAuthHeaders(),
-        body: JSON.stringify(editingProgram),
-      });
+      // The Worker manages image_object_key; never send it from the browser.
+const { image_object_key: _imageObjectKey, ...programPayload } = editingProgram;
+
+const res = await fetch(url, {
+  method,
+  headers: getAuthHeaders(),
+  body: JSON.stringify(programPayload),
+});
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save program');
       setEditingProgram(null);
