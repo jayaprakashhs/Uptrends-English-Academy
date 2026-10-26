@@ -9,6 +9,7 @@ import { Resend } from 'resend';
 import { DeleteObjectCommand, HeadBucketCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
 import { removeLegacyUploadFile } from './local-upload-storage';
+import { handleApiRequest } from './worker-api';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1807,6 +1808,69 @@ app.post('/api/contact', async (req, res) => {
   }
 });
 
+// Bridge manual payment endpoints to the existing Worker handlers.
+// Preserve the original Bearer token and Worker-side role checks.
+app.all(
+  [
+    '/api/admin/applications/:id/fee',
+    '/api/admin/applications/:id/payments',
+    '/api/admin/payments/:paymentId',
+  ],
+  async (req, res) => {
+    try {
+      const headers = new Headers();
+
+      for (const [key, value] of Object.entries(req.headers)) {
+        if (typeof value === 'string') {
+          headers.set(key, value);
+        } else if (Array.isArray(value)) {
+          headers.set(key, value.join(', '));
+        }
+      }
+
+      const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+      const hasBody = !['GET', 'HEAD'].includes(req.method.toUpperCase());
+
+      const workerRequest = new Request(url, {
+        method: req.method,
+        headers,
+        ...(hasBody
+          ? { body: JSON.stringify(req.body ?? {}) }
+          : {}),
+      });
+
+      const workerEnv = {
+        SUPABASE_URL: process.env.SUPABASE_URL || SUPABASE_URL,
+        VITE_SUPABASE_URL: SUPABASE_URL,
+        VITE_SUPABASE_ANON_KEY:
+          process.env.VITE_SUPABASE_ANON_KEY || '',
+        SUPABASE_SERVICE_ROLE_KEY: SUPABASE_SERVICE_KEY,
+      };
+
+      const workerResponse = await handleApiRequest(
+        workerRequest,
+        workerEnv,
+      );
+
+      res.status(workerResponse.status);
+
+      workerResponse.headers.forEach((value, key) => {
+        res.setHeader(key, value);
+      });
+
+      const responseBody = Buffer.from(
+        await workerResponse.arrayBuffer(),
+      );
+
+      return res.send(responseBody);
+    } catch (error) {
+      console.error('Manual payment route bridge failed.');
+      return res.status(500).json({
+        error: 'Unable to process the payment request.',
+      });
+    }
+  },
+);
 // -------------------------------------------------------------
 // PROTECTED ADMIN DATA ENDPOINTS (Staff and above)
 // -------------------------------------------------------------

@@ -762,3 +762,69 @@ test('Supabase client initialization exceptions return safe JSON 503 and safe di
   assert.match(logs[1], /"error_category":"invalid_configuration"/);
   assert.ok(logs.every((line) => !line.includes(publicSecret) && !line.includes(serviceSecret)));
 });
+
+test('payment routes fail closed when privileged Supabase credentials are missing', async () => {
+  const appId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const routes = [
+    { path: `/api/admin/applications/${appId}/payments`, method: 'GET' },
+    { path: `/api/admin/applications/${appId}/fee`, method: 'PUT' },
+    { path: `/api/admin/payments/${appId}`, method: 'DELETE' },
+  ];
+
+  await withCapturedLogs(async () => {
+    for (const route of routes) {
+      const response = await handleApiRequest(
+        new Request(`https://academy.example${route.path}`, { method: route.method }),
+        {},
+      );
+      const body = await assertJson503(response);
+      assert.equal(
+        body.error,
+        'Admin APIs are unavailable because Supabase service credentials are not configured.',
+        route.path,
+      );
+    }
+  });
+});
+
+test('payment routes require authentication when privileged credentials are configured', async () => {
+  const appId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const env = {
+    SUPABASE_URL: 'https://project.example',
+    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+  };
+
+  const requests = [
+    new Request(`https://academy.example/api/admin/applications/${appId}/payments`),
+    new Request(`https://academy.example/api/admin/applications/${appId}/fee`, {
+      method: 'PUT',
+    }),
+    new Request(`https://academy.example/api/admin/payments/${appId}`, {
+      method: 'DELETE',
+    }),
+  ];
+
+  for (const request of requests) {
+    const response = await handleApiRequest(request, env);
+    assert.equal(response.status, 401, new URL(request.url).pathname);
+    const body = await response.json() as { error: string };
+    assert.match(body.error, /^Unauthorized:/);
+  }
+});
+
+test('payment routes reject malformed application and payment IDs', async () => {
+  const requests = [
+    new Request('https://academy.example/api/admin/applications/not-a-uuid/payments'),
+    new Request('https://academy.example/api/admin/applications/not-a-uuid/fee', {
+      method: 'PUT',
+    }),
+    new Request('https://academy.example/api/admin/payments/not-a-uuid', {
+      method: 'DELETE',
+    }),
+  ];
+
+  for (const request of requests) {
+    const response = await handleApiRequest(request, {});
+    assert.equal(response.status, 400, new URL(request.url).pathname);
+  }
+});
