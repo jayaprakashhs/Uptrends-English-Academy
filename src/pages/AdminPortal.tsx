@@ -54,6 +54,53 @@ interface AdminPortalProps {
   setCurrentPage: (page: string) => void;
 }
 
+type PaymentStage = 'first_fee' | 'second_fee' | 'installment' | 'final_payment';
+type PaymentMethod = 'cash' | 'upi' | 'bank_transfer' | 'card' | 'cheque' | 'other';
+
+interface ApplicationFeeAgreement {
+  id: string;
+  application_id: string;
+  agreed_total: number;
+  currency: string;
+  notes: string | null;
+  created_by: string | null;
+  updated_by: string | null;
+  created_by_name?: string | null;
+  updated_by_name?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ApplicationPayment {
+  id: string;
+  application_id: string;
+  amount: number;
+  payment_method: PaymentMethod;
+  payment_stage: PaymentStage;
+  recorded_at: string;
+  reference_number: string | null;
+  notes: string | null;
+  recorded_by: string | null;
+  updated_by: string | null;
+  recorded_by_name?: string | null;
+  updated_by_name?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ApplicationPaymentData {
+  application: {
+    id: string;
+    application_reference: string;
+    student_name: string;
+    program_name: string | null;
+  };
+  feeAgreement: ApplicationFeeAgreement | null;
+  payments: ApplicationPayment[];
+  totalPaid: number;
+  remainingBalance: number | null;
+}
+
 const integrationStatusLabel = (health: IntegrationHealth | undefined, missingLabel: string): string => {
   if (!health) return 'Checking...';
   if (health.connected) return 'Connected';
@@ -124,6 +171,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   // Selected item modal preview states
   const [selectedApp, setSelectedApp] = useState<StudentApplication | null>(null);
+  const [paymentApp, setPaymentApp] = useState<StudentApplication | null>(null);
+  const [paymentData, setPaymentData] = useState<ApplicationPaymentData | null>(null);
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [paymentSaving, setPaymentSaving] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null);
+  const [feeTotalInput, setFeeTotalInput] = useState('');
+  const [feeNotesInput, setFeeNotesInput] = useState('');
+  const [paymentAmountInput, setPaymentAmountInput] = useState('');
+  const [paymentMethodInput, setPaymentMethodInput] = useState<PaymentMethod>('upi');
+  const [paymentStageInput, setPaymentStageInput] = useState<PaymentStage>('first_fee');
+  const [paymentReferenceInput, setPaymentReferenceInput] = useState('');
+  const [paymentNotesInput, setPaymentNotesInput] = useState('');
+
   const [selectedCallback, setSelectedCallback] = useState<CallbackRequest | null>(null);
   const [selectedContact, setSelectedContact] = useState<ContactEnquiry | null>(null);
   const [appPhotoModal, setAppPhotoModal] = useState<string | null>(null);
@@ -174,6 +235,147 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       throw new Error(message);
     }
     return data;
+  };
+
+  const loadApplicationPaymentData = async (app: StudentApplication) => {
+    setPaymentApp(app);
+    setPaymentData(null);
+    setPaymentError(null);
+    setPaymentLoading(true);
+    setEditingPaymentId(null);
+
+    try {
+      const data = await requestJson(
+        `/api/admin/applications/${encodeURIComponent(app.id)}/payments`,
+        { method: 'GET', headers: getAuthHeaders() },
+      );
+
+      setPaymentData(data as ApplicationPaymentData);
+      setFeeTotalInput(
+        data?.feeAgreement?.agreed_total == null
+          ? ''
+          : String(data.feeAgreement.agreed_total),
+      );
+      setFeeNotesInput(data?.feeAgreement?.notes || '');
+    } catch (error) {
+      setPaymentError(
+        error instanceof Error ? error.message : 'Unable to load payment records.',
+      );
+    } finally {
+      setPaymentLoading(false);
+    }
+  };
+
+  const saveAgreedFee = async () => {
+    if (!paymentApp || !isAdminOrHigher) return;
+
+    const agreedTotal = Number(feeTotalInput);
+    if (!feeTotalInput.trim() || !Number.isFinite(agreedTotal) || agreedTotal < 0) {
+      setPaymentError('Enter a valid agreed fee of zero or more.');
+      return;
+    }
+
+    setPaymentSaving(true);
+    setPaymentError(null);
+    try {
+      await requestJson(
+        `/api/admin/applications/${encodeURIComponent(paymentApp.id)}/fee`,
+        {
+          method: 'PUT',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({
+            agreed_total: Math.round(agreedTotal * 100) / 100,
+            notes: feeNotesInput.trim() || null,
+          }),
+        },
+      );
+      await loadApplicationPaymentData(paymentApp);
+    } catch (error) {
+      setPaymentError(error instanceof Error ? error.message : 'Unable to save agreed fee.');
+    } finally {
+      setPaymentSaving(false);
+    }
+  };
+
+  const resetPaymentForm = () => {
+    setEditingPaymentId(null);
+    setPaymentAmountInput('');
+    setPaymentMethodInput('upi');
+    setPaymentStageInput('first_fee');
+    setPaymentReferenceInput('');
+    setPaymentNotesInput('');
+  };
+
+  const savePaymentEntry = async () => {
+    if (!paymentApp || !isAdminOrHigher) return;
+
+    const amount = Number(paymentAmountInput);
+    if (!paymentAmountInput.trim() || !Number.isFinite(amount) || amount <= 0) {
+      setPaymentError('Enter a valid payment amount greater than zero.');
+      return;
+    }
+
+    setPaymentSaving(true);
+    setPaymentError(null);
+    try {
+      const isEditing = Boolean(editingPaymentId);
+      const url = isEditing
+        ? `/api/admin/payments/${encodeURIComponent(editingPaymentId as string)}`
+        : `/api/admin/applications/${encodeURIComponent(paymentApp.id)}/payments`;
+
+      await requestJson(url, {
+        method: isEditing ? 'PUT' : 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          amount: Math.round(amount * 100) / 100,
+          payment_method: paymentMethodInput,
+          payment_stage: paymentStageInput,
+          reference_number: paymentReferenceInput.trim() || null,
+          notes: paymentNotesInput.trim() || null,
+        }),
+      });
+
+      resetPaymentForm();
+      await loadApplicationPaymentData(paymentApp);
+    } catch (error) {
+      setPaymentError(error instanceof Error ? error.message : 'Unable to save payment.');
+    } finally {
+      setPaymentSaving(false);
+    }
+  };
+
+  const beginEditPayment = (payment: ApplicationPayment) => {
+    setEditingPaymentId(payment.id);
+    setPaymentAmountInput(String(payment.amount));
+    setPaymentMethodInput(payment.payment_method);
+    setPaymentStageInput(payment.payment_stage);
+    setPaymentReferenceInput(payment.reference_number || '');
+    setPaymentNotesInput(payment.notes || '');
+    setPaymentError(null);
+  };
+
+  const removePaymentEntry = async (payment: ApplicationPayment) => {
+    if (!paymentApp || !isAdminOrHigher) return;
+
+    const confirmed = window.confirm(
+      `Delete the payment of ₹${Number(payment.amount).toFixed(2)} recorded on ${new Date(payment.recorded_at).toLocaleString('en-IN')}? This action will be audited.`,
+    );
+    if (!confirmed) return;
+
+    setPaymentSaving(true);
+    setPaymentError(null);
+    try {
+      await requestJson(`/api/admin/payments/${encodeURIComponent(payment.id)}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      if (editingPaymentId === payment.id) resetPaymentForm();
+      await loadApplicationPaymentData(paymentApp);
+    } catch (error) {
+      setPaymentError(error instanceof Error ? error.message : 'Unable to delete payment.');
+    } finally {
+      setPaymentSaving(false);
+    }
   };
 
   const notifyPublicDataChanged = () => window.dispatchEvent(new Event('admin-data-updated'));
@@ -1278,6 +1480,14 @@ const res = await fetch(url, {
                                 className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold cursor-pointer disabled:opacity-50"
                               >
                                 Review
+                              </button>
+                              <button
+                                type="button"
+                                disabled={loading || paymentLoading}
+                                onClick={() => void loadApplicationPaymentData(app)}
+                                className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold cursor-pointer disabled:opacity-50"
+                              >
+                                Payment
                               </button>
                               {app.status === 'Pending' && (
                                 <button
@@ -2600,6 +2810,336 @@ const res = await fetch(url, {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Manual Payment Register Modal — independent of application approval */}
+      {paymentApp && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="payment-register-title"
+            className="bg-white rounded-3xl max-w-4xl w-full p-6 sm:p-8 space-y-6 shadow-2xl border border-slate-200 max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-4">
+              <div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-blue-700">
+                  Manual Payment Register
+                </span>
+                <h2 id="payment-register-title" className="text-xl font-extrabold text-slate-900">
+                  {paymentApp.student_name}
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">
+                  {paymentApp.application_reference} · {paymentApp.program_name || 'Course not specified'}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Payment records do not change application approval status.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close payment register"
+                onClick={() => {
+                  setPaymentApp(null);
+                  setPaymentData(null);
+                  setPaymentError(null);
+                  setEditingPaymentId(null);
+                }}
+                className="p-2 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {paymentLoading && (
+              <p role="status" className="text-sm text-slate-600 py-6">
+                Loading payment records…
+              </p>
+            )}
+
+            {paymentError && (
+              <div role="alert" className="rounded-xl bg-rose-50 border border-rose-200 p-4 text-sm text-rose-800">
+                {paymentError}
+                <button
+                  type="button"
+                  onClick={() => void loadApplicationPaymentData(paymentApp)}
+                  className="ml-3 font-bold underline"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {!paymentLoading && paymentData && (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="rounded-2xl bg-slate-50 border border-slate-100 p-4">
+                    <p className="text-xs text-slate-500">Agreed total fee</p>
+                    <p className="text-xl font-extrabold text-slate-900 mt-1">
+                      {paymentData.feeAgreement
+                        ? `₹${Number(paymentData.feeAgreement.agreed_total).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                        : 'Not set'}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl bg-emerald-50 border border-emerald-100 p-4">
+                    <p className="text-xs text-emerald-700">Total paid</p>
+                    <p className="text-xl font-extrabold text-emerald-800 mt-1">
+                      ₹{Number(paymentData.totalPaid).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl bg-amber-50 border border-amber-100 p-4">
+                    <p className="text-xs text-amber-700">Remaining balance</p>
+                    <p className="text-xl font-extrabold text-amber-800 mt-1">
+                      {paymentData.remainingBalance == null
+                        ? 'Set fee first'
+                        : `₹${Number(paymentData.remainingBalance).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 p-4 space-y-3">
+                  <h3 className="font-bold text-slate-900">Agreed fee</h3>
+                  {isAdminOrHigher ? (
+                    <>
+                      <label className="block text-xs font-semibold text-slate-600">
+                        Total fee agreed with this student (INR)
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={feeTotalInput}
+                          onChange={(event) => setFeeTotalInput(event.target.value)}
+                          disabled={paymentSaving}
+                          placeholder="Enter the manually agreed fee"
+                          className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
+                        />
+                      </label>
+                      <label className="block text-xs font-semibold text-slate-600">
+                        Fee notes (optional)
+                        <textarea
+                          value={feeNotesInput}
+                          onChange={(event) => setFeeNotesInput(event.target.value)}
+                          disabled={paymentSaving}
+                          maxLength={2000}
+                          rows={2}
+                          placeholder="Notes about the agreed fee"
+                          className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={paymentSaving || paymentLoading || !feeTotalInput.trim()}
+                        onClick={() => void saveAgreedFee()}
+                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm disabled:opacity-50"
+                      >
+                        {paymentSaving ? 'Saving…' : 'Save agreed fee'}
+                      </button>
+                    </>
+                  ) : (
+                    <p className="text-sm text-slate-600">
+                      Only admins and super admins can change the agreed fee.
+                    </p>
+                  )}
+                  {paymentData.feeAgreement?.notes && (
+                    <p className="text-xs text-slate-600">
+                      <span className="font-semibold">Saved notes:</span> {paymentData.feeAgreement.notes}
+                    </p>
+                  )}
+                </div>
+
+                {isAdminOrHigher && paymentData.feeAgreement && (
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50/50 p-4 space-y-3">
+                    <h3 className="font-bold text-slate-900">
+                      {editingPaymentId ? 'Edit payment' : 'Record payment'}
+                    </h3>
+                    <label className="block text-xs font-semibold text-slate-600">
+                      Amount (INR)
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={paymentAmountInput}
+                        onChange={(event) => setPaymentAmountInput(event.target.value)}
+                        disabled={paymentSaving}
+                        placeholder="Amount received"
+                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                      />
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <label className="block text-xs font-semibold text-slate-600">
+                        Payment method
+                        <select
+                          value={paymentMethodInput}
+                          onChange={(event) => setPaymentMethodInput(event.target.value as PaymentMethod)}
+                          disabled={paymentSaving}
+                          className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                        >
+                          <option value="cash">Cash</option>
+                          <option value="upi">UPI</option>
+                          <option value="bank_transfer">Bank transfer</option>
+                          <option value="card">Card</option>
+                          <option value="cheque">Cheque</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </label>
+                      <label className="block text-xs font-semibold text-slate-600">
+                        Payment stage
+                        <select
+                          value={paymentStageInput}
+                          onChange={(event) => setPaymentStageInput(event.target.value as PaymentStage)}
+                          disabled={paymentSaving}
+                          className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                        >
+                          <option value="first_fee">First fee</option>
+                          <option value="second_fee">Second fee</option>
+                          <option value="installment">Installment</option>
+                          <option value="final_payment">Final payment</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label className="block text-xs font-semibold text-slate-600">
+                      Reference number (optional)
+                      <input
+                        type="text"
+                        maxLength={200}
+                        value={paymentReferenceInput}
+                        onChange={(event) => setPaymentReferenceInput(event.target.value)}
+                        disabled={paymentSaving}
+                        placeholder="Transaction ID or receipt number"
+                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                      />
+                    </label>
+                    <label className="block text-xs font-semibold text-slate-600">
+                      Notes (optional)
+                      <textarea
+                        rows={2}
+                        maxLength={2000}
+                        value={paymentNotesInput}
+                        onChange={(event) => setPaymentNotesInput(event.target.value)}
+                        disabled={paymentSaving}
+                        placeholder="Additional payment details"
+                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                      />
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={paymentSaving || paymentLoading || !paymentAmountInput.trim()}
+                        onClick={() => void savePaymentEntry()}
+                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm disabled:opacity-50"
+                      >
+                        {paymentSaving ? 'Saving…' : editingPaymentId ? 'Save changes' : 'Record payment'}
+                      </button>
+                      {editingPaymentId && (
+                        <button
+                          type="button"
+                          disabled={paymentSaving}
+                          onClick={resetPaymentForm}
+                          className="px-4 py-2 rounded-xl border border-slate-300 bg-white text-slate-700 font-bold text-sm disabled:opacity-50"
+                        >
+                          Cancel edit
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="font-bold text-slate-900">Payment history</h3>
+                    <span className="text-xs text-slate-500">
+                      {paymentData.payments.length} record{paymentData.payments.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+
+                  {paymentData.payments.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
+                      No payments recorded for this application yet.
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-xl border border-slate-200">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-slate-600">
+                          <tr>
+                            <th className="px-3 py-3 font-bold">Recorded</th>
+                            <th className="px-3 py-3 font-bold">Stage</th>
+                            <th className="px-3 py-3 font-bold">Method</th>
+                            <th className="px-3 py-3 font-bold text-right">Amount</th>
+                            <th className="px-3 py-3 font-bold">Reference / notes</th>
+                            <th className="px-3 py-3 font-bold">Recorded by</th>
+                            {isAdminOrHigher && <th className="px-3 py-3 font-bold">Actions</th>}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {paymentData.payments.map((payment) => (
+                            <tr key={payment.id} className="align-top">
+                              <td className="px-3 py-3 whitespace-nowrap text-slate-600">
+                                {new Date(payment.recorded_at).toLocaleString('en-IN')}
+                              </td>
+                              <td className="px-3 py-3 text-slate-700">
+                                {payment.payment_stage.replaceAll('_', ' ')}
+                              </td>
+                              <td className="px-3 py-3 text-slate-700">
+                                {payment.payment_method.replaceAll('_', ' ')}
+                              </td>
+                              <td className="px-3 py-3 text-right font-bold text-slate-900 whitespace-nowrap">
+                                ₹{Number(payment.amount).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </td>
+                              <td className="px-3 py-3 text-slate-600 min-w-36">
+                                {payment.reference_number || '—'}
+                                {payment.notes && <p className="mt-1 whitespace-pre-wrap">{payment.notes}</p>}
+                              </td>
+                              <td className="px-3 py-3 text-slate-600">
+                                {payment.recorded_by_name || payment.recorded_by || '—'}
+                              </td>
+                              {isAdminOrHigher && (
+                                <td className="px-3 py-3">
+                                  <div className="flex flex-wrap gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={paymentSaving || paymentLoading}
+                                      onClick={() => beginEditPayment(payment)}
+                                      className="rounded-lg border border-slate-300 px-2.5 py-1.5 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={paymentSaving || paymentLoading}
+                                      onClick={() => void removePaymentEntry(payment)}
+                                      className="rounded-lg border border-red-200 px-2.5 py-1.5 font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                </td>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            <div className="flex justify-end border-t border-slate-100 pt-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setPaymentApp(null);
+                  setPaymentData(null);
+                  setPaymentError(null);
+                  setEditingPaymentId(null);
+                }}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm"
+              >
+                Close
+              </button>
+            </div>
+          </section>
         </div>
       )}
 
