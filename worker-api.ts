@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { generateOfficialPdf } from './official-document';
 import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
 import type { R2BucketBinding } from './worker-r2';
 
@@ -490,30 +491,71 @@ const insertNotification = async (
   return error ? errorResponse(`Email was processed, but its notification could not be recorded: ${error.message}`, 500) : null;
 };
 
-const getOfficialPdf = async (request: Request, env: Env): Promise<{ filename: string; content: string } | Response> => {
-  const configuredUrl = env.APPROVED_FEE_STRUCTURE_PDF_URL?.trim();
-  let pdfResponse: Response;
-  try {
-    const target = configuredUrl ? new URL(configuredUrl) : new URL('/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf', request.url);
-    if (target.protocol !== 'https:' && target.origin !== new URL(request.url).origin) {
-      return errorResponse('The configured fee structure PDF must use HTTPS.', 400);
-    }
-    if (target.origin === new URL(request.url).origin && !env.ASSETS) {
-      return errorResponse('The Worker static asset binding is not configured.', 503);
-    }
-    pdfResponse = target.origin === new URL(request.url).origin
-      ? await env.ASSETS!.fetch(new Request(target.toString()))
-      : await fetch(target);
-  } catch (error) {
-    return errorResponse(`Official Fee Structure PDF could not be loaded: ${messageOf(error)}`, 503);
+const getOfficialPdf = async (
+  _request: Request,
+  env: Env,
+): Promise<{ filename: string; content: string } | Response> => {
+  const supabase = getSupabaseClient(
+    env,
+    true,
+    'official_document_settings.read',
+  );
+
+  if (!supabase) {
+    return errorResponse(
+      'Official document settings cannot be loaded: server-side Supabase configuration is missing.',
+      503,
+    );
   }
 
-  if (!pdfResponse.ok) return errorResponse('Official Fee Structure PDF is not available in this Worker deployment.', 400);
-  const bytes = new Uint8Array(await pdfResponse.arrayBuffer());
-  if (!bytes.length || bytes.length > 10 * 1024 * 1024 || new TextDecoder().decode(bytes.slice(0, 5)) !== '%PDF-') {
-    return errorResponse('Official Fee Structure PDF is empty, too large, or invalid.', 400);
+  const { data, error } = await supabase
+    .from('official_document_settings')
+    .select('document_data')
+    .eq('setting_key', 'official_fee_structure')
+    .maybeSingle();
+
+  if (error) {
+    return errorResponse(
+      'Official document settings could not be loaded from Supabase.',
+      503,
+    );
   }
-  return { filename: 'Uptrends_Fee_Structure_and_Terms.pdf', content: toBase64(bytes) };
+
+  const settings = validateOfficialDocumentSettings(
+    data?.document_data ?? DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+  );
+
+  if (isResponse(settings)) {
+    return errorResponse(
+      'The saved official document settings are invalid. Review and save them in the admin panel.',
+      503,
+    );
+  }
+
+  try {
+    const bytes = await generateOfficialPdf(settings);
+
+    if (
+      !bytes.length ||
+      bytes.length > 10 * 1024 * 1024 ||
+      new TextDecoder().decode(bytes.slice(0, 5)) !== '%PDF-'
+    ) {
+      return errorResponse(
+        'The generated official PDF is empty, too large, or invalid.',
+        500,
+      );
+    }
+
+    return {
+      filename: 'Uptrends_Fee_Structure_and_Terms.pdf',
+      content: toBase64(bytes),
+    };
+  } catch {
+    return errorResponse(
+      'The official PDF could not be generated. Check the saved settings and Worker logs.',
+      503,
+    );
+  }
 };
 
 const readTable = async (
