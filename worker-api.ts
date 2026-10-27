@@ -515,6 +515,12 @@ const getOfficialPdf = async (
     .maybeSingle();
 
   if (error) {
+    console.error('Official document settings query failed', {
+      code: error.code,
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+    });
     return errorResponse(
       'Official document settings could not be loaded from Supabase.',
       503,
