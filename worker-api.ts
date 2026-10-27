@@ -1570,6 +1570,192 @@ const updateRequestStatus = async (
   return data ? json(data) : errorResponse('Request record not found.', 404);
 };
 
+const DEFAULT_OFFICIAL_DOCUMENT_SETTINGS = {
+  academyName: "Uptrend's English Academy",
+  address:
+    '#259/1A1, Devi Building, 2nd Floor, Ram And Co Circle, Davangere, Karnataka 577002',
+  phone: '+91 900 8000 211',
+  email: 'uptrendsinstitute@gmail.com',
+  hours: 'Monday to Saturday, 8:00 AM - 8:30 PM (Sunday Closed)',
+  welcomeMessage:
+    "Thank you for your approved application to Uptrend's English Academy. Please visit our academy office during regular hours for in-person orientation.",
+  terms:
+    'Regular attendance, active speaking practice, and respectful academy conduct.',
+  courses: [
+    { name: 'Spoken English Course - Beginner to Advanced', duration: '2-3 months', fee: '' },
+    { name: 'Basic English Grammar & Vocabulary', duration: '2 months', fee: '' },
+    { name: 'Kids English Course', duration: 'Ongoing', fee: '' },
+    { name: 'Advanced English & Interview Preparation', duration: '1 month', fee: '' },
+  ],
+};
+
+const validateOfficialDocumentSettings = (
+  value: unknown,
+): typeof DEFAULT_OFFICIAL_DOCUMENT_SETTINGS | Response => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return errorResponse('Document settings must be a JSON object.', 400);
+  }
+
+  const body = value as Record<string, unknown>;
+  const textFields = [
+    'academyName',
+    'address',
+    'phone',
+    'email',
+    'hours',
+    'welcomeMessage',
+    'terms',
+  ] as const;
+
+  const cleaned: Record<string, unknown> = {};
+
+  for (const field of textFields) {
+    if (typeof body[field] !== 'string') {
+      return errorResponse(`${field} must be a string.`, 400);
+    }
+
+    const maxLength =
+      field === 'terms' || field === 'welcomeMessage' ? 5000 : 500;
+    const text = (body[field] as string).trim();
+
+    if (text.length > maxLength) {
+      return errorResponse(
+        `${field} exceeds the ${maxLength}-character limit.`,
+        400,
+      );
+    }
+
+    if (field !== 'email' && !text) {
+      return errorResponse(`${field} cannot be empty.`, 400);
+    }
+
+    cleaned[field] = text;
+  }
+
+  if (
+    cleaned.email &&
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned.email as string)
+  ) {
+    return errorResponse('Please enter a valid email address.', 400);
+  }
+
+  if (
+    !Array.isArray(body.courses) ||
+    body.courses.length < 1 ||
+    body.courses.length > 30
+  ) {
+    return errorResponse('Provide between 1 and 30 courses.', 400);
+  }
+
+  const courses: Array<{ name: string; duration: string; fee: string }> = [];
+
+  for (const [index, item] of body.courses.entries()) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return errorResponse(`Course ${index + 1} must be an object.`, 400);
+    }
+
+    const course = item as Record<string, unknown>;
+    const name = typeof course.name === 'string' ? course.name.trim() : '';
+    const duration =
+      typeof course.duration === 'string' ? course.duration.trim() : '';
+    const fee = typeof course.fee === 'string' ? course.fee.trim() : '';
+
+    if (!name || !duration) {
+      return errorResponse(
+        `Course ${index + 1} needs a name and duration.`,
+        400,
+      );
+    }
+
+    if (name.length > 200 || duration.length > 100 || fee.length > 100) {
+      return errorResponse(
+        `Course ${index + 1} contains a field that is too long.`,
+        400,
+      );
+    }
+
+    courses.push({ name, duration, fee });
+  }
+
+  return {
+    academyName: cleaned.academyName as string,
+    address: cleaned.address as string,
+    phone: cleaned.phone as string,
+    email: cleaned.email as string,
+    hours: cleaned.hours as string,
+    welcomeMessage: cleaned.welcomeMessage as string,
+    terms: cleaned.terms as string,
+    courses,
+  };
+};
+
+const getOfficialDocumentSettings = async (
+  request: Request,
+  env: Env,
+): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'super_admin');
+  if (isResponse(auth)) return auth;
+
+  const { data, error } = await auth.supabase
+    .from('official_document_settings')
+    .select('document_data, updated_at, updated_by')
+    .eq('setting_key', 'official_fee_structure')
+    .maybeSingle();
+
+  if (error) {
+    return errorResponse(
+      `Unable to load official document settings: ${error.message}`,
+      500,
+    );
+  }
+
+  return json({
+    settings: data?.document_data ?? DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+    updated_at: data?.updated_at ?? null,
+    updated_by: data?.updated_by ?? null,
+  });
+};
+
+const saveOfficialDocumentSettings = async (
+  request: Request,
+  env: Env,
+): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'super_admin');
+  if (isResponse(auth)) return auth;
+
+  const body = await parseJson(request);
+  if (isResponse(body)) return body;
+
+  const validated = validateOfficialDocumentSettings(body.settings);
+  if (isResponse(validated)) return validated;
+
+  const { data, error } = await auth.supabase
+    .from('official_document_settings')
+    .upsert(
+      {
+        setting_key: 'official_fee_structure',
+        document_data: validated,
+        updated_at: new Date().toISOString(),
+        updated_by: auth.profile.id,
+      },
+      { onConflict: 'setting_key' },
+    )
+    .select('document_data, updated_at, updated_by')
+    .single();
+
+  if (error) {
+    return errorResponse(
+      `Unable to save official document settings: ${error.message}`,
+      500,
+    );
+  }
+
+  return json({
+    settings: data.document_data,
+    updated_at: data.updated_at,
+    updated_by: data.updated_by,
+  });
+};
 const updateBranding = async (request: Request, env: Env): Promise<Response> => {
   const auth = await requireAdmin(request, env, 'super_admin');
   if (isResponse(auth)) return auth;
@@ -2162,6 +2348,12 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     if (pathname === '/api/admin/contacts' && method === 'GET') return adminTable(request, env, 'contact_enquiries', READ_COLUMNS.contacts, 'created_at');
     if (pathname === '/api/admin/profiles' && method === 'GET') return adminTable(request, env, 'admin_profiles', READ_COLUMNS.profiles, 'created_at', true, 'super_admin');
     if (pathname === '/api/admin/branding' && method === 'PUT') return updateBranding(request, env);
+    if (pathname === '/api/admin/official-document' && method === 'GET') {
+  return getOfficialDocumentSettings(request, env);
+}
+if (pathname === '/api/admin/official-document' && method === 'PUT') {
+  return saveOfficialDocumentSettings(request, env);
+}
 
     if (pathname.startsWith('/api/')) {
       const allowedMethods: Record<string, string[]> = {
@@ -2183,6 +2375,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         '/api/admin/contacts': ['GET'],
         '/api/admin/profiles': ['GET'],
         '/api/admin/branding': ['PUT'],
+        '/api/admin/official-document': ['GET', 'PUT'],
         '/api/admin/programs': ['GET', 'POST'],
         '/api/admin/announcements': ['GET', 'POST'],
         '/api/admin/faqs': ['GET', 'POST'],
