@@ -932,7 +932,7 @@ const READ_COLUMNS = {
   reviews: 'id,author_name,rating,review_text,source,is_published,created_at,updated_at',
   media: 'id,media_type,title,caption,r2_object_key,media_url,youtube_url,youtube_video_id,cover_image_url,alt_text,is_published,display_order,created_at,updated_at',
   faqs: 'id,question,answer,is_published,display_order,created_at,updated_at',
-  applications: 'id,application_reference,student_id,student_name,mobile,email,qualification,program_name,date_of_birth,address,photo_object_key,photo_data_url,message,status,approved_by_name,approved_at,created_at',
+  applications: 'id,application_reference,student_id,student_name,mobile,email,qualification,program_name,date_of_birth,address,photo_object_key,photo_data_url,message,status,approved_by_name,approved_at,archived_at,archived_by,created_at',
   demoClassRequests: 'id,full_name,mobile,email,qualification_category,parent_name,school_or_college_name,college_name,profession,educational_qualification,date_of_birth,address,city,additional_information,status,created_at',
   notifications: 'id,application_id,notification_type,recipient_email,status,attempt_count,provider_message_id,error_message,pdf_attached,sent_at,created_at,updated_at',
   callbacks: 'id,full_name,mobile,email,program_name,preferred_contact_time,message,consent,status,created_at,updated_at',
@@ -951,6 +951,24 @@ const adminTable = async (
   const auth = await requireAdmin(request, env, minimumRole);
   if (isResponse(auth)) return auth;
   return readTable(auth.supabase, table, columns, { orderColumn, ascending });
+};
+
+const getAdminApplications = async (request: Request, env: Env): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'staff');
+  if (isResponse(auth)) return auth;
+  const archivedParam = new URL(request.url).searchParams.get('archived');
+  if (archivedParam !== null && archivedParam !== 'true' && archivedParam !== 'false') {
+    return errorResponse('archived must be true or false.', 400);
+  }
+  const archivedOnly = archivedParam === 'true';
+  let query = auth.supabase
+    .from('applications')
+    .select(READ_COLUMNS.applications)
+    .order('created_at', { ascending: false });
+  query = archivedOnly ? query.not('archived_at', 'is', null) : query.is('archived_at', null);
+  const { data, error } = await query;
+  if (error) return errorResponse(`Unable to read applications: ${error.message}`, 500);
+  return json(data || []);
 };
 
 const createProgram = async (request: Request, env: Env): Promise<Response> => {
@@ -2149,11 +2167,86 @@ const updateProfile = async (request: Request, env: Env, id: string): Promise<Re
   return data ? json(data) : errorResponse('Admin profile not found.', 404);
 };
 
+type ApplicationPhotoCleanupResult = {
+  status: 'completed' | 'pending' | 'busy' | 'not_found' | 'failed';
+  message?: string;
+};
+
+const processApplicationPhotoCleanup = async (
+  supabase: SupabaseClient,
+  env: Env,
+  jobId: string,
+): Promise<ApplicationPhotoCleanupResult> => {
+  const claimToken = crypto.randomUUID();
+  const { data: claimData, error: claimError } = await supabase.rpc(
+    'claim_application_photo_cleanup',
+    { p_job_id: jobId, p_claim_token: claimToken },
+  );
+  if (claimError) {
+    console.error('Unable to claim application photo cleanup.', {
+      operation: 'application.photo_cleanup.claim',
+      error_code: claimError.code || 'database_query_failed',
+    });
+    return { status: 'pending', message: 'Photo cleanup could not be claimed. Retry it from the admin panel.' };
+  }
+  if (!claimData || typeof claimData !== 'object' || Array.isArray(claimData)) {
+    return { status: 'pending', message: 'Photo cleanup returned an invalid claim response.' };
+  }
+
+  const claim = claimData as Record<string, unknown>;
+  if (claim.status === 'completed') return { status: 'completed' };
+  if (claim.status === 'busy') return { status: 'busy', message: 'Photo cleanup is already in progress.' };
+  if (claim.status === 'not_found') return { status: 'not_found', message: 'Photo cleanup job was not found.' };
+  if (claim.status !== 'claimed' || typeof claim.photo_reference !== 'string') {
+    return { status: 'pending', message: 'Photo cleanup claim response was incomplete.' };
+  }
+
+  let cleanupError: string | null = null;
+  const photoKey = objectKeyFromMetadata(env, claim.photo_reference, 'applications');
+  if (photoKey) {
+    try {
+      await deleteFromR2(env, photoKey, 'applications');
+    } catch (error) {
+      cleanupError = messageOf(error);
+    }
+  } else if (!legacyUploadFilenameFromMetadata(claim.photo_reference)) {
+    cleanupError = 'Stored application photo reference is invalid.';
+  }
+
+  const { data: completed, error: completionError } = await supabase.rpc(
+    'complete_application_photo_cleanup',
+    {
+      p_job_id: jobId,
+      p_claim_token: claimToken,
+      p_success: cleanupError === null,
+      p_error_message: cleanupError,
+    },
+  );
+  if (completionError || completed !== true) {
+    console.error('Unable to record application photo cleanup result.', {
+      operation: 'application.photo_cleanup.complete',
+      error_code: completionError?.code || 'claim_not_owned',
+    });
+    return {
+      status: 'pending',
+      message: cleanupError
+        ? `Application deleted; photo cleanup failed: ${cleanupError}`
+        : 'Application photo cleanup completed but its result could not be recorded. Retry after the cleanup lease expires.',
+    };
+  }
+  return cleanupError
+    ? { status: 'failed', message: `Application deleted; photo cleanup failed: ${cleanupError}` }
+    : { status: 'completed' };
+};
+
 const deleteApplication = async (request: Request, env: Env, id: string): Promise<Response> => {
   const auth = await requireAdmin(request, env, 'super_admin');
   if (isResponse(auth)) return auth;
   const { data: application, error: readError } = await auth.supabase
-    .from('applications').select('id, photo_object_key').eq('id', id).maybeSingle();
+    .from('applications')
+    .select('id,photo_object_key')
+    .eq('id', id)
+    .maybeSingle();
   if (readError) return errorResponse(`Unable to load application: ${readError.message}`, 500);
   if (!application) return errorResponse('Application not found.', 404);
 
@@ -2163,20 +2256,9 @@ const deleteApplication = async (request: Request, env: Env, id: string): Promis
   if (storedPhoto && !photoKey && !legacyFilename) {
     return errorResponse('Stored application photo reference is invalid; refusing to delete the record or photo.', 500);
   }
-
-  let photoRemoved = false;
-  if (photoKey) {
-    try {
-      await deleteFromR2(env, photoKey, 'applications');
-      photoRemoved = true;
-    } catch (deleteError) {
-      return json({ error: 'Unable to remove the application photo; the application record was not deleted.', storage_error: messageOf(deleteError), object_key: photoKey }, 502);
-    }
-  }
-
   if (legacyFilename) {
     if (!env.ASSETS) {
-      return errorResponse('Legacy local application photo cannot be checked by this Worker; the application record was not deleted.', 503);
+      return errorResponse('Legacy local application photo cannot be checked; the application record was not deleted.', 503);
     }
     let assetResponse: Response;
     try {
@@ -2189,22 +2271,134 @@ const deleteApplication = async (request: Request, env: Env, id: string): Promis
     }
     if (assetResponse.status !== 404) {
       return assetResponse.ok
-        ? errorResponse('Legacy local application photo is still present in static assets and cannot be removed by this Worker; the application record was not deleted.', 409)
+        ? errorResponse('Legacy local application photo is still present and cannot be removed by this Worker; the application record was not deleted.', 409)
         : errorResponse('Unable to verify the legacy local application photo; the application record was not deleted.', 502);
     }
   }
 
-  const { error } = await auth.supabase.from('applications').delete().eq('id', id);
-  if (error) {
-    return json({
-      error: photoRemoved
-        ? `The application photo was removed, but the application record could not be deleted: ${error.message}`
-        : `Unable to delete application: ${error.message}`,
-      photo_removed: photoRemoved,
-    }, 500);
+  const { data: deletionData, error: deletionError } = await auth.supabase.rpc(
+    'delete_application_without_payments',
+    { p_application_id: id },
+  );
+  if (deletionError) {
+    if (deletionError.code === '23503' &&
+      `${deletionError.message} ${deletionError.details || ''}`.includes('application_payments_application_id_fkey')) {
+      return json({
+        error: 'This application has payment records and cannot be permanently deleted. Archive it instead.',
+        archive_required: true,
+      }, 409);
+    }
+    console.error('Unable to delete application through the guarded database operation.', {
+      operation: 'applications.delete',
+      error_code: deletionError.code || 'database_query_failed',
+    });
+    return errorResponse('Unable to delete application. No photo was removed.', 500);
+  }
+  if (!deletionData || typeof deletionData !== 'object' || Array.isArray(deletionData)) {
+    return errorResponse('Application deletion returned an invalid database response.', 500);
   }
 
-  return json({ success: true, message: 'Application deleted successfully.' });
+  const deletion = deletionData as Record<string, unknown>;
+  if (deletion.status === 'not_found') return errorResponse('Application not found.', 404);
+  if (deletion.status === 'payment_records_exist') {
+    return json({
+      error: 'This application has payment records and cannot be permanently deleted. Archive it instead.',
+      archive_required: true,
+    }, 409);
+  }
+  if (deletion.status === 'fee_agreement_exists') {
+    return json({
+      error: 'This application has an agreed fee record and cannot be permanently deleted. Archive it instead.',
+      archive_required: true,
+    }, 409);
+  }
+  if (deletion.status !== 'deleted') {
+    return errorResponse('Application deletion was not confirmed by the database.', 500);
+  }
+
+  const cleanupJobId = typeof deletion.cleanup_job_id === 'string'
+    ? deletion.cleanup_job_id
+    : null;
+  const cleanup = cleanupJobId
+    ? await processApplicationPhotoCleanup(auth.supabase, env, cleanupJobId)
+    : { status: 'completed' as const };
+  const cleanupPending = cleanup.status !== 'completed';
+  return json({
+    success: true,
+    deleted: true,
+    message: cleanupPending
+      ? 'Application deleted. Its photo cleanup is pending and can be retried from the admin panel.'
+      : 'Application deleted successfully.',
+    photo_cleanup_status: cleanup.status,
+    ...(cleanupJobId ? { cleanup_job_id: cleanupJobId } : {}),
+    ...(cleanup.message ? { photo_cleanup_message: cleanup.message } : {}),
+  }, cleanupPending ? 202 : 200);
+};
+
+const archiveApplication = async (request: Request, env: Env, id: string): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'admin');
+  if (isResponse(auth)) return auth;
+  const { data: existing, error: readError } = await auth.supabase
+    .from('applications')
+    .select('id,archived_at,archived_by')
+    .eq('id', id)
+    .maybeSingle();
+  if (readError) return errorResponse('Unable to load application for archiving.', 500);
+  if (!existing) return errorResponse('Application not found.', 404);
+  if (existing.archived_at) return json(existing);
+
+  const { data, error } = await auth.supabase
+    .from('applications')
+    .update({
+      archived_at: new Date().toISOString(),
+      archived_by: auth.profile.id,
+    })
+    .eq('id', id)
+    .is('archived_at', null)
+    .select('id,archived_at,archived_by')
+    .maybeSingle();
+  if (error) return errorResponse('Unable to archive application.', 500);
+  if (data) return json(data);
+
+  const { data: archived, error: archiveReadError } = await auth.supabase
+    .from('applications')
+    .select('id,archived_at,archived_by')
+    .eq('id', id)
+    .maybeSingle();
+  if (archiveReadError) return errorResponse('Unable to verify application archive status.', 500);
+  return archived ? json(archived) : errorResponse('Application not found.', 404);
+};
+
+const listApplicationPhotoCleanupJobs = async (request: Request, env: Env): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'super_admin');
+  if (isResponse(auth)) return auth;
+  const { data, error } = await auth.supabase
+    .from('application_photo_cleanup_jobs')
+    .select('id,application_reference,status,attempt_count,error_message,created_at,updated_at')
+    .neq('status', 'completed')
+    .order('created_at', { ascending: false });
+  if (error) return errorResponse('Unable to load application photo cleanup retries.', 500);
+  return json(data || []);
+};
+
+const retryApplicationPhotoCleanup = async (
+  request: Request,
+  env: Env,
+  jobId: string,
+): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'super_admin');
+  if (isResponse(auth)) return auth;
+  const result = await processApplicationPhotoCleanup(auth.supabase, env, jobId);
+  if (result.status === 'not_found') return errorResponse(result.message || 'Photo cleanup job not found.', 404);
+  if (result.status === 'busy') return errorResponse(result.message || 'Photo cleanup is already in progress.', 409);
+  if (result.status === 'completed') {
+    return json({ success: true, status: 'completed', message: 'Application photo cleanup completed.' });
+  }
+  return json({
+    success: false,
+    status: result.status,
+    message: result.message || 'Application photo cleanup remains pending.',
+  }, 502);
 };
 
 const updateApplicationStatus = async (request: Request, env: Env, id: string): Promise<Response> => {
@@ -3390,6 +3584,28 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       return methodNotAllowed(['PUT']);
     }
 
+    const applicationArchiveRoute = pathname.match(/^\/api\/admin\/applications\/([^/]+)\/archive$/);
+    if (applicationArchiveRoute) {
+      let applicationId: string;
+      try { applicationId = decodeURIComponent(applicationArchiveRoute[1]); } catch {
+        return errorResponse('Invalid application ID.', 400);
+      }
+      if (!validId(applicationId)) return errorResponse('Application ID must be a valid UUID.', 400);
+      if (method === 'POST') return archiveApplication(request, env, applicationId);
+      return methodNotAllowed(['POST']);
+    }
+
+    const photoCleanupRetryRoute = pathname.match(/^\/api\/admin\/application-photo-cleanup-jobs\/([^/]+)\/retry$/);
+    if (photoCleanupRetryRoute) {
+      let jobId: string;
+      try { jobId = decodeURIComponent(photoCleanupRetryRoute[1]); } catch {
+        return errorResponse('Invalid photo cleanup job ID.', 400);
+      }
+      if (!validId(jobId)) return errorResponse('Photo cleanup job ID must be a valid UUID.', 400);
+      if (method === 'POST') return retryApplicationPhotoCleanup(request, env, jobId);
+      return methodNotAllowed(['POST']);
+    }
+
     const idRoute = pathname.match(/^\/api\/admin\/(programs|announcements|reviews|faqs|media|applications|demo-class-requests|callbacks|profiles)\/([^/]+)$/);
     if (idRoute) {
       let id: string;
@@ -3440,7 +3656,10 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       return methodNotAllowed(resource === 'profiles' ? ['PUT'] : ['PUT', 'DELETE']);
     }
 
-    if (pathname === '/api/admin/applications' && method === 'GET') return adminTable(request, env, 'applications', READ_COLUMNS.applications, 'created_at');
+    if (pathname === '/api/admin/applications' && method === 'GET') return getAdminApplications(request, env);
+    if (pathname === '/api/admin/application-photo-cleanup-jobs' && method === 'GET') {
+      return listApplicationPhotoCleanupJobs(request, env);
+    }
     if (pathname === '/api/admin/demo-class-requests' && method === 'GET') return adminTable(request, env, 'demo_class_requests', READ_COLUMNS.demoClassRequests, 'created_at');
     if (pathname === '/api/admin/notifications' && method === 'GET') return adminTable(request, env, 'application_notifications', READ_COLUMNS.notifications, 'created_at', false, 'super_admin');
     if (pathname === '/api/admin/callbacks' && method === 'GET') return adminTable(request, env, 'callback_requests', READ_COLUMNS.callbacks, 'created_at');

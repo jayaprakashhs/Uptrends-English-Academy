@@ -49,6 +49,8 @@ export interface StudentApplication {
   approved_by_user_id?: string | null;
   approved_by_name?: string | null;
   approved_at?: string | null;
+  archived_at?: string | null;
+  archived_by?: string | null;
   created_at: string;
 }
 

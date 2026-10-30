@@ -5,7 +5,10 @@ import { handleApiRequest } from '../worker-api';
 
 const requestFor = (path: string) => new Request(`https://academy.example${path}`);
 
-function mockR2Bucket(options: { putError?: boolean; deleteError?: boolean; listError?: boolean } = {}) {
+function mockR2Bucket(
+  options: { putError?: boolean; deleteError?: boolean; deleteFailures?: number; listError?: boolean } = {},
+  events: string[] = [],
+) {
   const puts: Array<{ key: string; value: ArrayBuffer | ArrayBufferView; options?: { httpMetadata?: { contentType?: string } } }> = [];
   const deletes: string[] = [];
   let listCount = 0;
@@ -17,7 +20,10 @@ function mockR2Bucket(options: { putError?: boolean; deleteError?: boolean; list
       },
       delete: async (key: string) => {
         deletes.push(key);
-        if (options.deleteError) throw new Error('mock R2 delete failure');
+        events.push('r2-delete');
+        if (options.deleteError || (options.deleteFailures && deletes.length <= options.deleteFailures)) {
+          throw new Error('mock R2 delete failure');
+        }
       },
       list: async () => {
         listCount += 1;
@@ -526,12 +532,26 @@ async function assertJson503(response: Response): Promise<Record<string, unknown
 
 async function deleteApplicationWithStoredPhoto(
   storedPhotoKey: string,
-  options: { assetStatus?: number; assetFailure?: boolean; r2Status?: number } = {},
+  options: {
+    assetStatus?: number;
+    assetFailure?: boolean;
+    r2Status?: number;
+    r2Failures?: number;
+    paymentsExist?: boolean;
+    feeAgreementExists?: boolean;
+    retryCleanup?: boolean;
+  } = {},
 ) {
   const originalFetch = globalThis.fetch;
   let databaseDeleteCount = 0;
   let assetCheckCount = 0;
-  const applicationMedia = mockR2Bucket({ deleteError: options.r2Status !== undefined && options.r2Status >= 400 });
+  let cleanupStatus = 'pending';
+  const cleanupJobId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const events: string[] = [];
+  const applicationMedia = mockR2Bucket({
+    deleteError: options.r2Status !== undefined && options.r2Status >= 400,
+    deleteFailures: options.r2Failures,
+  }, events);
   const publicMedia = mockR2Bucket();
 
   globalThis.fetch = async (input, init) => {
@@ -550,16 +570,49 @@ async function deleteApplicationWithStoredPhoto(
       }]);
     }
     if (url.hostname === 'project.example' && url.pathname === '/rest/v1/applications') {
-      if (request.method === 'DELETE') {
-        databaseDeleteCount += 1;
-        return Response.json([{ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }]);
-      }
       return Response.json([{
         id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
         photo_object_key: storedPhotoKey,
       }]);
     }
+    if (url.hostname === 'project.example' && url.pathname === '/rest/v1/rpc/delete_application_without_payments') {
+      if (options.paymentsExist) return Response.json({ status: 'payment_records_exist' });
+      if (options.feeAgreementExists) return Response.json({ status: 'fee_agreement_exists' });
+      databaseDeleteCount += 1;
+      events.push('database-delete');
+      return Response.json({
+        status: 'deleted',
+        application_reference: 'UEA-APP-2026-0001',
+        cleanup_job_id: storedPhotoKey ? cleanupJobId : null,
+      });
+    }
+    if (url.hostname === 'project.example' && url.pathname === '/rest/v1/rpc/claim_application_photo_cleanup') {
+      if (cleanupStatus === 'completed') return Response.json({ status: 'completed' });
+      if (cleanupStatus === 'processing') return Response.json({ status: 'busy' });
+      cleanupStatus = 'processing';
+      return Response.json({ status: 'claimed', photo_reference: storedPhotoKey });
+    }
+    if (url.hostname === 'project.example' && url.pathname === '/rest/v1/rpc/complete_application_photo_cleanup') {
+      const body = await request.json() as { p_success: boolean };
+      cleanupStatus = body.p_success ? 'completed' : 'failed';
+      return Response.json(true);
+    }
     throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  const env = {
+    SUPABASE_URL: 'https://project.example',
+    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+    CLOUDFLARE_R2_PUBLIC_URL: 'https://media.example',
+    APPLICATION_MEDIA: applicationMedia.binding,
+    PUBLIC_MEDIA: publicMedia.binding,
+    ASSETS: {
+      fetch: async () => {
+        assetCheckCount += 1;
+        if (options.assetFailure) throw new Error('private asset error');
+        return new Response(null, { status: options.assetStatus ?? 404 });
+      },
+    },
   };
 
   try {
@@ -568,27 +621,26 @@ async function deleteApplicationWithStoredPhoto(
         method: 'DELETE',
         headers: { Authorization: 'Bearer test-admin-session' },
       }),
-      {
-        SUPABASE_URL: 'https://project.example',
-        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
-        CLOUDFLARE_R2_PUBLIC_URL: 'https://media.example',
-        APPLICATION_MEDIA: applicationMedia.binding,
-        PUBLIC_MEDIA: publicMedia.binding,
-        ASSETS: {
-          fetch: async () => {
-            assetCheckCount += 1;
-            if (options.assetFailure) throw new Error('private asset error');
-            return new Response(null, { status: options.assetStatus ?? 404 });
-          },
-        },
-      },
+      env,
     );
+    const retryResponse = options.retryCleanup
+      ? await handleApiRequest(
+        new Request(`https://academy.example/api/admin/application-photo-cleanup-jobs/${cleanupJobId}/retry`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+          body: '{}',
+        }),
+        env,
+      )
+      : null;
     return {
       response,
+      retryResponse,
       databaseDeleteCount,
       applicationDeleteCount: applicationMedia.deletes.length,
       publicDeleteCount: publicMedia.deletes.length,
       assetCheckCount,
+      events,
     };
   } finally {
     globalThis.fetch = originalFetch;
@@ -804,6 +856,7 @@ test('legacy local photo references are checked as static assets and never sent 
   assert.equal(result.applicationDeleteCount, 0);
   assert.equal(result.publicDeleteCount, 0);
   assert.equal(result.databaseDeleteCount, 1);
+  assert.deepEqual(result.events, ['database-delete']);
 });
 
 test('gallery deletion uses only PUBLIC_MEDIA and validates its managed key', async () => {
@@ -843,18 +896,67 @@ test('deletes bare and configured-public-URL-prefixed R2 application keys', asyn
     assert.equal(result.publicDeleteCount, 0, storedPhotoKey);
     assert.equal(result.assetCheckCount, 0, storedPhotoKey);
     assert.equal(result.databaseDeleteCount, 1, storedPhotoKey);
+    assert.deepEqual(result.events, ['database-delete', 'r2-delete'], storedPhotoKey);
   }
 });
 
-test('retains the application when R2 photo cleanup fails', async () => {
+test('deletes the database record first and retains a retryable cleanup job when R2 deletion fails', async () => {
   const result = await deleteApplicationWithStoredPhoto(
     'applications/11111111-1111-1111-1111-111111111103.jpg',
     { r2Status: 500 },
   );
-  assert.equal(result.response.status, 502);
+  assert.equal(result.response.status, 202);
+  const body = await result.response.json() as { success: boolean; deleted: boolean; photo_cleanup_status: string; cleanup_job_id: string };
+  assert.equal(body.success, true);
+  assert.equal(body.deleted, true);
+  assert.equal(body.photo_cleanup_status, 'failed');
+  assert.equal(body.cleanup_job_id, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc');
   assert.equal(result.applicationDeleteCount, 1);
   assert.equal(result.publicDeleteCount, 0);
+  assert.equal(result.databaseDeleteCount, 1);
+  assert.deepEqual(result.events, ['database-delete', 'r2-delete']);
+});
+
+test('retries failed application photo cleanup without repeating database deletion', async () => {
+  const result = await deleteApplicationWithStoredPhoto(
+    'applications/11111111-1111-1111-1111-111111111103.jpg',
+    { r2Failures: 1, retryCleanup: true },
+  );
+  assert.equal(result.response.status, 202);
+  assert.equal(result.retryResponse?.status, 200);
+  assert.equal(result.applicationDeleteCount, 2);
+  assert.equal(result.databaseDeleteCount, 1);
+  assert.deepEqual(result.events, ['database-delete', 'r2-delete', 'r2-delete']);
+});
+
+test('refuses permanent deletion when payment records exist and signals archive action', async () => {
+  const result = await deleteApplicationWithStoredPhoto(
+    'applications/11111111-1111-1111-1111-111111111103.jpg',
+    { paymentsExist: true },
+  );
+  assert.equal(result.response.status, 409);
+  assert.deepEqual(await result.response.json(), {
+    error: 'This application has payment records and cannot be permanently deleted. Archive it instead.',
+    archive_required: true,
+  });
+  assert.equal(result.applicationDeleteCount, 0);
   assert.equal(result.databaseDeleteCount, 0);
+  assert.deepEqual(result.events, []);
+});
+
+test('preserves agreed fee records by requiring archive instead of permanent deletion', async () => {
+  const result = await deleteApplicationWithStoredPhoto(
+    'applications/11111111-1111-1111-1111-111111111103.jpg',
+    { feeAgreementExists: true },
+  );
+  assert.equal(result.response.status, 409);
+  assert.deepEqual(await result.response.json(), {
+    error: 'This application has an agreed fee record and cannot be permanently deleted. Archive it instead.',
+    archive_required: true,
+  });
+  assert.equal(result.applicationDeleteCount, 0);
+  assert.equal(result.databaseDeleteCount, 0);
+  assert.deepEqual(result.events, []);
 });
 
 test('retains the application when a legacy local photo still exists or cannot be checked', async () => {
@@ -1412,6 +1514,11 @@ test('all public contact submissions normalize contacts, run the duplicate check
     assert.equal(result.insertedRecords[0].path, `/rest/v1/${submission.table}`, submission.path);
     assert.equal(result.insertedRecords[0].body.email, 'student@example.com', submission.path);
     assert.equal(result.insertedRecords[0].body.mobile, '9876543210', submission.path);
+    if (submission.path === '/api/apply') {
+      assert.equal(result.insertedRecords[0].body.status, 'Pending');
+      assert.equal('archived_at' in result.insertedRecords[0].body, false);
+      assert.equal('archived_by' in result.insertedRecords[0].body, false);
+    }
   }
 });
 

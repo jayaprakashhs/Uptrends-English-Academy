@@ -8,7 +8,6 @@ import { createClient } from '@supabase/supabase-js';
 import { Resend } from 'resend';
 import { DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
-import { removeLegacyUploadFile } from './local-upload-storage';
 import { handleApiRequest } from './worker-api';
 import type { R2BucketBinding } from './worker-r2';
 import {
@@ -165,6 +164,22 @@ async function dispatchWorkerApi(req: express.Request, res: express.Response) {
         SUPABASE_SERVICE_ROLE_KEY: SUPABASE_SERVICE_KEY,
         APPLICATION_MEDIA: applicationMedia,
         CLOUDFLARE_R2_PUBLIC_URL: R2_PUBLIC_URL,
+        ASSETS: {
+          fetch: async (assetInput: RequestInfo | URL, init?: RequestInit) => {
+            const assetRequest = new Request(assetInput, init);
+            const filename = legacyUploadFilenameFromMetadata(new URL(assetRequest.url).pathname);
+            if (!filename) return new Response(null, { status: 404 });
+            try {
+              await fs.promises.access(path.join(LOCAL_UPLOADS_DIRECTORY, filename));
+              return new Response(null, { status: 200 });
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                return new Response(null, { status: 404 });
+              }
+              throw error;
+            }
+          },
+        },
         RESEND_API_KEY,
         RESEND_FROM_EMAIL,
         APPLICATION_NOTIFICATION_EMAIL,
@@ -1617,6 +1632,11 @@ app.post('/api/callback-request', async (req, res) => {
 // Route document, fee, and demo-request workflows through the shared Worker handlers.
 app.all(
   [
+    '/api/admin/applications',
+    '/api/admin/applications/:id',
+    '/api/admin/applications/:id/archive',
+    '/api/admin/application-photo-cleanup-jobs',
+    '/api/admin/application-photo-cleanup-jobs/:id/retry',
     '/api/admin/applications/:id/fee',
     '/api/admin/applications/:id/payments',
     '/api/admin/payments/:paymentId',
@@ -1637,104 +1657,6 @@ app.all(
 // -------------------------------------------------------------
 // PROTECTED ADMIN DATA ENDPOINTS (Staff and above)
 // -------------------------------------------------------------
-app.get('/api/admin/applications', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'staff');
-  if (!admin) return;
-
-  if (supabase) {
-    const { data, error } = await supabase.from('applications').select('*').order('created_at', { ascending: false });
-    if (error) return res.status(500).json({ error: error.message || 'Unable to load applications.' });
-    return res.json(data || []);
-  }
-  res.json(memoryStore.applications);
-});
-
-app.put('/api/admin/applications/:id', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'staff');
-  if (!admin) return;
-  if (!UUID_PATTERN.test(req.params.id)) return res.status(400).json({ error: 'Application ID must be a valid UUID.' });
-  if (req.body?.status !== 'Pending') {
-    return res.status(400).json({ error: 'Applications can only be returned to Pending here; use the approval action to accept an application.' });
-  }
-
-  if (supabase) {
-    const { data, error } = await supabase.from('applications')
-      .update({ status: 'Pending', approved_by_user_id: null, approved_by_name: null, approved_at: null })
-      .eq('id', req.params.id)
-      .select('*')
-      .maybeSingle();
-    if (error) return res.status(500).json({ error: error.message });
-    if (!data) return res.status(404).json({ error: 'Application record not found.' });
-    return res.json(data);
-  }
-
-  const application = memoryStore.applications.find((item) => item.id === req.params.id);
-  if (!application) return res.status(404).json({ error: 'Application record not found.' });
-  Object.assign(application, { status: 'Pending', approved_by_user_id: null, approved_by_name: null, approved_at: null });
-  return res.json(application);
-});
-
-app.delete('/api/admin/applications/:id', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'super_admin');
-  if (!admin) return;
-  if (!UUID_PATTERN.test(req.params.id)) return res.status(400).json({ error: 'Application ID must be a valid UUID.' });
-
-  const { id } = req.params;
-  if (supabase) {
-    const { data: application, error: readError } = await supabase
-      .from('applications').select('id, photo_object_key').eq('id', id).maybeSingle();
-    if (readError) return res.status(500).json({ error: `Unable to load application: ${readError.message}` });
-    if (!application) return res.status(404).json({ error: 'Application not found.' });
-
-    const storedPhoto = application.photo_object_key;
-    const photoKey = storedPhoto ? getManagedR2Key(storedPhoto, 'applications') : null;
-    const legacyFilename = storedPhoto && !photoKey
-      ? legacyUploadFilenameFromMetadata(storedPhoto)
-      : null;
-    if (storedPhoto && !photoKey && !legacyFilename) {
-      return res.status(500).json({ error: 'Stored application photo reference is invalid; refusing to delete the record or photo.' });
-    }
-    let photoRemoved = false;
-    if (photoKey) {
-      try {
-        await deleteManagedR2Object(photoKey);
-        photoRemoved = true;
-      } catch (deleteError: any) {
-        return res.status(502).json({
-          error: 'Unable to remove the application photo; the application record was not deleted.',
-          storage_error: deleteError.message || 'R2 storage error',
-        });
-      }
-    }
-    if (legacyFilename) {
-      try {
-        photoRemoved = (await removeLegacyUploadFile(LOCAL_UPLOADS_DIRECTORY, legacyFilename)) === 'removed';
-      } catch {
-        return res.status(502).json({
-          error: 'Unable to remove the legacy application photo; the application record was not deleted.',
-        });
-      }
-    }
-
-    const { data: deleted, error } = await supabase.from('applications').delete().eq('id', id).select('id').maybeSingle();
-    if (error) {
-      return res.status(500).json({
-        error: photoRemoved
-          ? `The application photo was removed, but the application record could not be deleted: ${error.message}`
-          : `Unable to delete application: ${error.message}`,
-        photo_removed: photoRemoved,
-      });
-    }
-    if (!deleted) return res.status(404).json({ error: 'Application not found.' });
-    return res.json({ success: true, message: 'Application deleted successfully.' });
-  }
-
-  const initialCount = memoryStore.applications.length;
-  memoryStore.applications = memoryStore.applications.filter(a => a.id !== id);
-  if (memoryStore.applications.length === initialCount) return res.status(404).json({ error: 'Application not found.' });
-  return res.json({ success: true, message: 'Application deleted successfully.' });
-});
-
 app.get('/api/admin/notifications', async (req, res) => {
   const admin = await requireAdminAuth(req, res, 'super_admin');
   if (!admin) return;

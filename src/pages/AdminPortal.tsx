@@ -120,6 +120,16 @@ interface ApplicationPaymentData {
   remainingBalance: number | null;
 }
 
+interface ApplicationPhotoCleanupJob {
+  id: string;
+  application_reference: string;
+  status: 'pending' | 'processing' | 'failed';
+  attempt_count: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 interface ProgramFeeConfiguration {
   program_id: string;
   tuition_fee: number | null;
@@ -335,6 +345,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   // Data states
   const [applications, setApplications] = useState<StudentApplication[]>([]);
+  const [archivedApplications, setArchivedApplications] = useState<StudentApplication[]>([]);
+  const [applicationPhotoCleanupJobs, setApplicationPhotoCleanupJobs] = useState<ApplicationPhotoCleanupJob[]>([]);
   const [programFeeConfigurations, setProgramFeeConfigurations] = useState<Record<string, ProgramFeeConfiguration>>({});
   const [demoRequests, setDemoRequests] = useState<DashboardDemoRequest[]>([]);
   const [notifications, setNotifications] = useState<ApplicationNotification[]>([]);
@@ -416,7 +428,7 @@ useEffect(() => {
   });
 
   const [loading, setLoading] = useState(false);
-  const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'warning' | 'error'; text: string } | null>(null);
 
   const navigateToAdminSection = (tab: string) => {
     setActiveTab(tab);
@@ -453,7 +465,7 @@ useEffect(() => {
 
   // Search and filter states
   const [appSearch, setAppSearch] = useState('');
-  const [appFilterStatus, setAppFilterStatus] = useState<'All' | 'Pending' | 'Accepted'>('All');
+  const [appFilterStatus, setAppFilterStatus] = useState<'All' | 'Pending' | 'Accepted' | 'Archived'>('All');
   const [callbackSearch, setCallbackSearch] = useState('');
   const [callbackFilterStatus, setCallbackFilterStatus] = useState<'All' | CallbackRequest['status']>('All');
   const [notifFilterStatus, setNotifFilterStatus] = useState<'All' | 'Pending' | 'Sent' | 'Failed'>('All');
@@ -646,6 +658,8 @@ useEffect(() => {
       const headers = getAuthHeaders();
       const [
         appsRes,
+        archivedAppsRes,
+        cleanupJobsRes,
         demoRequestsRes,
         notifsRes,
         cbsRes,
@@ -658,6 +672,15 @@ useEffect(() => {
         profilesRes,
       ] = await Promise.all([
         requestJson('/api/admin/applications', { headers }),
+        appFilterStatus === 'Archived'
+          ? requestJson('/api/admin/applications?archived=true', { headers })
+          : Promise.resolve([]),
+        isSuperAdmin
+          ? requestJson('/api/admin/application-photo-cleanup-jobs', { headers }).catch((error) => {
+            console.error('Unable to load application photo cleanup jobs.', error);
+            return null;
+          })
+          : Promise.resolve([]),
         requestJson('/api/admin/demo-class-requests', { headers }),
         isSuperAdmin ? requestJson('/api/admin/notifications', { headers }) : Promise.resolve([]),
         requestJson('/api/admin/callbacks', { headers }),
@@ -675,6 +698,8 @@ useEffect(() => {
       ]);
 
       if (Array.isArray(appsRes)) setApplications(appsRes);
+      if (Array.isArray(archivedAppsRes)) setArchivedApplications(archivedAppsRes);
+      if (Array.isArray(cleanupJobsRes)) setApplicationPhotoCleanupJobs(cleanupJobsRes);
       if (Array.isArray(demoRequestsRes)) setDemoRequests(demoRequestsRes);
       if (Array.isArray(notifsRes)) setNotifications(notifsRes);
       if (Array.isArray(cbsRes)) setCallbacks(cbsRes);
@@ -708,8 +733,13 @@ useEffect(() => {
   const refreshRequestData = async () => {
     const requestLists = [
       {
-        endpoint: '/api/admin/applications',
-        update: (data: StudentApplication[]) => setApplications(data),
+        endpoint: appFilterStatus === 'Archived'
+          ? '/api/admin/applications?archived=true'
+          : '/api/admin/applications',
+        update: (data: StudentApplication[]) => {
+          if (appFilterStatus === 'Archived') setArchivedApplications(data);
+          else setApplications(data);
+        },
       },
       {
         endpoint: '/api/admin/demo-class-requests',
@@ -1230,11 +1260,27 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
         headers: getAuthHeaders(),
       });
       const data = await res.json();
+      if (res.status === 409 && data.archive_required) {
+        if (!confirm(`${data.error}\n\nArchive this application instead? Payment and agreed fee records will remain attached.`)) {
+          setActionMessage({ type: 'error', text: data.error || 'Application was not deleted.' });
+          return;
+        }
+        const archiveResponse = await fetchAdmin(`/api/admin/applications/${appId}/archive`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+        });
+        const archiveData = await archiveResponse.json();
+        if (!archiveResponse.ok) throw new Error(archiveData.error || 'Failed to archive application.');
+        setActionMessage({ type: 'success', text: 'Application archived. Its payment and agreed fee records remain attached.' });
+        if (selectedApp?.id === appId) setSelectedApp(null);
+        await fetchAllData();
+        return;
+      }
       if (!res.ok) throw new Error(data.error || 'Failed to delete application.');
 
       setActionMessage({
-        type: 'success',
-        text: 'Application record deleted successfully.',
+        type: data.photo_cleanup_status && data.photo_cleanup_status !== 'completed' ? 'warning' : 'success',
+        text: data.message || 'Application record deleted successfully.',
       });
       if (selectedApp?.id === appId) setSelectedApp(null);
       await fetchAllData();
@@ -1243,6 +1289,67 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleArchiveApplication = async (appId: string) => {
+    if (!confirm('Archive this application? It will remain available in the Archived filter, and any payment or agreed fee records will remain attached.')) return;
+    setActionMessage(null);
+    setLoading(true);
+    try {
+      const response = await fetchAdmin(`/api/admin/applications/${appId}/archive`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to archive application.');
+      setActionMessage({ type: 'success', text: 'Application archived. Payment records remain attached.' });
+      if (selectedApp?.id === appId) setSelectedApp(null);
+      await fetchAllData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to archive application.';
+      setActionMessage({ type: 'error', text: message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRetryApplicationPhotoCleanup = async (jobId: string) => {
+    setLoading(true);
+    setActionMessage(null);
+    try {
+      const response = await fetchAdmin(`/api/admin/application-photo-cleanup-jobs/${jobId}/retry`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || data.error || 'Photo cleanup retry failed.');
+      const jobs = await requestJson('/api/admin/application-photo-cleanup-jobs', {
+        headers: getAuthHeaders(),
+      });
+      if (Array.isArray(jobs)) setApplicationPhotoCleanupJobs(jobs);
+      setActionMessage({ type: 'success', text: data.message || 'Application photo cleanup completed.' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to retry application photo cleanup.';
+      setActionMessage({ type: 'error', text: message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApplicationFilterChange = (status: 'All' | 'Pending' | 'Accepted' | 'Archived') => {
+    setAppFilterStatus(status);
+    setActionMessage(null);
+    if (status !== 'Archived') return;
+    setLoading(true);
+    void requestJson('/api/admin/applications?archived=true', {
+      headers: getAuthHeaders(),
+    }).then((data) => {
+      if (!Array.isArray(data)) throw new Error('Archived applications response was invalid.');
+      setArchivedApplications(data);
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : 'Unable to load archived applications.';
+      setActionMessage({ type: 'error', text: message });
+    }).finally(() => setLoading(false));
   };
 
   const handleMarkApplicationPending = async (appId: string) => {
@@ -1917,7 +2024,7 @@ const res = await fetchAdmin(url, {
   };
 
   // Filtered applications
-  const filteredApplications = applications
+  const filteredApplications = (appFilterStatus === 'Archived' ? archivedApplications : applications)
     .filter((app) => {
       const matchesSearch =
         app.student_name.toLowerCase().includes(appSearch.toLowerCase()) ||
@@ -1925,11 +2032,13 @@ const res = await fetchAdmin(url, {
         app.mobile.includes(appSearch) ||
         app.email.toLowerCase().includes(appSearch.toLowerCase());
 
-      const matchesStatus = appFilterStatus === 'All' || app.status === appFilterStatus;
+      const matchesStatus = appFilterStatus === 'Archived'
+        ? Boolean(app.archived_at)
+        : !app.archived_at && (appFilterStatus === 'All' || app.status === appFilterStatus);
       return matchesSearch && matchesStatus;
     })
     .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
-    .slice(0, 10);
+    .slice(0, appFilterStatus === 'Archived' ? undefined : 10);
 
   const filteredCallbacks = callbacks.filter((callback) => {
     const query = callbackSearch.toLowerCase();
@@ -2288,11 +2397,15 @@ const res = await fetchAdmin(url, {
               className={`mb-6 p-4 rounded-2xl flex items-start gap-3 text-xs font-semibold ${
                 actionMessage.type === 'success'
                   ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                  : 'bg-rose-50 text-rose-800 border border-rose-200'
+                  : actionMessage.type === 'warning'
+                    ? 'bg-amber-50 text-amber-900 border border-amber-200'
+                    : 'bg-rose-50 text-rose-800 border border-rose-200'
               }`}
             >
               {actionMessage.type === 'success' ? (
                 <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+              ) : actionMessage.type === 'warning' ? (
+                <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
               ) : (
                 <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
               )}
@@ -2553,10 +2666,11 @@ const res = await fetchAdmin(url, {
                     Refresh Applications
                   </button>
                   <span className="col-span-2 sm:col-span-1 text-xs font-semibold text-slate-500">Filter Status:</span>
-                  {(['All', 'Pending', 'Accepted'] as const).map((status) => (
+                  {(['All', 'Pending', 'Accepted', 'Archived'] as const).map((status) => (
                     <button
                       key={status}
-                      onClick={() => setAppFilterStatus(status)}
+                      type="button"
+                      onClick={() => handleApplicationFilterChange(status)}
                       className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                         appFilterStatus === status
                           ? 'bg-orange-600 text-white font-bold'
@@ -2594,6 +2708,35 @@ const res = await fetchAdmin(url, {
                 />
               </div>
 
+              {isSuperAdmin && applicationPhotoCleanupJobs.length > 0 && (
+                <section aria-label="Application photo cleanup retries" className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                  <div>
+                    <h2 className="text-sm font-bold text-amber-950">Application photo cleanup needs attention</h2>
+                    <p className="mt-1 text-xs text-amber-800">Application records were deleted; retry these private R2 photo cleanups.</p>
+                  </div>
+                  {applicationPhotoCleanupJobs.map((job) => (
+                    <div key={job.id} className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-white p-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-slate-800">{job.application_reference}</p>
+                        <p className="mt-1 text-[11px] text-slate-600">
+                          {job.status} · {job.attempt_count} attempt{job.attempt_count === 1 ? '' : 's'}
+                          {job.error_message ? ` · ${job.error_message}` : ''}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={loading}
+                        onClick={() => void handleRetryApplicationPhotoCleanup(job.id)}
+                        className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-amber-700 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
+                      >
+                        <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                        Retry photo cleanup
+                      </button>
+                    </div>
+                  ))}
+                </section>
+              )}
+
               <div className="space-y-4">
                 {filteredApplications.length > 0 ? (
                   filteredApplications.map((app) => (
@@ -2616,6 +2759,11 @@ const res = await fetchAdmin(url, {
                           >
                             {app.status}
                           </span>
+                          {app.archived_at && (
+                            <span className="inline-flex w-max items-center rounded-full border border-slate-300 bg-slate-200 px-3 py-1 text-xs font-bold text-slate-700">
+                              Archived
+                            </span>
+                          )}
                           <p className="text-xs text-slate-500">
                             Submitted{' '}
                             <span className="font-semibold text-slate-700">
@@ -2703,6 +2851,17 @@ const res = await fetchAdmin(url, {
                             >
                               <Trash2 className="h-4 w-4" aria-hidden="true" />
                               Delete application
+                            </button>
+                          )}
+                          {isAdminOrHigher && !app.archived_at && (
+                            <button
+                              type="button"
+                              disabled={loading}
+                              onClick={() => void handleArchiveApplication(app.id)}
+                              className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50"
+                              title="Archive this application while preserving linked payments"
+                            >
+                              Archive application
                             </button>
                           )}
                         </div>
