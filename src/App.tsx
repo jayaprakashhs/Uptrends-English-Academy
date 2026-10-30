@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header';
 import { AnnouncementBanner } from './components/AnnouncementBanner';
 import { Footer } from './components/Footer';
 import { CallbackModal } from './components/CallbackModal';
+import { DemoClassBookingModal } from './components/DemoClassBookingModal';
 import { VideoModal } from './components/VideoModal';
 
 // Pages
@@ -19,12 +20,39 @@ import { AdminLogin } from './pages/AdminLogin';
 import { AdminPortal } from './pages/AdminPortal';
 import { NotFound } from './pages/NotFound';
 import { fetchPublicJson, getPublicApiErrorMessage, PublicApiError } from './lib/publicApi';
+import { supabase } from './lib/supabase';
 
 import { Program, Review, MediaItem, TeamMember, FAQ, AdminProfile, SiteBranding } from './types';
 
 type PublicResource = 'branding' | 'programs' | 'reviews' | 'media' | 'faqs';
 type PublicResourceStatus = { loading: boolean; error: string | null };
 type PublicResourceStatuses = Record<PublicResource, PublicResourceStatus>;
+
+const applyBrandColorPalette = (name: 'orange' | 'emerald' | 'green', color?: string) => {
+  if (!color || !/^#[0-9a-f]{6}$/i.test(color)) return;
+
+  const root = document.documentElement;
+  const shades: Array<[number, string]> = [
+    [50, '8%'],
+    [100, '14%'],
+    [200, '28%'],
+    [300, '44%'],
+    [400, '62%'],
+    [500, '82%'],
+  ];
+
+  for (const [shade, amount] of shades) {
+    root.style.setProperty(
+      `--color-${name}-${shade}`,
+      `color-mix(in srgb, ${color} ${amount}, white)`,
+    );
+  }
+  root.style.setProperty(`--color-${name}-600`, color);
+  root.style.setProperty(`--color-${name}-700`, `color-mix(in srgb, ${color} 88%, black)`);
+  root.style.setProperty(`--color-${name}-800`, `color-mix(in srgb, ${color} 72%, black)`);
+  root.style.setProperty(`--color-${name}-900`, `color-mix(in srgb, ${color} 58%, black)`);
+  root.style.setProperty(`--color-${name}-950`, `color-mix(in srgb, ${color} 42%, black)`);
+};
 
 const emptyPublicStatuses: PublicResourceStatuses = {
   branding: { loading: true, error: null },
@@ -41,6 +69,7 @@ export function App() {
   // Global Callback Modal State
   const [callbackOpen, setCallbackOpen] = useState(false);
   const [callbackProgram, setCallbackProgram] = useState<string>('General English Training');
+  const [demoClassModalOpen, setDemoClassModalOpen] = useState(false);
 
   // Global Video Modal State
   const [videoOpen, setVideoOpen] = useState(false);
@@ -49,6 +78,7 @@ export function App() {
 
   // Admin Session State
   const [currentAdmin, setCurrentAdmin] = useState<AdminProfile | null>(null);
+  const adminExpiryHandled = useRef(false);
 
   // Data Collections
   const [programs, setPrograms] = useState<Program[]>([]);
@@ -73,16 +103,7 @@ export function App() {
       if (resource === 'branding') {
         if (!data || typeof data !== 'object' || Array.isArray(data)) throw new PublicApiError('unexpected_response');
         const nextBranding = data as SiteBranding;
-        if (nextBranding.academy_name) setBranding(nextBranding);
-        if (nextBranding.favicon_url) {
-          let link = document.querySelector("link[rel*='icon']") as HTMLLinkElement | null;
-          if (!link) {
-            link = document.createElement('link');
-            link.rel = 'shortcut icon';
-            document.head.appendChild(link);
-          }
-          link.href = nextBranding.favicon_url;
-        }
+        setBranding(nextBranding);
       } else {
         if (!Array.isArray(data)) throw new PublicApiError('unexpected_response');
         if (resource === 'programs') setPrograms(data as Program[]);
@@ -125,6 +146,33 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!branding) return;
+
+    if (branding.academy_name) {
+      document.title = `${branding.academy_name} — English Training Center in Davangere`;
+    }
+
+    if (branding.tagline) {
+      const description = document.querySelector<HTMLMetaElement>('meta[name="description"]');
+      if (description) description.content = `${branding.academy_name || "Uptrend's English Academy"}. ${branding.tagline} in Davangere, Karnataka.`;
+    }
+
+    applyBrandColorPalette('orange', branding.primary_orange || branding.primary_color);
+    applyBrandColorPalette('emerald', branding.primary_green || branding.secondary_color);
+    applyBrandColorPalette('green', branding.primary_green || branding.secondary_color);
+
+    if (branding.favicon_url) {
+      let link = document.querySelector<HTMLLinkElement>("link[rel*='icon']");
+      if (!link) {
+        link = document.createElement('link');
+        link.rel = 'shortcut icon';
+        document.head.appendChild(link);
+      }
+      link.href = branding.favicon_url;
+    }
+  }, [branding]);
+
   const openCallbackModal = (progName?: string) => {
     setCallbackProgram(progName || 'General English Training');
     setCallbackOpen(true);
@@ -137,6 +185,7 @@ export function App() {
   };
 
   const handleAdminLoginSuccess = (profile: AdminProfile) => {
+    adminExpiryHandled.current = false;
     setCurrentAdmin(profile);
     setCurrentPage('admin-portal');
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -146,6 +195,20 @@ export function App() {
     setCurrentAdmin(null);
     setCurrentPage('home');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleAdminSessionExpired = () => {
+    if (adminExpiryHandled.current) return;
+    adminExpiryHandled.current = true;
+    sessionStorage.removeItem('uptrends_access_token');
+    setCurrentAdmin(null);
+    setCurrentPage('admin-login');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    void supabase?.auth.signOut().then(({ error }) => {
+      if (error) console.error('Unable to complete sign-out after admin session expiry.', error);
+    }).catch((error: unknown) => {
+      console.error('Unable to complete sign-out after admin session expiry.', error);
+    });
   };
 
   // If in admin portal
@@ -162,6 +225,7 @@ export function App() {
       <AdminPortal
         currentAdmin={currentAdmin}
         onLogout={handleAdminLogout}
+        onSessionExpired={handleAdminSessionExpired}
         setCurrentPage={setCurrentPage}
       />
     );
@@ -170,7 +234,13 @@ export function App() {
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 antialiased selection:bg-orange-500 selection:text-white">
       {/* Moving Announcement Banner (Section 6.B - no close button, Supabase driven) */}
-      <AnnouncementBanner />
+      <AnnouncementBanner
+        onOpenApplication={() => {
+          setCurrentPage('apply');
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }}
+        onOpenDemoClass={() => setDemoClassModalOpen(true)}
+      />
 
       {/* Main Navigation Header */}
       <Header
@@ -203,19 +273,28 @@ export function App() {
 
       {/* Page Routing */}
       <main className="flex-1">
-        {currentPage === 'home' && (
+        <div
+          aria-hidden={currentPage !== 'home'}
+          inert={currentPage !== 'home'}
+          className={
+            currentPage === 'home'
+              ? 'contents'
+              : 'pointer-events-none invisible absolute left-[-10000px] top-0 w-full'
+          }
+        >
           <Home
             programs={programs}
-            reviews={reviews}
             mediaItems={mediaItems}
             dataStatuses={publicStatuses}
             onRetryData={(resource) => void loadPublicResource(resource)}
             setCurrentPage={setCurrentPage}
             setSelectedProgram={setSelectedProgram}
             openCallbackModal={openCallbackModal}
+            openDemoClassModal={() => setDemoClassModalOpen(true)}
             openVideoModal={openVideoModal}
+            branding={branding}
           />
-        )}
+        </div>
 
         {currentPage === 'about' && (
           <AboutUs
@@ -243,12 +322,27 @@ export function App() {
           />
         )}
 
-        {currentPage === 'reviews' && <Reviews reviews={reviews} />}
+        <div
+          aria-hidden={currentPage !== 'reviews'}
+          inert={currentPage !== 'reviews'}
+          className={
+            currentPage === 'reviews'
+              ? 'contents'
+              : 'pointer-events-none invisible absolute left-[-10000px] top-0 w-full'
+          }
+        >
+          <Reviews
+            openDemoClassModal={() => setDemoClassModalOpen(true)}
+            openCallbackModal={openCallbackModal}
+          />
+        </div>
 
         {currentPage === 'media' && (
           <MediaGallery
             mediaItems={mediaItems}
             openVideoModal={openVideoModal}
+            openDemoClassModal={() => setDemoClassModalOpen(true)}
+            openCallbackModal={openCallbackModal}
           />
         )}
 
@@ -260,7 +354,12 @@ export function App() {
           />
         )}
 
-        {currentPage === 'contact' && <ContactUs />}
+        {currentPage === 'contact' && (
+          <ContactUs
+            openDemoClassModal={() => setDemoClassModalOpen(true)}
+            openCallbackModal={openCallbackModal}
+          />
+        )}
 
         {currentPage === 'apply' && (
           <ApplyNow
@@ -305,6 +404,11 @@ export function App() {
         isOpen={callbackOpen}
         onClose={() => setCallbackOpen(false)}
         prefilledProgram={callbackProgram}
+      />
+
+      <DemoClassBookingModal
+        isOpen={demoClassModalOpen}
+        onClose={() => setDemoClassModalOpen(false)}
       />
 
       <VideoModal

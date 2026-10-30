@@ -51,6 +51,20 @@ It creates:
    - Seed data is loaded.
    - Super Admin profile is provisioned for UID `59bbb687-4e0d-47f7-b458-5a91955f915d`.
 
+## 2.1. Add the Separate Demo Class Request Workflow
+
+After applying the main schema migration, apply
+`supabase/migrations/20261029000000_demo_class_requests.sql` in the Supabase SQL
+Editor. This creates a separate `demo_class_requests` table with its own
+statuses and staff access through the server-side API. Demo applicant photos
+are stored under the private `demo-class-requests/` prefix in the
+`APPLICATION_MEDIA` R2 bucket; they are not stored in admission application
+records or made public.
+
+The existing `APPLICATION_NOTIFICATION_EMAIL`, `RESEND_API_KEY`, and
+`RESEND_FROM_EMAIL` settings are used for demo-request email notifications. No
+new environment variables are required.
+
 ## 2.2. Cross-Table Duplicate Contact Validation
 
 The migration

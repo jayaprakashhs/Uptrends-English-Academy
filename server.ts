@@ -6,10 +6,11 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import { Resend } from 'resend';
-import { DeleteObjectCommand, HeadBucketCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
 import { removeLegacyUploadFile } from './local-upload-storage';
 import { handleApiRequest } from './worker-api';
+import type { R2BucketBinding } from './worker-r2';
 import {
   isValidContactEmail,
   normalizeContactEmail,
@@ -27,8 +28,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '16mb' }));
+app.use(express.urlencoded({ extended: true, limit: '16mb' }));
 
 // -------------------------------------------------------------
 // ENVIRONMENT VARIABLES & CLIENT INITIALIZATION
@@ -173,7 +174,6 @@ interface MemoryStore {
   applications: any[];
   notifications: any[];
   callbacks: any[];
-  contacts: any[];
   programs: any[];
   announcements: any[];
   reviews: any[];
@@ -187,7 +187,6 @@ const memoryStore: MemoryStore = {
   applications: [],
   notifications: [],
   callbacks: [],
-  contacts: [],
   admin_profiles: [
     {
       id: '59bbb687-4e0d-47f7-b458-5a91955f915d',
@@ -393,6 +392,7 @@ const memoryStore: MemoryStore = {
     logo_alt: "Uptrend's English Academy Davangere Logo",
     favicon_url: '/favicon.ico',
     footer_logo_url: null,
+    hero_photo_url: null,
     primary_orange: '#ea580c',
     primary_green: '#16a34a',
     official_pdf_url: '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf'
@@ -887,6 +887,32 @@ app.post('/api/admin/media', async (req, res) => {
     if (media_type !== 'photo' && media_type !== 'video') {
       return res.status(400).json({ error: 'Media type must be photo or video.' });
     }
+    const displayOrder = display_order === undefined ? 0 : Number(display_order);
+    if (!Number.isInteger(displayOrder)) {
+      return res.status(400).json({ error: 'Display order must be a whole number.' });
+    }
+    if (supabase) {
+      const { data: matchingOrder, error: orderLookupError } = await supabase
+        .from('media_items')
+        .select('id,title')
+        .eq('display_order', displayOrder)
+        .limit(1);
+      if (orderLookupError) {
+        return res.status(500).json({ error: `Unable to verify media display order: ${orderLookupError.message}` });
+      }
+      if (matchingOrder?.length) {
+        return res.status(409).json({
+          error: `This display order number is already taken by "${matchingOrder[0].title}". Please choose another number.`,
+        });
+      }
+    } else {
+      const matchingMedia = memoryStore.media.find((media) => media.display_order === displayOrder);
+      if (matchingMedia) {
+        return res.status(409).json({
+          error: `This display order number is already taken by "${matchingMedia.title}". Please choose another number.`,
+        });
+      }
+    }
     const normalizedType = media_type;
     const cleanYoutube = toSafeYouTubeUrl(youtube_url || null);
     const youtubeVideoId = extractYouTubeVideoId(cleanYoutube || youtube_url || null);
@@ -981,7 +1007,7 @@ app.post('/api/admin/media', async (req, res) => {
       cover_image_url: storedCoverUrl,
       alt_text: alt_text || title.trim(),
       is_published: is_published !== false,
-      display_order: Number(display_order || 0),
+      display_order: displayOrder,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -1047,6 +1073,34 @@ app.put('/api/admin/media/:id', async (req, res) => {
 
     if (!item) {
       return res.status(404).json({ error: 'Media item not found.' });
+    }
+
+    const nextDisplayOrder = display_order === undefined ? item.display_order : Number(display_order);
+    if (!Number.isInteger(nextDisplayOrder)) {
+      return res.status(400).json({ error: 'Display order must be a whole number.' });
+    }
+    if (supabase) {
+      const { data: matchingOrder, error: orderLookupError } = await supabase
+        .from('media_items')
+        .select('id,title')
+        .eq('display_order', nextDisplayOrder)
+        .neq('id', id)
+        .limit(1);
+      if (orderLookupError) {
+        return res.status(500).json({ error: `Unable to verify media display order: ${orderLookupError.message}` });
+      }
+      if (matchingOrder?.length) {
+        return res.status(409).json({
+          error: `This display order number is already taken by "${matchingOrder[0].title}". Please choose another number.`,
+        });
+      }
+    } else {
+      const matchingMedia = memoryStore.media.find((media) => media.id !== id && media.display_order === nextDisplayOrder);
+      if (matchingMedia) {
+        return res.status(409).json({
+          error: `This display order number is already taken by "${matchingMedia.title}". Please choose another number.`,
+        });
+      }
     }
 
     const nextType = media_type ?? item.media_type;
@@ -1189,7 +1243,7 @@ app.put('/api/admin/media/:id', async (req, res) => {
       youtube_video_id: nextYoutubeId,
       cover_image_url: nextCoverImageUrl,
       is_published: is_published !== undefined ? Boolean(is_published) : item.is_published,
-      display_order: display_order !== undefined ? Number(display_order) : item.display_order,
+      display_order: nextDisplayOrder,
       updated_at: new Date().toISOString(),
     };
 
@@ -1364,7 +1418,6 @@ app.get('/api/branding', async (req, res) => {
   }
 });
 
-// POST Student Application (Public - valid UUID generated)
 app.post('/api/apply', async (req, res) => {
   try {
     const {
@@ -1835,48 +1888,6 @@ app.post('/api/callback-request', async (req, res) => {
   }
 });
 
-// POST Contact Enquiry (Public)
-app.post('/api/contact', async (req, res) => {
-  try {
-    const { full_name, email, mobile, subject, message, consent } = req.body;
-
-    if (!full_name || !email || !subject || !message) {
-      return res.status(400).json({ error: 'Full name, email, subject, and message are required.' });
-    }
-
-    const newRecord = {
-      id: crypto.randomUUID(),
-      full_name,
-      email,
-      mobile: mobile || null,
-      subject,
-      message,
-      consent: consent !== false,
-      status: 'New',
-      created_at: new Date().toISOString(),
-    };
-
-    if (supabase) {
-      await supabase.from('contact_enquiries').insert([newRecord]);
-    } else {
-      memoryStore.contacts.unshift(newRecord);
-    }
-
-    await sendEmailViaResend({
-      to: APPLICATION_NOTIFICATION_EMAIL,
-      subject: `New Contact Enquiry: ${subject} — ${full_name}`,
-      html: `<p>New contact message received:</p><p><strong>From:</strong> ${full_name} (${email}, ${mobile || 'No phone'})</p><p><strong>Subject:</strong> ${subject}</p><p><strong>Message:</strong><br>${message}</p>`,
-    });
-
-    res.json({
-      success: true,
-      message: 'Thank you for reaching out. We have received your message and will respond shortly.',
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Bridge manual payment endpoints to the existing Worker handlers.
 // Preserve the original Bearer token and Worker-side role checks.
 app.all(
@@ -1885,6 +1896,9 @@ app.all(
     '/api/admin/applications/:id/payments',
     '/api/admin/payments/:paymentId',
     '/api/demo-class-requests',
+    '/api/admin/demo-class-requests',
+    '/api/admin/demo-class-requests/:id',
+    '/api/admin/demo-class-requests/:id/photo',
   ],
   async (req, res) => {
     try {
@@ -1900,14 +1914,51 @@ app.all(
 
       const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
       const hasBody = !['GET', 'HEAD'].includes(req.method.toUpperCase());
+      const requestBody = hasBody ? JSON.stringify(req.body ?? {}) : undefined;
+      if (requestBody !== undefined) {
+        headers.delete('content-length');
+        headers.set('content-type', 'application/json');
+      }
 
       const workerRequest = new Request(url, {
         method: req.method,
         headers,
-        ...(hasBody
-          ? { body: JSON.stringify(req.body ?? {}) }
-          : {}),
+        ...(requestBody !== undefined ? { body: requestBody } : {}),
       });
+
+      const applicationMedia: R2BucketBinding | undefined = r2Client
+        ? {
+            put: async (key, value, options) => {
+              const body = value instanceof ArrayBuffer
+                ? Buffer.from(value)
+                : Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+              await r2Client.send(new PutObjectCommand({
+                Bucket: R2_BUCKET,
+                Key: key,
+                Body: body,
+                ContentType: options?.httpMetadata?.contentType,
+              }));
+            },
+            delete: async (key) => {
+              await r2Client.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+            },
+            get: async (key) => {
+              const object = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+              if (!object.Body) return null;
+              const bytes = await object.Body.transformToByteArray();
+              return {
+                body: new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    controller.enqueue(new Uint8Array(bytes));
+                    controller.close();
+                  },
+                }),
+                httpMetadata: { contentType: object.ContentType },
+              };
+            },
+            list: async () => ({ objects: [] }),
+          }
+        : undefined;
 
       const workerEnv = {
         SUPABASE_URL: process.env.SUPABASE_URL || SUPABASE_URL,
@@ -1915,6 +1966,7 @@ app.all(
         VITE_SUPABASE_ANON_KEY:
           process.env.VITE_SUPABASE_ANON_KEY || '',
         SUPABASE_SERVICE_ROLE_KEY: SUPABASE_SERVICE_KEY,
+        APPLICATION_MEDIA: applicationMedia,
         RESEND_API_KEY,
         RESEND_FROM_EMAIL,
         APPLICATION_NOTIFICATION_EMAIL,
@@ -2090,37 +2142,26 @@ app.put('/api/admin/callbacks/:id', async (req, res) => {
   return res.json(record);
 });
 
-app.get('/api/admin/contacts', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'staff');
+app.delete('/api/admin/callbacks/:id', async (req, res) => {
+  const admin = await requireAdminAuth(req, res, 'admin');
   if (!admin) return;
+  if (!UUID_PATTERN.test(req.params.id)) return res.status(400).json({ error: 'Callback request ID must be a valid UUID.' });
 
   if (supabase) {
-    const { data, error } = await supabase.from('contact_enquiries').select('*').order('created_at', { ascending: false });
-    if (error) return res.status(500).json({ error: error.message || 'Unable to load contact enquiries.' });
-    return res.json(data || []);
+    const { data, error } = await supabase.from('callback_requests')
+      .delete()
+      .eq('id', req.params.id)
+      .select('id')
+      .maybeSingle();
+    if (error) return res.status(500).json({ error: error.message || 'Unable to delete callback request.' });
+    if (!data) return res.status(404).json({ error: 'Callback request not found.' });
+    return res.json({ success: true, message: 'Callback request deleted successfully.' });
   }
-  res.json(memoryStore.contacts);
-});
 
-app.put('/api/admin/contacts/:id', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'staff');
-  if (!admin) return;
-  if (!UUID_PATTERN.test(req.params.id)) return res.status(400).json({ error: 'Contact enquiry ID must be a valid UUID.' });
-  const { status } = req.body || {};
-  if (!['New', 'Replied', 'Archived'].includes(status)) {
-    return res.status(400).json({ error: 'Contact enquiry status must be New, Replied, or Archived.' });
-  }
-  if (supabase) {
-    const { data, error } = await supabase.from('contact_enquiries')
-      .update({ status }).eq('id', req.params.id).select('*').maybeSingle();
-    if (error) return res.status(500).json({ error: error.message });
-    if (!data) return res.status(404).json({ error: 'Contact enquiry not found.' });
-    return res.json(data);
-  }
-  const record = memoryStore.contacts.find((item) => item.id === req.params.id);
-  if (!record) return res.status(404).json({ error: 'Contact enquiry not found.' });
-  record.status = status;
-  return res.json(record);
+  const index = memoryStore.callbacks.findIndex((item) => item.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'Callback request not found.' });
+  memoryStore.callbacks.splice(index, 1);
+  return res.json({ success: true, message: 'Callback request deleted successfully.' });
 });
 
 // Admin Profiles Management (Super Admin only)
@@ -2168,10 +2209,22 @@ app.put('/api/admin/profiles/:id', async (req, res) => {
   res.status(404).json({ error: 'Admin profile not found' });
 });
 
-// Site Branding Management (Super Admin only - updates favicon_url, footer_logo_url, main_logo_alt, etc.)
+// Site Branding Management (Super Admin only)
 app.put('/api/admin/branding', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'super_admin');
+  const admin = await requireAdminAuth(req, res, 'admin');
   if (!admin) return;
+
+  const isHeroPhotoAdmin = admin.role !== 'super_admin';
+  if (isHeroPhotoAdmin) {
+    const allowedFields = new Set(['hero_photo_file_base64', 'hero_photo_url']);
+    if (
+      Object.keys(req.body).some((field) => !allowedFields.has(field)) ||
+      (req.body.hero_photo_file_base64 === undefined && req.body.hero_photo_url !== null) ||
+      (req.body.hero_photo_url !== undefined && req.body.hero_photo_url !== null)
+    ) {
+      return res.status(403).json({ error: 'Admins may only upload a new hero photo or remove the current hero photo.' });
+    }
+  }
 
   const {
     academy_name,
@@ -2183,47 +2236,171 @@ app.put('/api/admin/branding', async (req, res) => {
     footer_logo_url,
     primary_orange,
     primary_green,
+    primary_color,
+    secondary_color,
     official_pdf_url,
+    logo_file_base64,
+    favicon_file_base64,
+    footer_logo_file_base64,
+    hero_photo_file_base64,
   } = req.body;
 
-  const updates = {
-    academy_name: academy_name || "Uptrend's English Academy",
-    tagline: tagline || 'Professional Spoken English & Communication Skills',
-    logo_url,
-    main_logo_alt: main_logo_alt || logo_alt || "Uptrend's English Academy Davangere Logo",
-    logo_alt: logo_alt || main_logo_alt || "Uptrend's English Academy Davangere Logo",
-    favicon_url: favicon_url || '/favicon.ico',
-    footer_logo_url,
-    primary_orange: primary_orange || '#ea580c',
-    primary_green: primary_green || '#16a34a',
-    official_pdf_url: official_pdf_url || '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf',
-    updated_at: new Date().toISOString(),
+  const resolvedPrimaryColor = primary_color ?? primary_orange;
+  const resolvedSecondaryColor = secondary_color ?? primary_green;
+  if (!isHeroPhotoAdmin && (
+    (resolvedPrimaryColor !== undefined && !/^#[0-9a-f]{6}$/i.test(resolvedPrimaryColor)) ||
+    (resolvedSecondaryColor !== undefined && !/^#[0-9a-f]{6}$/i.test(resolvedSecondaryColor))
+  )) {
+    return res.status(400).json({ error: 'Theme colors must be six-digit hexadecimal values.' });
+  }
+
+  const updates: Record<string, unknown> = isHeroPhotoAdmin
+    ? { updated_at: new Date().toISOString(), ...(req.body.hero_photo_url === null ? { hero_photo_url: null } : {}) }
+    : {
+      academy_name: academy_name || "Uptrend's English Academy",
+      tagline: tagline || 'Professional Spoken English & Communication Skills',
+      logo_url: logo_url || null,
+      logo_alt: main_logo_alt || logo_alt || "Uptrend's English Academy Davangere Logo",
+      favicon_url: favicon_url || '/favicon.ico',
+      footer_logo_url: footer_logo_url || null,
+      ...(req.body.hero_photo_url !== undefined ? { hero_photo_url: req.body.hero_photo_url } : {}),
+      primary_orange: resolvedPrimaryColor || '#ea580c',
+      primary_green: resolvedSecondaryColor || '#16a34a',
+      official_pdf_url: official_pdf_url || '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf',
+      updated_at: new Date().toISOString(),
+    };
+  const uploadedAssets: Array<{
+    key: string;
+    column: 'logo_url' | 'favicon_url' | 'footer_logo_url' | 'hero_photo_url';
+    localFilename?: string;
+  }> = [];
+  const cleanupUploadedAssets = async () => {
+    for (const asset of uploadedAssets) {
+      try {
+        if (asset.localFilename) {
+          await fs.promises.unlink(path.join(LOCAL_UPLOADS_DIRECTORY, asset.localFilename));
+        } else {
+          await deleteManagedR2Object(asset.key);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.error('[branding_upload_cleanup_failed]', {
+            key: asset.key,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
   };
 
-  if (supabase) {
-    const { data: existing } = await supabase.from('site_branding').select('id').limit(1).maybeSingle();
-    if (existing?.id) {
-      const { data, error } = await supabase
-        .from('site_branding')
-        .update(updates)
-        .eq('id', existing.id)
-        .select()
-        .single();
-      if (error) return res.status(500).json({ error: error.message });
-      return res.json(data);
-    } else {
-      const { data, error } = await supabase
-        .from('site_branding')
-        .insert([{ id: crypto.randomUUID(), ...updates }])
-        .select()
-        .single();
-      if (error) return res.status(500).json({ error: error.message });
-      return res.json(data);
+  const fileUploads = [
+    { field: 'logo_file_base64', column: 'logo_url' },
+    { field: 'favicon_file_base64', column: 'favicon_url' },
+    { field: 'footer_logo_file_base64', column: 'footer_logo_url' },
+    { field: 'hero_photo_file_base64', column: 'hero_photo_url' },
+  ] as const;
+  for (const { field, column } of fileUploads) {
+    const dataUrl = req.body[field];
+    if (dataUrl === undefined) continue;
+    const match = typeof dataUrl === 'string'
+      ? /^data:(image\/(?:jpeg|png|webp|x-icon|vnd\.microsoft\.icon));base64,([A-Za-z0-9+/]+={0,2})$/i.exec(dataUrl)
+      : null;
+    if (!match) {
+      await cleanupUploadedAssets();
+      return res.status(400).json({ error: 'Choose a valid supported branding image.' });
+    }
+
+    const buffer = Buffer.from(match[2], 'base64');
+    const detectedMime = match[1].toLowerCase();
+    const mime = detectedMime === 'image/vnd.microsoft.icon' ? 'image/x-icon' : detectedMime;
+    if (mime === 'image/x-icon' && field !== 'favicon_file_base64') {
+      await cleanupUploadedAssets();
+      return res.status(400).json({ error: 'ICO files are supported only for the favicon.' });
+    }
+    const signatureIsValid = mime === 'image/jpeg'
+      ? buffer[0] === 0xff && buffer[1] === 0xd8 && buffer.at(-2) === 0xff && buffer.at(-1) === 0xd9
+      : mime === 'image/png'
+        ? buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47
+        : mime === 'image/x-icon'
+          ? buffer[0] === 0 && buffer[1] === 0 && buffer[2] === 1 && buffer[3] === 0
+          : buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
+    const maxImageBytes = field === 'favicon_file_base64' ? 1024 * 1024 : 3 * 1024 * 1024;
+    if (buffer.length === 0 || buffer.length > maxImageBytes || !signatureIsValid) {
+      await cleanupUploadedAssets();
+      return res.status(400).json({
+        error: buffer.length > maxImageBytes
+          ? `Branding images must be ${maxImageBytes / (1024 * 1024)} MB or smaller.`
+          : 'Image contents do not match the selected file type.',
+      });
+    }
+
+    const extension = mime === 'image/png'
+      ? 'png'
+      : mime === 'image/webp'
+        ? 'webp'
+        : mime === 'image/x-icon'
+          ? 'ico'
+          : 'jpg';
+    const key = `branding/${crypto.randomUUID()}.${extension}`;
+    try {
+      updates[column] = r2Client
+        ? await uploadMediaToR2(buffer, key, mime)
+        : await uploadToR2(buffer, key, mime);
+      uploadedAssets.push({
+        key,
+        column,
+        ...(!r2Client ? { localFilename: path.basename(key) } : {}),
+      });
+    } catch (error) {
+      await cleanupUploadedAssets();
+      return res.status(502).json({
+        error: error instanceof Error ? error.message : 'Unable to store branding image.',
+      });
     }
   }
 
+  if (supabase) {
+    const { data: existing, error: existingError } = await supabase
+      .from('site_branding')
+      .select('id,logo_url,favicon_url,footer_logo_url,hero_photo_url')
+      .limit(1)
+      .maybeSingle();
+    if (existingError) {
+      await cleanupUploadedAssets();
+      return res.status(500).json({ error: existingError.message });
+    }
+
+    const result = existing?.id
+      ? await supabase.from('site_branding').update(updates).eq('id', existing.id).select().single()
+      : await supabase.from('site_branding').insert([{ id: crypto.randomUUID(), ...updates }]).select().single();
+    if (result.error) {
+      await cleanupUploadedAssets();
+      return res.status(500).json({ error: result.error.message });
+    }
+
+    for (const column of ['logo_url', 'favicon_url', 'footer_logo_url', 'hero_photo_url'] as const) {
+      if (updates[column] === undefined) continue;
+      const previousKey = managedR2ObjectKeyFromMetadata(
+        existing?.[column],
+        R2_PUBLIC_URL,
+        'branding',
+      );
+      const replacementKey = uploadedAssets.find((asset) => asset.column === column)?.key;
+      if (!previousKey || previousKey === replacementKey || !r2Client) continue;
+      try {
+        await deleteManagedR2Object(previousKey);
+      } catch (error) {
+        console.error('[branding_old_asset_cleanup_failed]', {
+          key: previousKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return res.json(result.data);
+  }
+
   memoryStore.branding = { ...memoryStore.branding, ...updates };
-  res.json(memoryStore.branding);
+  return res.json(memoryStore.branding);
 });
 
 // Admin CRUD Endpoints for Programs (Admin & Super Admin)
@@ -2298,12 +2475,17 @@ app.post('/api/admin/announcements', async (req, res) => {
   const admin = await requireAdminAuth(req, res, 'admin');
   if (!admin) return;
 
-  const { content, is_active } = req.body;
+  const { content, is_active, button_action } = req.body;
+  if (button_action !== undefined && button_action !== null &&
+      button_action !== 'application' && button_action !== 'demo') {
+    return res.status(400).json({ error: 'button_action must be application, demo, or null.' });
+  }
   const item = {
     id: crypto.randomUUID(),
     content,
     is_active: is_active !== false,
     display_order: memoryStore.announcements.length + 1,
+    button_action: button_action ?? null,
     created_at: new Date().toISOString(),
   };
   if (supabase) {
@@ -2321,6 +2503,10 @@ app.put('/api/admin/announcements/:id', async (req, res) => {
 
   const { id } = req.params;
   const updates = req.body;
+  if (updates.button_action !== undefined && updates.button_action !== null &&
+      updates.button_action !== 'application' && updates.button_action !== 'demo') {
+    return res.status(400).json({ error: 'button_action must be application, demo, or null.' });
+  }
   if (supabase) {
     const { data, error } = await supabase.from('announcements').update(updates).eq('id', id).select().single();
     if (error) return res.status(500).json({ error: error.message });

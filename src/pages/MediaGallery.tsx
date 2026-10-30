@@ -2,13 +2,21 @@ import React, { useState } from 'react';
 import { MediaItem } from '../types';
 import { Play, Image as ImageIcon, Video, Filter, X } from 'lucide-react';
 import { extractYouTubeId, getYouTubeThumbnail } from '../lib/youtube';
+import { ApplicationCTA } from '../components/ApplicationCTA';
 
 interface MediaGalleryProps {
   mediaItems: MediaItem[];
   openVideoModal: (url: string, title: string) => void;
+  openDemoClassModal: () => void;
+  openCallbackModal: (programName?: string) => void;
 }
 
-export const MediaGallery: React.FC<MediaGalleryProps> = ({ mediaItems, openVideoModal }) => {
+export const MediaGallery: React.FC<MediaGalleryProps> = ({
+  mediaItems,
+  openVideoModal,
+  openDemoClassModal,
+  openCallbackModal,
+}) => {
   const [filterType, setFilterType] = useState<'all' | 'photo' | 'video'>('all');
   const [lightboxPhoto, setLightboxPhoto] = useState<MediaItem | null>(null);
 
@@ -29,7 +37,7 @@ export const MediaGallery: React.FC<MediaGalleryProps> = ({ mediaItems, openVide
             <span>Academy In Pictures & Video</span>
           </div>
           <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold text-slate-950 tracking-tight">
-            Media & Video Gallery
+            Media & Testimonials
           </h1>
           <p className="text-base text-slate-600 leading-relaxed">
             Take a look inside Uptrend’s English Academy: classroom interaction sessions, video talks, and student speech activities at our Davangere campus.
@@ -68,7 +76,7 @@ export const MediaGallery: React.FC<MediaGalleryProps> = ({ mediaItems, openVide
             }`}
           >
             <Video className="w-3.5 h-3.5" />
-            <span>YouTube Videos</span>
+            <span>Testimonials</span>
           </button>
         </div>
       </section>
@@ -178,6 +186,10 @@ export const MediaGallery: React.FC<MediaGalleryProps> = ({ mediaItems, openVide
           </div>
         </div>
       )}
+      <ApplicationCTA
+        openDemoClassModal={openDemoClassModal}
+        openCallbackModal={openCallbackModal}
+      />
     </div>
   );
 };

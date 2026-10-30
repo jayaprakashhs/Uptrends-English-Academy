@@ -15,6 +15,12 @@ export const Footer: React.FC<FooterProps> = ({
   openCallbackModal,
   branding,
 }) => {
+  const whatsappMessage = [
+    "Hello Uptrend's English Academy,",
+    'I would like to know more about your English training programs.',
+    'Please share the details. Thank you.',
+  ].join('\n');
+
   const handleNav = (page: string) => {
     setCurrentPage(page);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -26,7 +32,7 @@ export const Footer: React.FC<FooterProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-12 mb-12">
           {/* Column 1: Brand & Purpose */}
           <div className="space-y-4">
-            <div className="flex justify-center">
+            <div className="flex justify-start">
               <Logo
                 variant="white"
               size="lg"
@@ -35,7 +41,7 @@ export const Footer: React.FC<FooterProps> = ({
               />
             </div>
             <p className="text-sm text-slate-400 leading-relaxed pt-2">
-              Davangere’s dedicated training center for spoken English, grammar fundamentals, and professional communication skills. Over two decades of empowering confident speakers.
+              Davangere’s dedicated training center for spoken English, grammar fundamentals, and professional communication skills. 25+ years of empowering confident speakers.
             </p>
             <div className="pt-2">
               <button
@@ -91,7 +97,7 @@ export const Footer: React.FC<FooterProps> = ({
                   onClick={() => handleNav('media')}
                   className="hover:text-orange-400 transition-colors text-slate-400"
                 >
-                  Media & Video Gallery
+                  Media & Testimonials
                 </button>
               </li>
               <li>
@@ -137,6 +143,35 @@ export const Footer: React.FC<FooterProps> = ({
                 <Phone className="w-4 h-4 text-emerald-400 shrink-0" />
                 <a href="tel:+919008000211" className="hover:text-white transition-colors">
                   +91 900 8000 211
+                </a>
+              </li>
+              <li className="flex items-center gap-3">
+                <a
+                  href={`https://wa.me/919008000211?text=${encodeURIComponent(whatsappMessage)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="Chat with Uptrend's English Academy on WhatsApp"
+                  className="inline-flex min-h-11 items-center gap-3 rounded-md text-emerald-400 transition-colors hover:text-emerald-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"
+                >
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    className="h-5 w-5 shrink-0"
+                  >
+                    <path
+                      d="M20.1 11.8a8.1 8.1 0 0 1-12 7.1L3 20l1.2-5A8.1 8.1 0 1 1 20.1 11.8Z"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M8.2 7.6c.2-.4.4-.4.7-.4h.5c.2 0 .4.1.5.4l.7 1.7c.1.2.1.4 0 .6l-.5.7c-.2.2-.2.4-.1.6.5.9 1.2 1.6 2.1 2.1.2.1.4.1.6-.1l.7-.5c.2-.1.4-.1.6 0l1.7.7c.3.1.4.3.4.5v.5c0 .3 0 .5-.4.7-.5.3-1.1.5-1.7.4-1.1-.2-2.4-.8-3.7-2.1-1.3-1.3-1.9-2.6-2.1-3.7-.1-.6.1-1.2.4-1.7Z"
+                      fill="currentColor"
+                    />
+                  </svg>
+                  <span className="text-sm">Chat with us on WhatsApp</span>
                 </a>
               </li>
               <li className="flex items-center gap-3">

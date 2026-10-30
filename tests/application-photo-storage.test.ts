@@ -85,6 +85,24 @@ test('accepts only managed program image R2 keys', () => {
   );
 });
 
+test('accepts only managed branding asset R2 keys', () => {
+  const key = 'branding/11111111-1111-1111-1111-111111111103.png';
+
+  assert.equal(managedR2ObjectKeyFromMetadata(key, undefined, 'branding'), key);
+  assert.equal(
+    managedR2ObjectKeyFromMetadata(`https://media.example/${key}`, 'https://media.example', 'branding'),
+    key,
+  );
+  assert.equal(
+    managedR2ObjectKeyFromMetadata('media/photo.webp', undefined, 'branding'),
+    null,
+  );
+  assert.equal(
+    managedR2ObjectKeyFromMetadata('branding/../../private.png', undefined, 'branding'),
+    null,
+  );
+});
+
 test('removes a verified legacy upload only from the configured upload directory', async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'academy-uploads-'));
   const uploadDirectory = path.join(tempRoot, 'public', 'uploads');

@@ -5,6 +5,7 @@ import {
   DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
   type OfficialDocumentSettings,
 } from '../../official-document';
+import { supabase } from '../lib/supabase';
 
 
 import {
@@ -13,10 +14,8 @@ import {
   StudentApplication,
   ApplicationNotification,
   CallbackRequest,
-  ContactEnquiry,
   Program,
   Announcement,
-  Review,
   MediaItem,
   FAQ,
   SiteBranding,
@@ -24,9 +23,7 @@ import {
 import {
   LayoutDashboard,
   Users,
-  FileText,
   PhoneCall,
-  Mail,
   BookOpen,
   Volume2,
   Video,
@@ -52,15 +49,28 @@ import {
   ExternalLink,
   Palette,
   ShieldCheck,
+  GraduationCap,
+  Timer,
+  TrendingUp,
 } from 'lucide-react';
 import { extractYouTubeId } from '../lib/youtube';
 import { fetchSystemStatus, type IntegrationHealth, type SystemStatus } from '../lib/systemStatus';
+import { AdminDemoClassRequests } from '../components/AdminDemoClassRequests';
 
 interface AdminPortalProps {
   currentAdmin: AdminProfile;
   onLogout: () => void;
+  onSessionExpired: () => void;
   setCurrentPage: (page: string) => void;
 }
+
+type BrandingImageField =
+  | 'logo_file_base64'
+  | 'favicon_file_base64'
+  | 'footer_logo_file_base64'
+  | 'hero_photo_file_base64';
+
+type BrandingEditor = Partial<SiteBranding> & Partial<Record<BrandingImageField, string>>;
 
 type PaymentStage = 'first_fee' | 'second_fee' | 'installment' | 'final_payment';
 type PaymentMethod = 'cash' | 'upi' | 'bank_transfer' | 'card' | 'cheque' | 'other';
@@ -109,6 +119,14 @@ interface ApplicationPaymentData {
   remainingBalance: number | null;
 }
 
+interface DashboardDemoRequest {
+  id: string;
+  full_name: string;
+  city: string;
+  status: string;
+  created_at: string;
+}
+
 const integrationStatusLabel = (health: IntegrationHealth | undefined, missingLabel: string): string => {
   if (!health) return 'Checking...';
   if (health.connected) return 'Connected';
@@ -138,28 +156,160 @@ const integrationStatusClass = (health: IntegrationHealth | undefined): string =
 export const AdminPortal: React.FC<AdminPortalProps> = ({
   currentAdmin,
   onLogout,
+  onSessionExpired,
   setCurrentPage,
 }) => {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sessionExpiresAt, setSessionExpiresAt] = useState<number | null>(null);
+  const [sessionNow, setSessionNow] = useState(Date.now());
+  const [sessionCheckFailed, setSessionCheckFailed] = useState(false);
+
+  useEffect(() => {
+    const authClient = supabase;
+    if (!authClient) {
+      setSessionCheckFailed(true);
+      return;
+    }
+
+    let active = true;
+    let expirationCheckInProgress = false;
+    let expirationHandled = false;
+    let sessionCheckUnavailable = false;
+    let nextSessionRetryAt = Date.now() + 5000;
+    let currentExpiry: number | null = null;
+
+    const updateSessionExpiry = (session: { expires_at?: number } | null) => {
+      currentExpiry = typeof session?.expires_at === 'number' ? session.expires_at : null;
+      sessionCheckUnavailable = false;
+      setSessionExpiresAt(currentExpiry);
+      setSessionNow(Date.now());
+      setSessionCheckFailed(false);
+    };
+
+    const handleExpiredSession = () => {
+      if (expirationHandled) return;
+      expirationHandled = true;
+      sessionStorage.removeItem('uptrends_access_token');
+      onSessionExpired();
+    };
+
+    const verifyExpiredSession = async () => {
+      if (!active || expirationCheckInProgress || expirationHandled) return;
+      expirationCheckInProgress = true;
+      sessionCheckUnavailable = false;
+      setSessionCheckFailed(false);
+      try {
+        const { data, error } = await authClient.auth.getSession();
+        if (error) {
+          sessionCheckUnavailable = true;
+          setSessionCheckFailed(true);
+          console.error('Unable to verify the admin session before expiry handling.', error);
+          return;
+        }
+
+        const session = data.session;
+        if (!session) {
+          handleExpiredSession();
+          return;
+        }
+
+        updateSessionExpiry(session);
+        if (typeof session.expires_at !== 'number' || session.expires_at * 1000 <= Date.now()) {
+          try {
+            const { error: signOutError } = await authClient.auth.signOut();
+            if (signOutError) {
+              console.error('Unable to sign out the expired admin session.', signOutError);
+            }
+          } catch (signOutError) {
+            console.error('Unable to sign out the expired admin session.', signOutError);
+          }
+          handleExpiredSession();
+        }
+      } catch (error) {
+        sessionCheckUnavailable = true;
+        setSessionCheckFailed(true);
+        console.error('Unable to verify the admin session before expiry handling.', error);
+      } finally {
+        expirationCheckInProgress = false;
+      }
+    };
+
+    const { data: { subscription } } = authClient.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT') {
+        handleExpiredSession();
+        return;
+      }
+      if (session) updateSessionExpiry(session);
+    });
+
+    void authClient.auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      if (error) {
+        sessionCheckUnavailable = true;
+        setSessionCheckFailed(true);
+        console.error('Unable to load the authenticated admin session.', error);
+      } else if (!data.session) {
+        handleExpiredSession();
+      } else {
+        updateSessionExpiry(data.session);
+      }
+    }).catch((error: unknown) => {
+      if (!active) return;
+      sessionCheckUnavailable = true;
+      setSessionCheckFailed(true);
+      console.error('Unable to load the authenticated admin session.', error);
+    });
+
+    const intervalId = window.setInterval(() => {
+      const now = Date.now();
+      setSessionNow(now);
+      if (currentExpiry !== null && currentExpiry * 1000 <= now) {
+        void verifyExpiredSession();
+      } else if (sessionCheckUnavailable && now >= nextSessionRetryAt) {
+        nextSessionRetryAt = now + 5000;
+        void verifyExpiredSession();
+      }
+    }, 1000);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+      subscription.unsubscribe();
+    };
+  }, [onSessionExpired]);
+
+  const remainingSessionSeconds = sessionExpiresAt === null
+    ? null
+    : Math.max(0, Math.ceil((sessionExpiresAt * 1000 - sessionNow) / 1000));
+  const sessionCountdown = remainingSessionSeconds === null
+    ? '—'
+    : remainingSessionSeconds >= 3600
+      ? `${String(Math.floor(remainingSessionSeconds / 3600)).padStart(2, '0')}:${String(Math.floor((remainingSessionSeconds % 3600) / 60)).padStart(2, '0')}:${String(remainingSessionSeconds % 60).padStart(2, '0')}`
+      : `${String(Math.floor(remainingSessionSeconds / 60)).padStart(2, '0')}:${String(remainingSessionSeconds % 60).padStart(2, '0')}`;
+  const sessionTimerTone = sessionCheckFailed
+    ? 'border-orange-200 bg-orange-50 text-orange-800'
+    : remainingSessionSeconds !== null && remainingSessionSeconds <= 60
+      ? 'border-rose-200 bg-rose-50 text-rose-700'
+      : remainingSessionSeconds !== null && remainingSessionSeconds <= 300
+        ? 'border-orange-200 bg-orange-50 text-orange-700'
+        : 'border-slate-200 bg-slate-50 text-[#0B1F4D]';
 
   // Data states
   const [applications, setApplications] = useState<StudentApplication[]>([]);
+  const [demoRequests, setDemoRequests] = useState<DashboardDemoRequest[]>([]);
   const [notifications, setNotifications] = useState<ApplicationNotification[]>([]);
   const [callbacks, setCallbacks] = useState<CallbackRequest[]>([]);
-  const [contacts, setContacts] = useState<ContactEnquiry[]>([]);
   const [programs, setPrograms] = useState<Program[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
-  const [reviews, setReviews] = useState<Review[]>([]);
-  const [editingReview, setEditingReview] = useState<Partial<Review> | null>(null);
-  const [reviewSort, setReviewSort] = useState<'latest' | 'oldest'>('latest');
-  const [reviewRatingFilter, setReviewRatingFilter] = useState<'All' | '1' | '2' | '3' | '4' | '5'>('All');
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
+  const [mediaFilter, setMediaFilter] = useState<'all' | 'photo' | 'video'>('all');
+  const [mediaSearch, setMediaSearch] = useState('');
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [editingFaq, setEditingFaq] = useState<Partial<FAQ> | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [branding, setBranding] = useState<SiteBranding | null>(null);
-  const [editingBranding, setEditingBranding] = useState<Partial<SiteBranding> | null>(null);
+  const [editingBranding, setEditingBranding] = useState<BrandingEditor | null>(null);
   
 type JoiningInformationSettings = {
   joiningDate: string;
@@ -181,6 +331,19 @@ const [officialDocumentSettings, setOfficialDocumentSettings] =
     ...DEFAULT_JOINING_INFORMATION,
   });
 const [officialPdfPreviewUrl, setOfficialPdfPreviewUrl] = useState<string | null>(null);
+useEffect(() => {
+  if (!officialPdfPreviewUrl) return;
+
+  const closeOnEscape = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') setOfficialPdfPreviewUrl(null);
+  };
+  window.addEventListener('keydown', closeOnEscape);
+
+  return () => {
+    window.removeEventListener('keydown', closeOnEscape);
+    URL.revokeObjectURL(officialPdfPreviewUrl);
+  };
+}, [officialPdfPreviewUrl]);
   const [adminProfiles, setAdminProfiles] = useState<AdminProfile[]>([]);
   const [mediaForm, setMediaForm] = useState<Partial<MediaItem> & { media_file_base64?: string; media_file_mime?: string; cover_file_base64?: string; cover_file_mime?: string }>({
     media_type: 'photo',
@@ -195,8 +358,22 @@ const [officialPdfPreviewUrl, setOfficialPdfPreviewUrl] = useState<string | null
   const [editingMediaId, setEditingMediaId] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
 
+  const filteredMediaItems = mediaItems.filter((item) => {
+    const matchesType = mediaFilter === 'all' || item.media_type === mediaFilter;
+    const searchTerm = mediaSearch.trim().toLocaleLowerCase();
+    const matchesSearch = !searchTerm || [item.title, item.alt_text, item.caption]
+      .some((value) => value?.toLocaleLowerCase().includes(searchTerm));
+    return matchesType && matchesSearch;
+  });
+
   const [loading, setLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const navigateToAdminSection = (tab: string) => {
+    setActiveTab(tab);
+    setSidebarOpen(false);
+    setActionMessage(null);
+  };
 
   // Selected item modal preview states
   const [selectedApp, setSelectedApp] = useState<StudentApplication | null>(null);
@@ -216,7 +393,6 @@ const [officialPdfPreviewUrl, setOfficialPdfPreviewUrl] = useState<string | null
   const [paymentNotesInput, setPaymentNotesInput] = useState('');
 
   const [selectedCallback, setSelectedCallback] = useState<CallbackRequest | null>(null);
-  const [selectedContact, setSelectedContact] = useState<ContactEnquiry | null>(null);
   const [appPhotoModal, setAppPhotoModal] = useState<string | null>(null);
 
   // Program Edit Modal State
@@ -231,8 +407,6 @@ const [officialPdfPreviewUrl, setOfficialPdfPreviewUrl] = useState<string | null
   const [appFilterStatus, setAppFilterStatus] = useState<'All' | 'Pending' | 'Accepted'>('All');
   const [callbackSearch, setCallbackSearch] = useState('');
   const [callbackFilterStatus, setCallbackFilterStatus] = useState<'All' | CallbackRequest['status']>('All');
-  const [contactSearch, setContactSearch] = useState('');
-  const [contactFilterStatus, setContactFilterStatus] = useState<'All' | ContactEnquiry['status']>('All');
   const [notifFilterStatus, setNotifFilterStatus] = useState<'All' | 'Pending' | 'Sent' | 'Failed'>('All');
 
   // Role permissions checking
@@ -250,8 +424,14 @@ const [officialPdfPreviewUrl, setOfficialPdfPreviewUrl] = useState<string | null
     return headers;
   };
 
-  const requestJson = async (url: string, init?: RequestInit): Promise<any> => {
+  const fetchAdmin = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const response = await fetch(url, init);
+    if (response.status === 401) onSessionExpired();
+    return response;
+  };
+
+  const requestJson = async (url: string, init?: RequestInit): Promise<any> => {
+    const response = await fetchAdmin(url, init);
     let data: any;
     try {
       data = await response.json();
@@ -417,24 +597,22 @@ const [officialPdfPreviewUrl, setOfficialPdfPreviewUrl] = useState<string | null
       const headers = getAuthHeaders();
       const [
         appsRes,
+        demoRequestsRes,
         notifsRes,
         cbsRes,
-        cntsRes,
         progsRes,
         annsRes,
-        revsRes,
         mediaRes,
         faqsRes,
         brandingRes,
         profilesRes,
       ] = await Promise.all([
         requestJson('/api/admin/applications', { headers }),
+        requestJson('/api/admin/demo-class-requests', { headers }),
         isSuperAdmin ? requestJson('/api/admin/notifications', { headers }) : Promise.resolve([]),
         requestJson('/api/admin/callbacks', { headers }),
-        requestJson('/api/admin/contacts', { headers }),
         requestJson(isAdminOrHigher ? '/api/admin/programs' : '/api/programs', isAdminOrHigher ? { headers } : undefined),
         requestJson(isAdminOrHigher ? '/api/admin/announcements' : '/api/announcements', isAdminOrHigher ? { headers } : undefined),
-        requestJson('/api/admin/reviews', { headers }),
         isAdminOrHigher ? requestJson('/api/admin/media', { headers }) : Promise.resolve([]),
         isSuperAdmin
           ? requestJson('/api/admin/faqs', { headers })
@@ -446,12 +624,11 @@ const [officialPdfPreviewUrl, setOfficialPdfPreviewUrl] = useState<string | null
       ]);
 
       if (Array.isArray(appsRes)) setApplications(appsRes);
+      if (Array.isArray(demoRequestsRes)) setDemoRequests(demoRequestsRes);
       if (Array.isArray(notifsRes)) setNotifications(notifsRes);
       if (Array.isArray(cbsRes)) setCallbacks(cbsRes);
-      if (Array.isArray(cntsRes)) setContacts(cntsRes);
       if (Array.isArray(progsRes)) setPrograms(progsRes);
       if (Array.isArray(annsRes)) setAnnouncements(annsRes);
-      if (Array.isArray(revsRes)) setReviews(revsRes);
       if (Array.isArray(mediaRes)) setMediaItems(mediaRes);
       if (Array.isArray(faqsRes)) setFaqs(faqsRes);
       if (brandingRes && brandingRes.academy_name) {
@@ -472,10 +649,79 @@ const [officialPdfPreviewUrl, setOfficialPdfPreviewUrl] = useState<string | null
     }
   };
 
+  const refreshRequestData = async () => {
+    const requestLists = [
+      {
+        endpoint: '/api/admin/applications',
+        update: (data: StudentApplication[]) => setApplications(data),
+      },
+      {
+        endpoint: '/api/admin/demo-class-requests',
+        update: (data: DashboardDemoRequest[]) => setDemoRequests(data),
+      },
+      {
+        endpoint: '/api/admin/callbacks',
+        update: (data: CallbackRequest[]) => setCallbacks(data),
+      },
+    ];
+
+    await Promise.all(requestLists.map(async ({ endpoint, update }) => {
+      try {
+        const data = await requestJson(endpoint, { headers: getAuthHeaders() });
+        if (!Array.isArray(data)) {
+          throw new Error(`The ${endpoint} response was invalid.`);
+        }
+        update(data);
+      } catch (error) {
+        console.error(`Unable to refresh admin notification data from ${endpoint}.`, error);
+      }
+    }));
+  };
 
   useEffect(() => {
     fetchAllData();
   }, []);
+
+  useEffect(() => {
+    let refreshTimeout: number | undefined;
+    const scheduleRequestRefresh = () => {
+      window.clearTimeout(refreshTimeout);
+      refreshTimeout = window.setTimeout(() => {
+        void refreshRequestData();
+      }, 200);
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void refreshRequestData();
+    };
+
+    const client = supabase;
+    const channel = client
+      ? client
+          .channel('admin-request-badges', { config: { private: true } })
+          .on('broadcast', { event: 'request_changed' }, scheduleRequestRefresh)
+          .subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+              void refreshRequestData();
+            } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+              console.warn(`Admin request badge realtime channel ${status.toLowerCase()}; polling fallback remains active.`);
+            }
+          })
+      : null;
+
+    const refreshInterval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshRequestData();
+    }, 30_000);
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+
+    return () => {
+      window.clearInterval(refreshInterval);
+      window.clearTimeout(refreshTimeout);
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      if (client && channel) void client.removeChannel(channel);
+    };
+  }, [currentAdmin.id]);
 
   
   // Load official document settings separately from the other admin data.
@@ -674,10 +920,7 @@ const previewOfficialDocumentPdf = async () => {
     new Uint8Array(safeBuffer).set(bytes);
     const pdfBlob = new Blob([safeBuffer], { type: 'application/pdf' });
     const pdfUrl = URL.createObjectURL(pdfBlob);
-    setOfficialPdfPreviewUrl((previousUrl) => {
-      if (previousUrl) URL.revokeObjectURL(previousUrl);
-      return pdfUrl;
-    });
+    setOfficialPdfPreviewUrl(pdfUrl);
     setActionMessage({
       type: 'success',
       text: 'Branded student-view demo PDF preview generated. No student records or payments were changed.',
@@ -869,7 +1112,7 @@ const previewOfficialDocumentPdf = async () => {
     setActionMessage(null);
     setLoading(true);
     try {
-      const res = await fetch('/api/approve-application', {
+      const res = await fetchAdmin('/api/approve-application', {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({
@@ -903,7 +1146,7 @@ const previewOfficialDocumentPdf = async () => {
     setActionMessage(null);
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/applications/${appId}`, {
+      const res = await fetchAdmin(`/api/admin/applications/${appId}`, {
         method: 'DELETE',
         headers: getAuthHeaders(),
       });
@@ -961,20 +1204,24 @@ const previewOfficialDocumentPdf = async () => {
     }
   };
 
-  const handleContactStatusChange = async (contact: ContactEnquiry, status: ContactEnquiry['status']) => {
+  const handleDeleteCallback = async (callback: CallbackRequest) => {
+    if (!isAdminOrHigher || !confirm('Are you sure you want to delete this callback request? This action cannot be undone.')) return;
     setLoading(true);
     setActionMessage(null);
     try {
-      const updated = await requestJson(`/api/admin/contacts/${contact.id}`, {
-        method: 'PUT',
+      await requestJson(`/api/admin/callbacks/${encodeURIComponent(callback.id)}`, {
+        method: 'DELETE',
         headers: getAuthHeaders(),
-        body: JSON.stringify({ status }),
       });
-      setContacts((items) => items.map((item) => item.id === contact.id ? updated : item));
-      setSelectedContact(updated);
-      setActionMessage({ type: 'success', text: `Contact enquiry marked ${status}.` });
-    } catch (err: any) {
-      setActionMessage({ type: 'error', text: err.message || 'Unable to update contact enquiry.' });
+      setCallbacks((items) => items.filter((item) => item.id !== callback.id));
+      setSelectedCallback((selected) => selected?.id === callback.id ? null : selected);
+      setActionMessage({ type: 'success', text: 'Callback request deleted successfully.' });
+      await refreshRequestData();
+    } catch (err) {
+      setActionMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Unable to delete callback request.',
+      });
     } finally {
       setLoading(false);
     }
@@ -985,7 +1232,7 @@ const previewOfficialDocumentPdf = async () => {
     setActionMessage(null);
     setLoading(true);
     try {
-      const res = await fetch('/api/retry-notification', {
+      const res = await fetchAdmin('/api/retry-notification', {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({ notification_id: notifId }),
@@ -1020,7 +1267,7 @@ const previewOfficialDocumentPdf = async () => {
       // The Worker manages image_object_key; never send it from the browser.
 const { image_object_key: _imageObjectKey, ...programPayload } = editingProgram;
 
-const res = await fetch(url, {
+const res = await fetchAdmin(url, {
   method,
   headers: getAuthHeaders(),
   body: JSON.stringify(programPayload),
@@ -1043,7 +1290,7 @@ const res = await fetch(url, {
     if (!confirm('Are you sure you want to delete this program?')) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/programs/${id}`, {
+      const res = await fetchAdmin(`/api/admin/programs/${id}`, {
         method: 'DELETE',
         headers: getAuthHeaders(),
       });
@@ -1073,7 +1320,7 @@ const res = await fetch(url, {
     try {
       const method = editingAnnouncement.id ? 'PUT' : 'POST';
       const url = editingAnnouncement.id ? `/api/admin/announcements/${editingAnnouncement.id}` : '/api/admin/announcements';
-      const res = await fetch(url, {
+      const res = await fetchAdmin(url, {
         method,
         headers: getAuthHeaders(),
         body: JSON.stringify({ ...editingAnnouncement, content: editingAnnouncement.content.trim() }),
@@ -1096,7 +1343,7 @@ const res = await fetch(url, {
     if (!confirm('Delete this announcement?')) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/announcements/${id}`, {
+      const res = await fetchAdmin(`/api/admin/announcements/${id}`, {
         method: 'DELETE',
         headers: getAuthHeaders(),
       });
@@ -1174,65 +1421,41 @@ const res = await fetch(url, {
     }
   };
 
-  const handleSaveReview = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!editingReview) return;
-    setLoading(true);
-    try {
-      const url = editingReview.id ? `/api/admin/reviews/${editingReview.id}` : '/api/admin/reviews';
-      const res = await fetch(url, {
-        method: editingReview.id ? 'PUT' : 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify(editingReview),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Unable to save review.');
-      setEditingReview(null);
-      setActionMessage({ type: 'success', text: 'Review saved.' });
-      notifyPublicDataChanged();
-      await fetchAllData();
-    } catch (err: any) {
-      setActionMessage({ type: 'error', text: err.message || 'Unable to save review.' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleDeleteReview = async (id: string) => {
-    if (!confirm('Delete this review?')) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/admin/reviews/${id}`, {
-        method: 'DELETE',
-        headers: getAuthHeaders(),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Unable to delete review.');
-      setActionMessage({ type: 'success', text: 'Review deleted.' });
-      notifyPublicDataChanged();
-      await fetchAllData();
-    } catch (err: any) {
-      setActionMessage({ type: 'error', text: err.message || 'Unable to delete review.' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
   // Action: Save Site Branding
   const handleSaveBranding = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingBranding) return;
+    const body = isSuperAdmin
+      ? editingBranding
+      : editingBranding.hero_photo_file_base64
+        ? { hero_photo_file_base64: editingBranding.hero_photo_file_base64 }
+        : editingBranding.hero_photo_url === null
+          ? { hero_photo_url: null }
+          : null;
+    if (!body) {
+      setActionMessage({ type: 'error', text: 'Choose a hero photo or remove the current photo before saving.' });
+      return;
+    }
     setLoading(true);
     try {
-      const res = await fetch('/api/admin/branding', {
+      const res = await fetchAdmin('/api/admin/branding', {
         method: 'PUT',
         headers: getAuthHeaders(),
-        body: JSON.stringify(editingBranding),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to update branding');
-      setBranding(data);
-      setActionMessage({ type: 'success', text: 'Branding and logo configurations updated successfully!' });
+      setBranding(data as SiteBranding);
+      setEditingBranding({
+        ...data,
+        main_logo_alt: data.logo_alt || data.main_logo_alt,
+        primary_color: data.primary_orange || data.primary_color,
+        secondary_color: data.primary_green || data.secondary_color,
+      });
+      setActionMessage({
+        type: 'success',
+        text: isSuperAdmin ? 'Branding and logo configurations updated successfully!' : 'Hero section photo updated successfully.',
+      });
       notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
@@ -1242,11 +1465,81 @@ const res = await fetch(url, {
     }
   };
 
+  const handleBrandingFileChange = (
+    field: BrandingImageField,
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    if (!file || !editingBranding) return;
+    const clearPendingUpload = () => {
+      setEditingBranding((current) => {
+        if (!current) return current;
+        const next = { ...current };
+        delete next[field];
+        return next;
+      });
+    };
+
+    const isFavicon = field === 'favicon_file_base64';
+    const isHeroPhoto = field === 'hero_photo_file_base64';
+    const maxFileSize = isFavicon ? 1024 * 1024 : 3 * 1024 * 1024;
+    const supportedTypes = isFavicon
+      ? ['image/jpeg', 'image/png', 'image/webp', 'image/x-icon', 'image/vnd.microsoft.icon']
+      : ['image/jpeg', 'image/png', 'image/webp'];
+    if (!supportedTypes.includes(file.type)) {
+      setActionMessage({
+        type: 'error',
+        text: isFavicon
+          ? 'Choose an ICO, JPEG, PNG, or WebP favicon.'
+          : isHeroPhoto
+            ? 'Choose a PNG, JPG, JPEG, or WebP hero photo.'
+            : 'Choose a JPEG, PNG, or WebP branding image.',
+      });
+      clearPendingUpload();
+      event.target.value = '';
+      return;
+    }
+    if (file.size > maxFileSize) {
+      setActionMessage({ type: 'error', text: `Branding images must be ${isFavicon ? '1' : '3'} MB or smaller.` });
+      clearPendingUpload();
+      event.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const readDataUrl = String(reader.result || '');
+      const dataUrl = isFavicon && file.type === 'image/vnd.microsoft.icon'
+        ? readDataUrl.replace(/^data:image\/vnd\.microsoft\.icon;/, 'data:image/x-icon;')
+        : readDataUrl;
+      const normalizedMime = isFavicon && file.type === 'image/vnd.microsoft.icon'
+        ? 'image/x-icon'
+        : file.type;
+      if (!dataUrl.startsWith(`data:${normalizedMime};base64,`)) {
+        setActionMessage({ type: 'error', text: 'Unable to read this image. Please choose another file.' });
+        clearPendingUpload();
+        return;
+      }
+      setEditingBranding((current) => {
+        if (!current) return current;
+        const next = { ...current, [field]: dataUrl };
+        if (field === 'hero_photo_file_base64') delete next.hero_photo_url;
+        return next;
+      });
+      setActionMessage(null);
+    };
+    reader.onerror = () => {
+      setActionMessage({ type: 'error', text: 'Unable to read this image. Please choose another file.' });
+      clearPendingUpload();
+    };
+    reader.readAsDataURL(file);
+  };
+
   // Action: Update Admin Role / Status (Super Admin only)
   const handleUpdateAdminRole = async (profileId: string, newRole: AdminRole, newStatus: boolean) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/profiles/${profileId}`, {
+      const res = await fetchAdmin(`/api/admin/profiles/${profileId}`, {
         method: 'PUT',
         headers: getAuthHeaders(),
         body: JSON.stringify({ role: newRole, is_active: newStatus }),
@@ -1367,10 +1660,21 @@ const res = await fetch(url, {
 
   const handleSaveMedia = async (event: React.FormEvent) => {
     event.preventDefault();
-    setLoading(true);
     setMediaError(null);
 
     try {
+      const displayOrder = Number(mediaForm.display_order ?? 0);
+      if (!Number.isInteger(displayOrder)) {
+        throw new Error('Display order must be a whole number.');
+      }
+      const conflictingMedia = mediaItems.find((item) =>
+        item.display_order === displayOrder && item.id !== editingMediaId
+      );
+      if (conflictingMedia) {
+        throw new Error(`This display order number is already taken by "${conflictingMedia.title}". Please choose another number.`);
+      }
+
+      setLoading(true);
       const { media_file_base64, cover_file_base64, ...mediaDetails } = mediaForm;
       const payload = {
         ...mediaDetails,
@@ -1383,7 +1687,7 @@ const res = await fetch(url, {
         youtube_url: mediaForm.youtube_url?.trim() || '',
         cover_image_url: mediaForm.cover_image_url?.trim() || '',
         is_published: mediaForm.is_published !== false,
-        display_order: Number(mediaForm.display_order || 0),
+        display_order: displayOrder,
       };
 
       if (!payload.title) {
@@ -1400,7 +1704,7 @@ const res = await fetch(url, {
 
       const url = editingMediaId ? `/api/admin/media/${editingMediaId}` : '/api/admin/media';
       const method = editingMediaId ? 'PUT' : 'POST';
-      const res = await fetch(url, {
+      const res = await fetchAdmin(url, {
         method,
         headers: getAuthHeaders(),
         body: JSON.stringify(payload),
@@ -1425,7 +1729,7 @@ const res = await fetch(url, {
 
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/media/${itemId}`, {
+      const res = await fetchAdmin(`/api/admin/media/${itemId}`, {
         method: 'DELETE',
         headers: getAuthHeaders(),
       });
@@ -1445,7 +1749,7 @@ const res = await fetch(url, {
   const handleToggleMediaPublished = async (item: MediaItem) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/media/${item.id}`, {
+      const res = await fetchAdmin(`/api/admin/media/${item.id}`, {
         method: 'PUT',
         headers: getAuthHeaders(),
         body: JSON.stringify({ ...item, is_published: !item.is_published }),
@@ -1466,13 +1770,12 @@ const res = await fetch(url, {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard Overview', icon: LayoutDashboard, minRole: 'staff' },
     { id: 'applications', label: 'Student Applications', icon: Users, minRole: 'staff' },
+    { id: 'demo-class-requests', label: 'Demo Class Requests', icon: GraduationCap, minRole: 'staff' },
     { id: 'callbacks', label: 'Callback Requests', icon: PhoneCall, minRole: 'staff' },
-    { id: 'contacts', label: 'Contact Enquiries', icon: Mail, minRole: 'staff' },
-    { id: 'reviews', label: 'Reviews', icon: FileText, minRole: 'staff' },
     { id: 'programs', label: 'Programs Management', icon: BookOpen, minRole: 'admin' },
-    { id: 'media', label: 'Media Gallery', icon: Video, minRole: 'admin' },
+    { id: 'media', label: 'Media & Testimonials', icon: Video, minRole: 'admin' },
     { id: 'announcements', label: 'Announcements', icon: Volume2, minRole: 'admin' },
-    { id: 'branding', label: 'Site Branding & Assets', icon: Palette, minRole: 'super_admin' },
+    { id: 'branding', label: 'Site Branding & Assets', icon: Palette, minRole: 'admin' },
     { id: 'faqs', label: 'FAQs Management', icon: HelpCircle, minRole: 'super_admin' },
     { id: 'notifications', label: 'Email Outbox & Retries', icon: Send, minRole: 'super_admin' },
     { id: 'roles', label: 'Admin Roles & Access', icon: ShieldCheck, minRole: 'super_admin' },
@@ -1486,17 +1789,26 @@ const res = await fetch(url, {
     return false;
   });
 
-  // Filtered applications
-  const filteredApplications = applications.filter((app) => {
-    const matchesSearch =
-      app.student_name.toLowerCase().includes(appSearch.toLowerCase()) ||
-      app.application_reference.toLowerCase().includes(appSearch.toLowerCase()) ||
-      app.mobile.includes(appSearch) ||
-      app.email.toLowerCase().includes(appSearch.toLowerCase());
+  const pendingRequestCounts = {
+    applications: applications.filter((application) => application.status === 'Pending').length,
+    demoClassRequests: demoRequests.filter((request) => request.status === 'Pending').length,
+    callbacks: callbacks.filter((callback) => callback.status === 'New').length,
+  };
 
-    const matchesStatus = appFilterStatus === 'All' || app.status === appFilterStatus;
-    return matchesSearch && matchesStatus;
-  });
+  // Filtered applications
+  const filteredApplications = applications
+    .filter((app) => {
+      const matchesSearch =
+        app.student_name.toLowerCase().includes(appSearch.toLowerCase()) ||
+        app.application_reference.toLowerCase().includes(appSearch.toLowerCase()) ||
+        app.mobile.includes(appSearch) ||
+        app.email.toLowerCase().includes(appSearch.toLowerCase());
+
+      const matchesStatus = appFilterStatus === 'All' || app.status === appFilterStatus;
+      return matchesSearch && matchesStatus;
+    })
+    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+    .slice(0, 10);
 
   const filteredCallbacks = callbacks.filter((callback) => {
     const query = callbackSearch.toLowerCase();
@@ -1505,31 +1817,53 @@ const res = await fetch(url, {
     return matchesSearch && (callbackFilterStatus === 'All' || callback.status === callbackFilterStatus);
   });
 
-  const filteredContacts = contacts.filter((contact) => {
-    const query = contactSearch.toLowerCase();
-    const matchesSearch = [contact.full_name, contact.email, contact.mobile || '', contact.subject, contact.message]
-      .some((value) => value.toLowerCase().includes(query));
-    return matchesSearch && (contactFilterStatus === 'All' || contact.status === contactFilterStatus);
+  const applicationTrend = Array.from({ length: 6 }, (_, index) => {
+    const month = new Date();
+    month.setDate(1);
+    month.setMonth(month.getMonth() - (5 - index));
+    const year = month.getFullYear();
+    const monthIndex = month.getMonth();
+    const count = applications.filter((application) => {
+      const createdAt = new Date(application.created_at);
+      return createdAt.getFullYear() === year && createdAt.getMonth() === monthIndex;
+    }).length;
+    return { label: month.toLocaleDateString('en', { month: 'short' }), count };
   });
-
-  const filteredReviews = reviews
-    .filter((review) => reviewRatingFilter === 'All' || String(review.rating) === reviewRatingFilter)
-    .sort((left, right) => {
-      const dateDifference = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
-      return reviewSort === 'latest' ? -dateDifference : dateDifference;
-    });
+  const maxTrendCount = Math.max(1, ...applicationTrend.map((month) => month.count));
+  const trendPoints = applicationTrend
+    .map((month, index) => `${index * 120},${150 - (month.count / maxTrendCount) * 125}`)
+    .join(' ');
+  const recentApplications = [...applications]
+    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+    .slice(0, 5);
+  const recentDemoRequests = [...demoRequests]
+    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+    .slice(0, 5);
+  const recentCallbacks = [...callbacks]
+    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+    .slice(0, 5);
 
   return (
-    <div className="admin-responsive-shell min-h-screen bg-slate-100 flex flex-col">
+    <div className="admin-responsive-shell h-screen flex flex-col">
       <style>{`
         .admin-responsive-shell, .admin-responsive-shell * { box-sizing: border-box; }
-        .admin-responsive-shell { width: 100%; max-width: 100vw; overflow-x: clip; }
+        .admin-responsive-shell {
+          width: 100%; max-width: 100vw; overflow: hidden;
+          background: #f7f8fc; color: #0b1f4d;
+        }
         .admin-responsive-shell > header { width: 100%; }
         .admin-responsive-shell > header > div { min-width: 0; gap: .75rem; }
         .admin-responsive-shell > header button { flex-shrink: 0; }
-        .admin-responsive-shell > div.flex-1 { min-width: 0; width: 100%; }
+        .admin-responsive-shell > div.flex-1 { min-width: 0; width: 100%; min-height: 0; }
         .admin-responsive-shell aside { flex-shrink: 0; }
-        .admin-responsive-shell main { min-width: 0; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+        .admin-responsive-shell main {
+          min-width: 0; max-width: 100%; overflow-x: auto; overflow-y: auto;
+          overscroll-behavior: contain;
+          background:
+            radial-gradient(ellipse at 92% 3%, rgba(5,150,105,.07), transparent 28rem),
+            radial-gradient(ellipse at 8% 0%, rgba(234,88,12,.07), transparent 30rem),
+            #f7f8fc;
+        }
         .admin-responsive-shell main > * { min-width: 0; }
         .admin-responsive-shell table { border-collapse: separate; border-spacing: 0; }
         .admin-responsive-shell main > div table { min-width: 1050px; width: max-content; }
@@ -1538,6 +1872,112 @@ const res = await fetch(url, {
         .admin-responsive-shell img, .admin-responsive-shell iframe, .admin-responsive-shell video { max-width: 100%; }
         .admin-responsive-shell [role="dialog"], .admin-responsive-shell .fixed.inset-0 > div { max-width: calc(100vw - 1.5rem); }
         .admin-responsive-shell .whitespace-nowrap { white-space: nowrap; }
+        .admin-responsive-shell > header {
+          color: white; border-color: rgba(255,255,255,.12);
+          background: linear-gradient(112deg, #0b1f4d 0%, #14285d 62%, #26356f 100%);
+          box-shadow: 0 8px 24px rgba(11,31,77,.18);
+        }
+        .admin-responsive-shell > header > div { border-bottom: 2px solid #ea580c; }
+        .admin-responsive-shell > header img {
+          padding: 0; border-radius: 0;
+          background: transparent; box-shadow: none;
+        }
+        .admin-responsive-shell > header .text-slate-900,
+        .admin-responsive-shell > header .text-slate-600 { color: #fff8ef; }
+        .admin-responsive-shell > header .text-blue-600 { color: #a7f3d0; }
+        .admin-responsive-shell > header button:not([aria-label="Logout"]) {
+          border-color: rgba(255,255,255,.2); background-color: rgba(255,255,255,.1);
+          color: #fff8ef;
+        }
+        .admin-responsive-shell > header button:not([aria-label="Logout"]):hover { background-color: rgba(255,255,255,.18); }
+        .admin-responsive-shell > header button[aria-label="Logout"] { background: #fff8ef; }
+        .admin-responsive-shell > header button:focus-visible,
+        .admin-responsive-shell aside button:focus-visible,
+        .admin-responsive-shell main button:focus-visible,
+        .admin-responsive-shell main a:focus-visible {
+          outline: 3px solid #f59e0b; outline-offset: 2px;
+        }
+        .admin-responsive-shell aside {
+          color: #e2e8f0; border-color: rgba(255,255,255,.08);
+          background: linear-gradient(180deg, #0b1f4d 0%, #111d45 55%, #1b2250 100%);
+        }
+        .admin-responsive-shell aside > div:first-child > div:first-child { color: #fbbf8a; }
+        .admin-responsive-shell aside button { color: #dbe4f3; }
+        .admin-responsive-shell aside button:hover {
+          color: white; background: rgba(255,255,255,.09);
+        }
+        .admin-responsive-shell aside button[class*="bg-blue-50"] {
+          color: white; border-left-color: #ea580c;
+          background: linear-gradient(95deg, rgba(234,88,12,.27), rgba(5,150,105,.16));
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+        }
+        .admin-responsive-shell aside button[class*="bg-blue-50"] svg { color: #fdba74; }
+        .admin-responsive-shell aside > div:last-child {
+          border-color: rgba(255,255,255,.1); background: rgba(3,10,31,.26);
+        }
+        .admin-responsive-shell aside > div:last-child button {
+          color: #fff8ef; border-color: rgba(255,255,255,.2);
+          background: rgba(255,255,255,.08);
+        }
+        .admin-responsive-shell main section.rounded-2xl.border,
+        .admin-responsive-shell main form.rounded-2xl.border {
+          border-color: #e3e8f2; box-shadow: 0 8px 24px rgba(11,31,77,.055);
+        }
+        .admin-responsive-shell main section.rounded-2xl.border:hover {
+          border-color: #d4ddeb;
+        }
+        .admin-responsive-shell main input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+        .admin-responsive-shell main select,
+        .admin-responsive-shell main textarea {
+          border-color: #dbe2ee; border-radius: .75rem;
+        }
+        .admin-responsive-shell main input:focus,
+        .admin-responsive-shell main select:focus,
+        .admin-responsive-shell main textarea:focus {
+          border-color: #ea580c; outline: 2px solid rgba(234,88,12,.16); outline-offset: 1px;
+        }
+        .admin-responsive-shell main table thead { background-color: #f2f5fb; }
+        .admin-responsive-shell main table tbody tr:hover { background-color: #fff8ef; }
+        .admin-responsive-shell .fixed.inset-0 > div {
+          border: 1px solid rgba(255,255,255,.7);
+          box-shadow: 0 24px 70px rgba(11,31,77,.28);
+        }
+        .admin-responsive-shell main button:not(:disabled) {
+          transition-property: color, background-color, border-color, box-shadow, transform;
+          transition-duration: 160ms;
+        }
+        .admin-responsive-shell .dashboard-welcome {
+          position: relative; overflow: hidden; border: 1px solid #f3d8c4;
+          border-radius: 1.25rem; padding: 1.25rem;
+          background: linear-gradient(115deg, #fff8ef 0%, #fff 58%, #ecfdf5 100%);
+          box-shadow: 0 10px 28px rgba(11,31,77,.06);
+        }
+        .admin-responsive-shell .dashboard-welcome::after {
+          position: absolute; right: -2rem; top: -4rem; width: 13rem; height: 13rem;
+          content: ""; border-radius: 9999px;
+          background: radial-gradient(circle, rgba(234,88,12,.11), rgba(5,150,105,.05) 62%, transparent 70%);
+          pointer-events: none;
+        }
+        .admin-responsive-shell .dashboard-stat[data-tone="orange"] { border-color: #fed7aa; background: linear-gradient(145deg,#fff7ed,#fff 75%); }
+        .admin-responsive-shell .dashboard-stat[data-tone="green"] { border-color: #a7f3d0; background: linear-gradient(145deg,#ecfdf5,#fff 75%); }
+        .admin-responsive-shell .dashboard-stat[data-tone="blue"] { border-color: #bfdbfe; background: linear-gradient(145deg,#eff6ff,#fff 75%); }
+        .admin-responsive-shell .dashboard-stat[data-tone="violet"] { border-color: #ddd6fe; background: linear-gradient(145deg,#f5f3ff,#fff 75%); }
+        .admin-responsive-shell .dashboard-stat[data-tone="teal"] { border-color: #99f6e4; background: linear-gradient(145deg,#f0fdfa,#fff 75%); }
+        .admin-responsive-shell .dashboard-stat[data-tone="amber"] { border-color: #fde68a; background: linear-gradient(145deg,#fffbeb,#fff 75%); }
+        .admin-responsive-shell .dashboard-stat:hover { box-shadow: 0 14px 28px rgba(11,31,77,.12); }
+        @keyframes admin-notification-attention {
+          0%, 100% { transform: scale(1); }
+          12% { transform: scale(1.12); }
+          24% { transform: scale(1.03); }
+          36% { transform: scale(1); }
+        }
+        @media (prefers-reduced-motion: no-preference) {
+          .admin-responsive-shell .admin-notification-badge { animation: admin-notification-attention 2s ease-in-out infinite; }
+        }
+        .admin-responsive-shell .dashboard-chart {
+          overflow: hidden; border-radius: 1rem; padding: .5rem;
+          background: linear-gradient(180deg,#fff8ef 0%,#fff 60%,#f0fdfa 100%);
+        }
         @media (max-width: 1023px) {
           .admin-responsive-shell > div.flex-1 { overflow: visible; }
           .admin-responsive-shell main { padding: 1rem; }
@@ -1558,62 +1998,101 @@ const res = await fetch(url, {
           .admin-responsive-shell main table { min-width: 1050px; width: max-content; table-layout: auto; }
           .admin-responsive-shell aside { width: min(18rem, 86vw); }
         }
+        @media (prefers-reduced-motion: reduce) {
+          .admin-responsive-shell *, .admin-responsive-shell *::before, .admin-responsive-shell *::after {
+            scroll-behavior: auto !important;
+            transition-duration: .01ms !important;
+            animation-duration: .01ms !important;
+          }
+        }
       `}</style>
       {/* Top Admin Bar */}
-      <header className="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-30">
+      <header className="sticky top-0 z-30 shrink-0 border-b border-slate-200 text-slate-900">
         <div className="px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-4">
             <button
+              type="button"
+              aria-label={sidebarOpen ? 'Close navigation menu' : 'Open navigation menu'}
+              aria-expanded={sidebarOpen}
               onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="lg:hidden p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+              className="lg:hidden p-2 rounded-lg text-slate-600 hover:text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"
             >
               {sidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
             </button>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 sm:gap-3">
               <img
-                src="https://gpnfznwqwaokfzmozpxo.supabase.co/storage/v1/object/public/Uptrend's%20English%20Academy-photos/main_logo/UEA_main_03.png"
+                src={branding?.logo_url || "https://gpnfznwqwaokfzmozpxo.supabase.co/storage/v1/object/public/Uptrend's%20English%20Academy-photos/main_logo/UEA_main_03.png"}
                 alt="Uptrend's English Academy logo"
                 className="block shrink-0 object-contain"
-                style={{ width: 'clamp(80px, 10vw, 140px)', height: '40px', maxWidth: '140px', maxHeight: '40px' }}
+                style={{ width: 'clamp(92px, 11vw, 155px)', height: '48px', maxWidth: '155px', maxHeight: '48px' }}
               />
-              <span className="text-xs uppercase bg-slate-800 text-emerald-400 font-bold px-2 py-0.5 rounded border border-slate-700">
+              <span className="hidden text-xs uppercase bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded border border-blue-100 sm:inline-flex">
                 Admin Portal
               </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-4">
             <button
               onClick={fetchAllData}
               disabled={loading}
-              className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 transition-colors cursor-pointer"
+              className="flex shrink-0 items-center gap-1.5 text-xs text-slate-600 hover:text-blue-700 bg-white hover:bg-blue-50 px-2 sm:px-3 py-2 rounded-lg border border-slate-200 transition-colors cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 disabled:opacity-60"
               title="Refresh Data from Supabase"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               <span className="hidden sm:inline">Refresh Data</span>
             </button>
 
-            <div className="hidden sm:flex flex-col text-right">
-              <span className="text-xs font-bold text-white">{currentAdmin.full_name}</span>
-              <span className="text-[10px] uppercase font-bold text-orange-400">{currentAdmin.role}</span>
+            <div
+              role="timer"
+              aria-label={remainingSessionSeconds === null
+                ? 'Session expiry unavailable'
+                : `Session expires in ${sessionCountdown}`}
+              className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-2 text-[11px] font-semibold sm:gap-2 sm:px-3 ${sessionTimerTone}`}
+              title={sessionCheckFailed ? 'Unable to verify session expiry; checking again automatically.' : 'Supabase session expiry'}
+            >
+              <Timer className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span className="hidden sm:inline">Session expires in</span>
+              <span className="font-mono tabular-nums">{sessionCountdown}</span>
+            </div>
+
+            <div className="hidden items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-2.5 py-1.5 sm:flex">
+              <span className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-orange-400 to-emerald-500 text-xs font-extrabold text-white shadow-sm">
+                {currentAdmin.full_name.split(/\s+/).map((part) => part[0]).slice(0, 2).join('').toUpperCase()}
+              </span>
+              <span className="flex flex-col text-right">
+                <span className="text-xs font-bold text-white">{currentAdmin.full_name}</span>
+                <span className="text-[10px] uppercase font-bold text-emerald-200">{currentAdmin.role.replace('_', ' ')}</span>
+              </span>
             </div>
 
             <button
+              type="button"
               onClick={onLogout}
-              className="flex items-center gap-1 text-xs text-rose-400 hover:text-rose-300 bg-rose-950/40 hover:bg-rose-950/60 px-3 py-1.5 rounded-lg border border-rose-900 transition-colors cursor-pointer"
+              aria-label="Logout"
+              className="flex shrink-0 items-center gap-1 text-xs text-rose-700 hover:text-rose-800 bg-white hover:bg-rose-50 px-2 sm:px-3 py-2 rounded-lg border border-rose-200 transition-colors cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-600"
             >
               <LogOut className="w-3.5 h-3.5" />
-              <span>Logout</span>
+              <span className="hidden sm:inline">Logout</span>
             </button>
           </div>
         </div>
       </header>
 
       {/* Main Layout */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex min-h-0 overflow-hidden">
         {/* Sidebar */}
+        {sidebarOpen && (
+          <button
+            type="button"
+            aria-label="Close navigation menu"
+            onClick={() => setSidebarOpen(false)}
+            className="fixed inset-16 z-10 bg-slate-950/30 lg:hidden"
+          />
+        )}
         <aside
-          className={`fixed inset-y-16 left-0 z-20 w-64 bg-white border-r border-slate-200 flex flex-col justify-between transition-transform duration-200 lg:static lg:translate-x-0 ${
+          aria-label="Admin navigation"
+          className={`fixed inset-y-16 left-0 z-20 w-64 border-r border-slate-200 flex flex-col justify-between transition-transform duration-200 lg:sticky lg:top-16 lg:h-[calc(100vh-4rem)] lg:translate-x-0 ${
             sidebarOpen ? 'translate-x-0' : '-translate-x-full'
           }`}
         >
@@ -1624,32 +2103,56 @@ const res = await fetch(url, {
             {allowedNavItems.map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
+              const pendingCount = item.id === 'applications'
+                ? pendingRequestCounts.applications
+                : item.id === 'demo-class-requests'
+                  ? pendingRequestCounts.demoClassRequests
+                  : item.id === 'callbacks'
+                    ? pendingRequestCounts.callbacks
+                    : 0;
+              const accessibleLabel = pendingCount > 0
+                ? `${item.label}, ${pendingCount} pending`
+                : item.label;
               return (
                 <button
                   key={item.id}
-                  title={item.label}
+                  title={accessibleLabel}
+                  aria-label={accessibleLabel}
                   onClick={() => {
-                    setActiveTab(item.id);
-                    setSidebarOpen(false);
-                    setActionMessage(null);
+                    navigateToAdminSection(item.id);
                   }}
-                  className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                  className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 ${
                     isActive
-                      ? 'bg-orange-50 text-orange-600 font-bold border-l-4 border-orange-600'
+                      ? 'bg-blue-50 text-blue-700 font-bold border-l-4 border-blue-600'
                       : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
                   }`}
                 >
-                  <Icon className={`w-4 h-4 ${isActive ? 'text-orange-600' : 'text-slate-400'}`} />
-                  <span className="truncate">{item.label}</span>
+                  <Icon className={`w-4 h-4 ${isActive ? 'text-blue-600' : 'text-slate-400'}`} />
+                  <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                  {pendingCount > 0 && (
+                    <span
+                      aria-hidden="true"
+                      className={`admin-notification-badge ml-auto inline-flex h-7 min-w-7 shrink-0 items-center justify-center rounded-full border px-2 text-[11px] font-bold leading-none tabular-nums tracking-normal text-white shadow-sm transition-colors ${
+                        pendingCount <= 3
+                          ? 'border-emerald-300/40 bg-emerald-600 shadow-[0_2px_7px_rgba(5,150,105,0.28)]'
+                          : pendingCount <= 10
+                            ? 'border-amber-300/40 bg-amber-500 shadow-[0_2px_7px_rgba(245,158,11,0.3)]'
+                            : 'border-rose-300/40 bg-rose-600 shadow-[0_2px_7px_rgba(225,29,72,0.3)]'
+                      }`}
+                    >
+                      {pendingCount > 99 ? '99+' : pendingCount}
+                    </span>
+                  )}
                 </button>
               );
             })}
           </div>
 
-          <div className="p-4 border-t border-slate-100 bg-slate-50/50">
+          <div className="p-4 border-t border-slate-100 bg-slate-50">
             <button
+              type="button"
               onClick={() => setCurrentPage('home')}
-              className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-orange-600 py-2 border border-slate-200 rounded-lg bg-white"
+              className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-blue-700 py-2.5 border border-slate-200 rounded-lg bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"
             >
               <ExternalLink className="w-3.5 h-3.5" />
               <span>View Academy Site</span>
@@ -1678,152 +2181,239 @@ const res = await fetch(url, {
 
           {/* TAB 1: DASHBOARD OVERVIEW */}
           {activeTab === 'dashboard' && (
-            <div className="space-y-8">
-              <div>
-                <h1 className="text-2xl font-extrabold text-slate-950">Academy Dashboard</h1>
-                <p className="text-xs text-slate-500 mt-1">
-                  Live operational overview for Uptrend’s English Academy, Davangere.
+            <div className="mx-auto max-w-[1600px] space-y-6">
+              <div className="dashboard-welcome flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p className="mb-1 text-[11px] font-bold uppercase tracking-[.16em] text-orange-700">Dashboard overview</p>
+                  <h1 className="text-2xl font-extrabold tracking-tight text-[#0B1F4D] sm:text-3xl">Welcome back, {currentAdmin.full_name}</h1>
+                  <p className="mt-1 text-sm text-slate-500">Live operational overview for Uptrend’s English Academy.</p>
+                </div>
+                <p className="relative z-10 rounded-xl border border-emerald-100 bg-white/80 px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm">
+                  {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
                 </p>
               </div>
 
-              {/* Stats Cards Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-                <div
-                  onClick={() => {
-                    setActiveTab('applications');
-                    setAppFilterStatus('All');
-                  }}
-                  className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs hover:shadow-md transition-all cursor-pointer"
-                >
-                  <div className="flex items-center justify-between text-slate-500 text-xs font-bold uppercase">
-                    <span>Total Applications</span>
-                    <Users className="w-4 h-4 text-orange-500" />
-                  </div>
-                  <p className="text-3xl font-black text-slate-900 mt-3">{applications.length}</p>
-                  <p className="text-[11px] text-slate-400 mt-1">Direct student submissions</p>
-                </div>
+              <section aria-label="Academy statistics" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+                {[
+                  { label: 'Total Applications', value: applications.length, detail: 'All student submissions', icon: Users, tone: 'blue', target: 'applications' },
+                  { label: 'Pending Applications', value: applications.filter((app) => app.status === 'Pending').length, detail: 'Awaiting review', icon: ClockIcon, tone: 'amber', target: 'applications', filter: 'Pending' as const },
+                  { label: 'Demo Class Requests', value: demoRequests.length, detail: 'Separate demo enquiries', icon: GraduationCap, tone: 'violet', target: 'demo-class-requests' },
+                  { label: 'Callback Requests', value: callbacks.length, detail: 'Requests for a call', icon: PhoneCall, tone: 'teal', target: 'callbacks' },
+                  { label: 'Active Programs', value: programs.filter((program) => program.is_published).length, detail: 'Currently published', icon: BookOpen, tone: 'green', target: 'programs' },
+                ].map((stat) => {
+                  const Icon = stat.icon;
+                  const canNavigate = allowedNavItems.some((item) => item.id === stat.target);
+                  const iconTone: Record<string, string> = {
+                    blue: 'bg-blue-50 text-blue-600',
+                    amber: 'bg-amber-50 text-amber-600',
+                    violet: 'bg-violet-50 text-violet-600',
+                    teal: 'bg-teal-50 text-teal-600',
+                    orange: 'bg-orange-50 text-orange-600',
+                    green: 'bg-emerald-50 text-emerald-600',
+                  };
+                  const cardContent = (
+                    <>
+                      <div className="flex items-start justify-between gap-3 text-left">
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold leading-5 text-slate-500">{stat.label}</p>
+                          <p className="mt-2 text-3xl font-extrabold tracking-tight text-slate-950">{loading ? '—' : stat.value}</p>
+                        </div>
+                        <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${iconTone[stat.tone]}`}>
+                          <Icon className="h-5 w-5" aria-hidden="true" />
+                        </span>
+                      </div>
+                      <p className="mt-3 text-left text-[11px] text-slate-400">{stat.detail}</p>
+                    </>
+                  );
+                  return (
+                    canNavigate ? (
+                      <button
+                        key={stat.label}
+                        type="button"
+                        data-tone={stat.tone}
+                        onClick={() => {
+                          if (stat.target === 'applications') {
+                            setAppFilterStatus(stat.filter || 'All');
+                          }
+                          navigateToAdminSection(stat.target);
+                        }}
+                        aria-label={`View ${stat.label} results in Admin Portal`}
+                        className="dashboard-stat group min-w-0 rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-blue-200 hover:shadow-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 motion-reduce:transform-none motion-reduce:transition-none"
+                      >
+                        {cardContent}
+                        <span className="mt-3 inline-flex items-center gap-1 text-[11px] font-bold text-blue-700">
+                          View results in Admin Portal
+                          <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none" aria-hidden="true" />
+                        </span>
+                      </button>
+                    ) : (
+                      <article key={stat.label} data-tone={stat.tone} aria-label={`${stat.label}: ${stat.value}`} className="dashboard-stat min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                        {cardContent}
+                      </article>
+                    )
+                  );
+                })}
+              </section>
 
-                <div
-                  onClick={() => {
-                    setActiveTab('applications');
-                    setAppFilterStatus('Pending');
-                  }}
-                  className="bg-white p-5 rounded-2xl border border-amber-200 shadow-xs hover:shadow-md transition-all cursor-pointer border-t-4 border-t-amber-500"
-                >
-                  <div className="flex items-center justify-between text-amber-700 text-xs font-bold uppercase">
-                    <span>Pending Approval</span>
-                    <ClockIcon className="w-4 h-4 text-amber-600" />
+              <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(300px,.8fr)]">
+                <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+                  <div className="mb-5 flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-sm font-bold text-slate-900">Application trends</h2>
+                      <p className="mt-1 text-xs text-slate-500">Submissions received over the last six months</p>
+                    </div>
+                    <span className="grid h-9 w-9 place-items-center rounded-xl bg-orange-50 text-orange-700">
+                      <TrendingUp className="h-4 w-4" aria-hidden="true" />
+                    </span>
                   </div>
-                  <p className="text-3xl font-black text-amber-600 mt-3">
-                    {applications.filter((a) => a.status === 'Pending').length}
-                  </p>
-                  <p className="text-[11px] text-amber-700 mt-1">Require staff action</p>
-                </div>
+                  {applications.length ? (
+                    <div className="dashboard-chart min-w-0">
+                      <svg viewBox="0 0 600 190" role="img" aria-label="Monthly application trend for the last six months" className="h-44 w-full overflow-visible">
+                        <defs>
+                          <linearGradient id="application-trend-fill" x1="0" x2="0" y1="0" y2="1">
+                            <stop offset="0%" stopColor="#EA580C" stopOpacity=".22" />
+                            <stop offset="100%" stopColor="#059669" stopOpacity=".02" />
+                          </linearGradient>
+                        </defs>
+                        {[25, 67, 109, 151].map((y) => <line key={y} x1="0" x2="600" y1={y} y2={y} stroke="#e2e8f0" strokeDasharray="4 5" />)}
+                        <polygon points={`${trendPoints} 600,151 0,151`} fill="url(#application-trend-fill)" />
+                        <polyline points={trendPoints} fill="none" stroke="#EA580C" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+                        {applicationTrend.map((month, index) => {
+                          const x = index * 120;
+                          const y = 150 - (month.count / maxTrendCount) * 125;
+                          return <g key={`${month.label}-${index}`}><circle cx={x} cy={y} r="5" fill="#fff" stroke="#059669" strokeWidth="3" /><text x={x} y="180" textAnchor={index === 0 ? 'start' : index === 5 ? 'end' : 'middle'} fill="#64748b" fontSize="12">{month.label}</text></g>;
+                        })}
+                      </svg>
+                    </div>
+                  ) : (
+                    <p className="grid h-44 place-items-center text-center text-sm text-slate-400">
+                      {loading ? 'Loading application trends…' : 'No application data available yet.'}
+                    </p>
+                  )}
+                </section>
 
-                <div
-                  onClick={() => {
-                    setActiveTab('applications');
-                    setAppFilterStatus('Accepted');
-                  }}
-                  className="bg-white p-5 rounded-2xl border border-emerald-200 shadow-xs hover:shadow-md transition-all cursor-pointer border-t-4 border-t-emerald-500"
-                >
-                  <div className="flex items-center justify-between text-emerald-700 text-xs font-bold uppercase">
-                    <span>Accepted Applications</span>
-                    <CheckCircle className="w-4 h-4 text-emerald-600" />
+                <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+                  <div className="mb-5 flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-sm font-bold text-slate-900">Application status</h2>
+                      <p className="mt-1 text-xs text-slate-500">Current application breakdown</p>
+                    </div>
+                    <span className="grid h-9 w-9 place-items-center rounded-xl bg-violet-50 text-violet-700">
+                      <FileCheck className="h-4 w-4" aria-hidden="true" />
+                    </span>
                   </div>
-                  <p className="text-3xl font-black text-emerald-600 mt-3">
-                    {applications.filter((a) => a.status === 'Accepted').length}
-                  </p>
-                  <p className="text-[11px] text-emerald-700 mt-1">Official PDF sent</p>
-                </div>
-
-                <div
-                  onClick={() => setActiveTab('callbacks')}
-                  className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs hover:shadow-md transition-all cursor-pointer"
-                >
-                  <div className="flex items-center justify-between text-slate-500 text-xs font-bold uppercase">
-                    <span>Callback Requests</span>
-                    <PhoneCall className="w-4 h-4 text-teal-500" />
-                  </div>
-                  <p className="text-3xl font-black text-slate-900 mt-3">{callbacks.length}</p>
-                  <p className="text-[11px] text-slate-400 mt-1">Prospective leads</p>
-                </div>
+                  {applications.length ? (
+                    <div className="space-y-5" role="img" aria-label={`${applications.filter((app) => app.status === 'Pending').length} pending and ${applications.filter((app) => app.status === 'Accepted').length} accepted applications`}>
+                      {(['Pending', 'Accepted'] as const).map((status) => {
+                        const count = applications.filter((app) => app.status === status).length;
+                        const percentage = (count / applications.length) * 100;
+                        return (
+                          <div key={status}>
+                            <div className="mb-2 flex items-center justify-between text-xs">
+                              <span className="font-semibold text-slate-600">{status}</span>
+                              <span className="font-bold text-slate-900">{count} <span className="font-medium text-slate-400">({Math.round(percentage)}%)</span></span>
+                            </div>
+                            <div className="h-2.5 overflow-hidden rounded-full bg-slate-100">
+                              <div className={`h-full rounded-full ${status === 'Pending' ? 'bg-orange-500' : 'bg-emerald-600'}`} style={{ width: `${percentage}%` }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="grid h-32 place-items-center text-center text-sm text-slate-400">
+                      {loading ? 'Loading application statuses…' : 'No application status data available.'}
+                    </p>
+                  )}
+                </section>
               </div>
 
-              {/* Quick Summary Row */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Recent Applications */}
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-bold text-slate-900 text-sm">Recent Student Applications</h3>
-                    <button
-                      onClick={() => setActiveTab('applications')}
-                      className="text-xs font-bold text-orange-600 hover:underline"
-                    >
-                      View All →
-                    </button>
+              <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-6">
+                  <div>
+                    <h2 className="text-sm font-bold text-slate-900">Recent applications</h2>
+                    <p className="mt-1 text-xs text-slate-500">The latest student admissions activity</p>
                   </div>
-                  {applications.length > 0 ? (
-                    <div className="divide-y divide-slate-100">
-                      {applications.slice(0, 5).map((app) => (
-                        <div key={app.id} className="py-3 flex items-center justify-between text-xs">
-                          <div>
-                            <p className="font-bold text-slate-900">{app.student_name}</p>
-                            <p className="text-[11px] text-slate-500">
-                              {app.program_name} • Ref: {app.application_reference}
-                            </p>
-                          </div>
-                          <span
-                            className={`px-2 py-0.5 rounded text-[11px] font-bold ${
-                              app.status === 'Accepted'
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-amber-100 text-amber-800'
-                            }`}
-                          >
-                            {app.status}
-                          </span>
+                  <button type="button" onClick={() => navigateToAdminSection('applications')} className="rounded-lg px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+                    View all applications
+                  </button>
+                </div>
+                {recentApplications.length ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[640px] text-left text-xs">
+                      <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                        <tr><th className="px-5 py-3 font-semibold sm:px-6">Applicant</th><th className="px-5 py-3 font-semibold">Program</th><th className="px-5 py-3 font-semibold">Submitted</th><th className="px-5 py-3 font-semibold">Status</th></tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {recentApplications.map((application) => (
+                          <tr key={application.id} className="text-slate-700">
+                            <td className="px-5 py-3.5 sm:px-6"><p className="font-semibold text-slate-900">{application.student_name}</p><p className="mt-1 text-[11px] text-slate-500">{application.application_reference}</p></td>
+                            <td className="max-w-[220px] truncate px-5 py-3.5">{application.program_name}</td>
+                            <td className="whitespace-nowrap px-5 py-3.5">{new Date(application.created_at).toLocaleDateString('en-IN')}</td>
+                            <td className="px-5 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${application.status === 'Accepted' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{application.status}</span></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : <p className="px-5 py-8 text-center text-sm text-slate-400">{loading ? 'Loading applications…' : 'No student applications submitted yet.'}</p>}
+              </section>
+
+              <div className="grid min-w-0 gap-5 xl:grid-cols-2">
+                <section className="min-w-0 rounded-2xl border border-slate-200 bg-white shadow-sm">
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-5 py-4">
+                    <div><h2 className="text-sm font-bold text-slate-900">Recent demo class requests</h2><p className="mt-1 text-xs text-slate-500">Requests managed separately from admissions</p></div>
+                    <button type="button" onClick={() => navigateToAdminSection('demo-class-requests')} className="shrink-0 rounded-lg px-2.5 py-2 text-xs font-bold text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">View all</button>
+                  </div>
+                  {recentDemoRequests.length ? (
+                    <div className="divide-y divide-slate-100 px-5">
+                      {recentDemoRequests.map((request) => (
+                        <div key={request.id} className="flex min-w-0 items-center justify-between gap-3 py-3">
+                          <div className="min-w-0"><p className="truncate text-xs font-semibold text-slate-900">{request.full_name}</p><p className="mt-1 truncate text-[11px] text-slate-500">{request.city} · {new Date(request.created_at).toLocaleDateString('en-IN')}</p></div>
+                          <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-bold text-blue-700">{request.status}</span>
                         </div>
                       ))}
                     </div>
-                  ) : (
-                    <p className="text-xs text-slate-400 py-6 text-center">No student applications submitted yet.</p>
-                  )}
-                </div>
+                  ) : <p className="px-5 py-8 text-center text-sm text-slate-400">{loading ? 'Loading demo requests…' : 'No demo class requests yet.'}</p>}
+                </section>
 
-                {/* System & Integrations Status */}
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
-                  <h3 className="font-bold text-slate-900 text-sm">Integration Status & Connectivity</h3>
-                  <div className="space-y-3 text-xs">
-                    <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
-                      <span className="font-semibold text-slate-700">Database & Persistence</span>
-                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${integrationStatusClass(systemStatus?.supabase)}`}>
-                        {integrationStatusLabel(systemStatus?.supabase, 'Supabase Not Configured')}
-                      </span>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
-                      <span className="font-semibold text-slate-700">Resend Transactional Email</span>
-                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${integrationStatusClass(systemStatus?.resend)}`}>
-                        {integrationStatusLabel(systemStatus?.resend, 'API key missing')}
-                      </span>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
-                      <span className="font-semibold text-slate-700">Cloudflare R2 Storage</span>
-                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${integrationStatusClass(systemStatus?.r2_storage)}`}>
-                        {integrationStatusLabel(systemStatus?.r2_storage, 'R2 Not Configured')}
-                      </span>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
-                      <span className="font-semibold text-slate-700">Official Fee Structure PDF</span>
-                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${integrationStatusClass(systemStatus?.official_pdf)}`}>
-                        {systemStatus?.official_pdf?.available ? 'PDF Ready' : integrationStatusLabel(systemStatus?.official_pdf, 'Configure PDF')}
-                      </span>
-                    </div>
+                <section className="min-w-0 rounded-2xl border border-slate-200 bg-white shadow-sm">
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-5 py-4">
+                    <div><h2 className="text-sm font-bold text-slate-900">Recent callback requests</h2><p className="mt-1 text-xs text-slate-500">Prospective learners requesting a call</p></div>
+                    <button type="button" onClick={() => navigateToAdminSection('callbacks')} className="shrink-0 rounded-lg px-2.5 py-2 text-xs font-bold text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">View all</button>
                   </div>
-                </div>
+                  {recentCallbacks.length ? (
+                    <div className="divide-y divide-slate-100 px-5">
+                      {recentCallbacks.map((callback) => (
+                        <div key={callback.id} className="flex min-w-0 items-center justify-between gap-3 py-3">
+                          <div className="min-w-0"><p className="truncate text-xs font-semibold text-slate-900">{callback.full_name}</p><p className="mt-1 truncate text-[11px] text-slate-500">{callback.program_name} · {new Date(callback.created_at).toLocaleDateString('en-IN')}</p></div>
+                          <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold ${callback.status === 'Resolved' ? 'bg-emerald-50 text-emerald-700' : callback.status === 'Contacted' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'}`}>{callback.status}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : <p className="px-5 py-8 text-center text-sm text-slate-400">{loading ? 'Loading callback requests…' : 'No callback requests yet.'}</p>}
+                </section>
               </div>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+                <div className="mb-4"><h2 className="text-sm font-bold text-slate-900">Quick actions</h2><p className="mt-1 text-xs text-slate-500">Jump to sections available for your role</p></div>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+                  {allowedNavItems.filter((item) => item.id !== 'dashboard').slice(0, 10).map((item) => {
+                    const Icon = item.icon;
+                    return <button type="button" key={item.id} onClick={() => navigateToAdminSection(item.id)} className="flex min-h-12 min-w-0 items-center gap-2 rounded-xl border border-slate-200 px-3 py-2.5 text-left text-xs font-semibold text-slate-700 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><Icon className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="truncate">{item.label}</span></button>;
+                  })}
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+                <h2 className="mb-4 text-sm font-bold text-slate-900">Integration status & connectivity</h2>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs"><span className="font-semibold text-slate-700">Database & persistence</span><span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${integrationStatusClass(systemStatus?.supabase)}`}>{integrationStatusLabel(systemStatus?.supabase, 'Supabase Not Configured')}</span></div>
+                  <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs"><span className="font-semibold text-slate-700">Resend transactional email</span><span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${integrationStatusClass(systemStatus?.resend)}`}>{integrationStatusLabel(systemStatus?.resend, 'API key missing')}</span></div>
+                  <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs"><span className="font-semibold text-slate-700">Cloudflare R2 storage</span><span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${integrationStatusClass(systemStatus?.r2_storage)}`}>{integrationStatusLabel(systemStatus?.r2_storage, 'R2 Not Configured')}</span></div>
+                  <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs"><span className="font-semibold text-slate-700">Official fee structure PDF</span><span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${integrationStatusClass(systemStatus?.official_pdf)}`}>{systemStatus?.official_pdf?.available ? 'PDF Ready' : integrationStatusLabel(systemStatus?.official_pdf, 'Configure PDF')}</span></div>
+                </div>
+              </section>
             </div>
           )}
 
@@ -1858,6 +2448,19 @@ const res = await fetch(url, {
                 </div>
               </div>
 
+              <section
+                aria-label="Accepted application total"
+                className="flex max-w-sm items-center justify-between gap-4 rounded-2xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-white p-4 shadow-sm"
+              >
+                <div>
+                  <p className="text-xs font-bold text-emerald-800">Total Accepted Applications</p>
+                  <p className="mt-1 text-[11px] text-slate-500">Applications approved by the academy</p>
+                </div>
+                <span className="grid h-12 min-w-12 place-items-center rounded-xl bg-emerald-600 px-3 text-xl font-extrabold tabular-nums text-white shadow-sm">
+                  {applications.filter((application) => application.status === 'Accepted').length}
+                </span>
+              </section>
+
               {/* Search Bar */}
               <div className="relative max-w-md">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
@@ -1870,363 +2473,353 @@ const res = await fetch(url, {
                 />
               </div>
 
-              {/* Applications Table */}
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-                <div className="overflow-x-auto overscroll-x-contain">
-                  <table className="w-full min-w-[1050px] text-left text-xs">
-                    <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[11px] border-b border-slate-200">
-                      <tr>
-                        <th className="px-5 py-3.5">Reference</th>
-                        <th className="px-5 py-3.5">Student Details</th>
-                        <th className="px-5 py-3.5">Program</th>
-                        <th className="px-5 py-3.5">Photo</th>
-                        <th className="px-5 py-3.5">Status</th>
-                        <th className="px-5 py-3.5 whitespace-nowrap">Submitted</th>
-                        <th className="px-5 py-3.5 text-right whitespace-nowrap">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 text-slate-700">
-                      {filteredApplications.length > 0 ? (
-                        filteredApplications.map((app) => (
-                          <tr key={app.id} className="hover:bg-slate-50/80 transition-colors">
-                            <td className="px-5 py-4 font-mono font-bold text-orange-600 whitespace-nowrap">
-                              {app.application_reference}
-                            </td>
-                            <td className="px-5 py-4">
-                              <div className="font-bold text-slate-900">{app.student_name}</div>
-                              <div className="text-[11px] text-slate-500">{app.email}</div>
-                              <div className="text-[11px] text-slate-500">{app.mobile}</div>
-                            </td>
-                            <td className="px-5 py-4 font-medium text-slate-800">
-                              {app.program_name}
-                            </td>
-                            <td className="px-5 py-4">
-                              {app.photo_data_url ? (
-                                <button
-                                  onClick={() => setAppPhotoModal(app.photo_data_url!)}
-                                  className="w-10 h-12 rounded overflow-hidden border border-slate-300 hover:border-orange-500 transition-colors cursor-pointer"
-                                  title="Click to view passport photograph"
-                                >
-                                  <img
-                                    src={app.photo_data_url}
-                                    alt="Student"
-                                    className="w-full h-full object-cover"
-                                  />
-                                </button>
-                              ) : (
-                                <span className="text-[10px] text-slate-400 italic">No photo</span>
-                              )}
-                            </td>
-                            <td className="px-5 py-4">
-                              <span
-                                className={`inline-flex items-center whitespace-nowrap w-max px-2.5 py-1 rounded-full text-[10px] leading-none font-bold ${
-                                  app.status === 'Accepted'
-                                    ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                                    : 'bg-amber-100 text-amber-800 border border-amber-200'
-                                }`}
-                              >
-                                {app.status}
-                              </span>
-                            </td>
-                            <td className="px-5 py-4 text-slate-500 text-[11px] whitespace-nowrap">
+              <div className="space-y-4">
+                {filteredApplications.length > 0 ? (
+                  filteredApplications.map((app) => (
+                    <article
+                      key={app.id}
+                      className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs transition-shadow hover:shadow-sm"
+                    >
+                      <div className="flex min-w-0 flex-col gap-3 border-b border-slate-100 bg-slate-50/70 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+                        <div className="min-w-0">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Application reference</p>
+                          <p className="mt-1 break-all font-mono text-sm font-bold text-orange-700">{app.application_reference}</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <span
+                            className={`inline-flex w-max items-center rounded-full border px-3 py-1 text-xs font-bold ${
+                              app.status === 'Accepted'
+                                ? 'border-emerald-200 bg-emerald-100 text-emerald-800'
+                                : 'border-amber-200 bg-amber-100 text-amber-800'
+                            }`}
+                          >
+                            {app.status}
+                          </span>
+                          <p className="text-xs text-slate-500">
+                            Submitted{' '}
+                            <span className="font-semibold text-slate-700">
                               {new Date(app.created_at).toLocaleDateString('en-IN', {
                                 day: 'numeric',
                                 month: 'short',
                                 year: 'numeric',
                               })}
-                            </td>
-                            <td className="px-5 py-4">
-                              <div className="grid grid-cols-2 items-center gap-2 min-w-[220px]">
-                              <div className="col-span-1 flex">
-                              <button
-                                type="button"
-                                disabled={loading}
-                                onClick={() => { setApplicationJoiningInfo({ ...DEFAULT_JOINING_INFORMATION }); setSelectedApp(app); }}
-                                className="w-full whitespace-nowrap px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold cursor-pointer disabled:opacity-50"
-                              >
-                                Review
-                              </button>
-                              </div>
-                              <div className="col-span-1 flex">
-                              <button
-                                type="button"
-                                disabled={loading || paymentLoading}
-                                onClick={() => void loadApplicationPaymentData(app)}
-                                className="w-full whitespace-nowrap px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold cursor-pointer disabled:opacity-50"
-                              >
-                                Payment
-                              </button>
-                              </div>
-                              {app.status === 'Pending' && (
-                                <div className="col-span-1 flex">
-                                <button
-                                  type="button"
-                                  disabled={loading}
-                                  onClick={() => { setApplicationJoiningInfo({ ...DEFAULT_JOINING_INFORMATION }); setSelectedApp(app); }}
-                                  className="w-full whitespace-nowrap px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer shadow-xs disabled:opacity-50"
-                                  title="Open review and complete joining information before approval"
-                                >
-                                  Review & Approve
-                                </button>
-                                </div>
-                              )}
-                              {isSuperAdmin && (
-                                <div className={`${app.status === 'Pending' ? 'col-span-1' : 'col-span-2'} flex justify-end`}>
-                                <button
-                                  type="button"
-                                  disabled={loading}
-                                  onClick={() => handleDeleteApplication(app.id)}
-                                  className="px-2 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold cursor-pointer disabled:opacity-50"
-                                  title="Permanently Delete Application (Super Admin only)"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5 inline" />
-                                </button>
-                                </div>
-                              )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan={7} className="text-center py-12 text-slate-400">
-                            {loading ? 'Loading applications...' : 'No applications found matching your criteria.'}
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                            </span>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="grid min-w-0 gap-5 p-4 sm:p-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_auto] lg:items-center">
+                        <div className="flex min-w-0 items-start gap-3">
+                          {app.photo_data_url ? (
+                            <button
+                              type="button"
+                              onClick={() => setAppPhotoModal(app.photo_data_url!)}
+                              className="h-16 w-14 shrink-0 overflow-hidden rounded-lg border border-slate-200 transition-colors hover:border-orange-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-600"
+                              title={`View ${app.student_name}'s photo`}
+                              aria-label={`View ${app.student_name}'s photo`}
+                            >
+                              <img src={app.photo_data_url} alt="" className="h-full w-full object-cover" />
+                            </button>
+                          ) : (
+                            <div className="flex h-16 w-14 shrink-0 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-center text-[10px] text-slate-400">
+                              No photo
+                            </div>
+                          )}
+                          <div className="min-w-0 space-y-1">
+                            <h2 className="break-words text-sm font-bold text-slate-950">{app.student_name}</h2>
+                            <a href={`mailto:${app.email}`} className="block break-all text-xs text-blue-700 hover:underline">
+                              {app.email}
+                            </a>
+                            <a href={`tel:${app.mobile.replace(/[^\d+]/g, '')}`} className="block break-words text-xs text-slate-600 hover:underline">
+                              {app.mobile}
+                            </a>
+                          </div>
+                        </div>
+
+                        <div className="min-w-0 space-y-1">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Program</p>
+                          <p className="break-words text-sm font-semibold text-slate-800">{app.program_name}</p>
+                          <p className="text-xs text-slate-600">
+                            <span className="font-semibold text-slate-700">Qualification:</span> {app.qualification}
+                          </p>
+                        </div>
+
+                        <div className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-2 lg:w-56">
+                          <button
+                            type="button"
+                            disabled={loading}
+                            onClick={() => { setApplicationJoiningInfo({ ...DEFAULT_JOINING_INFORMATION }); setSelectedApp(app); }}
+                            className="min-h-10 rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50"
+                          >
+                            Review
+                          </button>
+                          <button
+                            type="button"
+                            disabled={loading || paymentLoading}
+                            onClick={() => void loadApplicationPaymentData(app)}
+                            className="min-h-10 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+                          >
+                            Payment
+                          </button>
+                          {app.status === 'Pending' && (
+                            <button
+                              type="button"
+                              disabled={loading}
+                              onClick={() => { setApplicationJoiningInfo({ ...DEFAULT_JOINING_INFORMATION }); setSelectedApp(app); }}
+                              className="col-span-2 min-h-10 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white shadow-xs transition-colors hover:bg-emerald-700 disabled:opacity-50"
+                              title="Open review and complete joining information before approval"
+                            >
+                              Review &amp; Approve
+                            </button>
+                          )}
+                          {isSuperAdmin && (
+                            <button
+                              type="button"
+                              disabled={loading}
+                              onClick={() => handleDeleteApplication(app.id)}
+                              className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:opacity-50"
+                              title="Permanently Delete Application (Super Admin only)"
+                            >
+                              <Trash2 className="h-4 w-4" aria-hidden="true" />
+                              Delete application
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-12 text-center text-sm text-slate-500">
+                    {loading ? 'Loading applications...' : 'No applications found matching your criteria.'}
+                  </div>
+                )}
               </div>
             </div>
+          )}
+
+          {activeTab === 'demo-class-requests' && (
+            <AdminDemoClassRequests
+              currentAdmin={currentAdmin}
+              onRequestsChanged={refreshRequestData}
+              onSessionExpired={onSessionExpired}
+            />
           )}
 
           {/* TAB 3: CALLBACK REQUESTS */}
           {activeTab === 'callbacks' && (
-            <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h1 className="text-2xl font-extrabold text-slate-950">Callback Requests</h1>
-                  <p className="text-xs text-slate-500 mt-1">Track callback requests using the existing New, Contacted, and Resolved statuses.</p>
+            <div className="mx-auto max-w-[1600px] space-y-6">
+              <header className="flex flex-col gap-4 rounded-2xl bg-gradient-to-br from-[#0B1F4D] via-[#123365] to-[#1B4778] p-5 text-white shadow-lg sm:flex-row sm:items-center sm:justify-between sm:p-7">
+                <div className="flex items-start gap-3">
+                  <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-white/10 text-orange-300 ring-1 ring-white/15">
+                    <PhoneCall className="h-6 w-6" aria-hidden="true" />
+                  </span>
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-orange-200">Learner follow-up</p>
+                    <h1 className="mt-1 text-xl font-extrabold sm:text-2xl">Callback Requests</h1>
+                    <p className="mt-1 max-w-xl text-xs leading-relaxed text-blue-100 sm:text-sm">
+                      Keep track of prospective learners and their preferred time to hear from the academy.
+                    </p>
+                  </div>
                 </div>
-                <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold disabled:opacity-60">
+                <button
+                  type="button"
+                  onClick={fetchAllData}
+                  disabled={loading}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 self-start rounded-xl border border-white/20 bg-white/10 px-4 py-2.5 text-xs font-bold text-white transition-colors hover:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-300 disabled:opacity-60 sm:self-auto"
+                >
+                  <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
                   Refresh Callbacks
                 </button>
-              </div>
-              <div className="flex flex-col sm:flex-row gap-3">
-                <label className="relative flex-1">
-                  <Search aria-hidden="true" className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                  <input aria-label="Search callback requests" value={callbackSearch} onChange={(event) => setCallbackSearch(event.target.value)} placeholder="Search name, phone, email, program, or message" className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-lg text-xs" />
-                </label>
-                <select aria-label="Filter callback requests by status" value={callbackFilterStatus} onChange={(event) => setCallbackFilterStatus(event.target.value as typeof callbackFilterStatus)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs">
-                  {(['All', 'New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
-                </select>
-              </div>
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-                <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[11px] border-b border-slate-200">
-                    <tr>
-                      <th className="px-5 py-3.5">Name</th>
-                      <th className="px-5 py-3.5">Mobile</th>
-                      <th className="px-5 py-3.5">Program</th>
-                      <th className="px-5 py-3.5">Preferred Time</th>
-                      <th className="px-5 py-3.5">Message</th>
-                      <th className="px-5 py-3.5">Received</th>
-                      <th className="px-5 py-3.5">Status</th>
-                      <th className="px-5 py-3.5">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 text-slate-700">
-                    {filteredCallbacks.map((cb) => (
-                      <tr key={cb.id} className="hover:bg-slate-50">
-                        <td className="px-5 py-4 font-bold text-slate-900">{cb.full_name}</td>
-                        <td className="px-5 py-4 font-medium text-emerald-700">{cb.mobile}</td>
-                        <td className="px-5 py-4">{cb.program_name}</td>
-                        <td className="px-5 py-4">
-                          <span className="px-2 py-0.5 rounded bg-orange-50 text-orange-700 font-semibold border border-orange-200">
-                            {cb.preferred_contact_time}
-                          </span>
-                        </td>
-                        <td className="px-5 py-4 text-slate-500 max-w-xs truncate">
-                          {cb.message || '—'}
-                        </td>
-                        <td className="px-5 py-4 text-slate-400 text-[11px]">
-                          {new Date(cb.created_at).toLocaleDateString('en-IN')}
-                        </td>
-                        <td className="px-5 py-4">
-                          <select aria-label={`Status for ${cb.full_name}`} value={cb.status} disabled={loading} onChange={(event) => handleCallbackStatusChange(cb, event.target.value as CallbackRequest['status'])} className="px-2 py-1 border border-slate-200 rounded-lg bg-white">
-                            {(['New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
-                          </select>
-                        </td>
-                        <td className="px-5 py-4">
-                          <button type="button" disabled={loading} onClick={() => setSelectedCallback(cb)} className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold disabled:opacity-60">View</button>
-                        </td>
-                      </tr>
-                    ))}
-                    {!filteredCallbacks.length && <tr><td colSpan={8} className="text-center py-12 text-slate-400">{loading ? 'Loading callback requests...' : callbacks.length ? 'No callback requests match your filters.' : 'No callback requests yet.'}</td></tr>}
-                  </tbody>
-                </table>
-                </div>
-              </div>
-            </div>
-          )}
+              </header>
 
-          {/* TAB 4: CONTACT ENQUIRIES */}
-          {activeTab === 'contacts' && (
-            <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h1 className="text-2xl font-extrabold text-slate-950">Contact Enquiries</h1>
-                  <p className="text-xs text-slate-500 mt-1">Track enquiries using the existing New, Replied, and Archived statuses.</p>
-                </div>
-                <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold disabled:opacity-60">
-                  Refresh Enquiries
-                </button>
-              </div>
-              <div className="flex flex-col sm:flex-row gap-3">
-                <label className="relative flex-1">
-                  <Search aria-hidden="true" className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                  <input aria-label="Search contact enquiries" value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder="Search sender, email, subject, or message" className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-lg text-xs" />
-                </label>
-                <select aria-label="Filter contact enquiries by status" value={contactFilterStatus} onChange={(event) => setContactFilterStatus(event.target.value as typeof contactFilterStatus)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs">
-                  {(['All', 'New', 'Replied', 'Archived'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
-                </select>
-              </div>
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-                <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[11px] border-b border-slate-200">
-                    <tr>
-                      <th className="px-5 py-3.5">Sender</th>
-                      <th className="px-5 py-3.5">Subject</th>
-                      <th className="px-5 py-3.5">Message</th>
-                      <th className="px-5 py-3.5">Date</th>
-                      <th className="px-5 py-3.5">Status</th>
-                      <th className="px-5 py-3.5">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 text-slate-700">
-                    {filteredContacts.map((cnt) => (
-                      <tr key={cnt.id} className="hover:bg-slate-50">
-                        <td className="px-5 py-4">
-                          <div className="font-bold text-slate-900">{cnt.full_name}</div>
-                          <div className="text-[11px] text-slate-500">{cnt.email}</div>
-                        </td>
-                        <td className="px-5 py-4 font-semibold text-slate-800">{cnt.subject}</td>
-                        <td className="px-5 py-4 text-slate-600 max-w-md leading-relaxed">
-                          {cnt.message}
-                        </td>
-                        <td className="px-5 py-4 text-slate-400 text-[11px]">
-                          {new Date(cnt.created_at).toLocaleDateString('en-IN')}
-                        </td>
-                        <td className="px-5 py-4">
-                          <select aria-label={`Status for ${cnt.full_name}`} value={cnt.status} disabled={loading} onChange={(event) => handleContactStatusChange(cnt, event.target.value as ContactEnquiry['status'])} className="px-2 py-1 border border-slate-200 rounded-lg bg-white">
-                            {(['New', 'Replied', 'Archived'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
-                          </select>
-                        </td>
-                        <td className="px-5 py-4">
-                          <button type="button" disabled={loading} onClick={() => setSelectedContact(cnt)} className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold disabled:opacity-60">View</button>
-                        </td>
-                      </tr>
-                    ))}
-                    {!filteredContacts.length && <tr><td colSpan={6} className="text-center py-12 text-slate-400">{loading ? 'Loading contact enquiries...' : contacts.length ? 'No contact enquiries match your filters.' : 'No contact enquiries yet.'}</td></tr>}
-                  </tbody>
-                </table>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'reviews' && (
-            <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h1 className="text-2xl font-extrabold text-slate-950">Review Management</h1>
-                  <p className="text-xs text-slate-500 mt-1">Create reviews and control which ones appear publicly.</p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold disabled:opacity-60">Refresh Reviews</button>
-                  <button
-                    type="button"
-                    disabled={loading}
-                    onClick={() => setEditingReview({ author_name: '', rating: 5, review_text: '', source: 'Verified Student Review', is_published: true })}
-                    className="w-full sm:w-auto justify-center px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-60"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>Add Review</span>
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-3">
-                <label className="flex items-center gap-2 text-xs text-slate-600">
-                  Rating
-                  <select aria-label="Filter reviews by rating" value={reviewRatingFilter} onChange={(event) => setReviewRatingFilter(event.target.value as typeof reviewRatingFilter)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg">
-                    <option value="All">All ratings</option>
-                    {[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} stars</option>)}
-                  </select>
-                </label>
-                <label className="flex items-center gap-2 text-xs text-slate-600">
-                  Sort
-                  <select aria-label="Sort reviews by date" value={reviewSort} onChange={(event) => setReviewSort(event.target.value as typeof reviewSort)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg">
-                    <option value="latest">Latest</option>
-                    <option value="oldest">Oldest</option>
-                  </select>
-                </label>
-              </div>
-
-              {editingReview && (
-                <form onSubmit={handleSaveReview} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <label className="space-y-1 text-xs font-semibold text-slate-700">
-                      <span>Author name</span>
-                      <input required maxLength={300} value={editingReview.author_name || ''} onChange={(event) => setEditingReview({ ...editingReview, author_name: event.target.value })} className="w-full px-3 py-2 border border-slate-200 rounded-lg" />
-                    </label>
-                    <label className="space-y-1 text-xs font-semibold text-slate-700">
-                      <span>Rating (1 to 5)</span>
-                      <input required type="number" min={1} max={5} value={editingReview.rating ?? 5} onChange={(event) => setEditingReview({ ...editingReview, rating: Number(event.target.value) })} className="w-full px-3 py-2 border border-slate-200 rounded-lg" />
-                    </label>
-                  </div>
-                  <label className="block space-y-1 text-xs font-semibold text-slate-700">
-                    <span>Review</span>
-                    <textarea required maxLength={10000} rows={4} value={editingReview.review_text || ''} onChange={(event) => setEditingReview({ ...editingReview, review_text: event.target.value })} className="w-full px-3 py-2 border border-slate-200 rounded-lg" />
-                  </label>
-                  <label className="block space-y-1 text-xs font-semibold text-slate-700">
-                    <span>Source</span>
-                    <input maxLength={300} value={editingReview.source || ''} onChange={(event) => setEditingReview({ ...editingReview, source: event.target.value })} className="w-full px-3 py-2 border border-slate-200 rounded-lg" />
-                  </label>
-                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
-                    <input type="checkbox" checked={editingReview.is_published !== false} onChange={(event) => setEditingReview({ ...editingReview, is_published: event.target.checked })} />
-                    Published on the public site
-                  </label>
-                  <div className="flex gap-2">
-                    <button disabled={loading} type="submit" className="px-4 py-2 bg-orange-600 text-white text-xs font-bold rounded-lg disabled:opacity-60">{loading ? 'Saving...' : editingReview.id ? 'Save Review' : 'Create Review'}</button>
-                    <button disabled={loading} type="button" onClick={() => setEditingReview(null)} className="px-4 py-2 bg-slate-100 text-slate-700 text-xs font-bold rounded-lg disabled:opacity-60">Cancel</button>
-                  </div>
-                </form>
-              )}
-
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs divide-y divide-slate-100">
-                {filteredReviews.length ? filteredReviews.map((review) => (
-                  <div key={review.id} className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                    <div className="min-w-0 space-y-1">
-                      <div className="flex items-center gap-2">
-                        <strong className="text-slate-900">{review.author_name}</strong>
-                        <span className="text-amber-700 font-semibold">{review.rating}/5</span>
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${review.is_published ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'}`}>{review.is_published ? 'Published' : 'Draft'}</span>
+              <section aria-label="Callback request totals" className="grid grid-cols-1 gap-3 min-[400px]:grid-cols-2 xl:grid-cols-4">
+                {[
+                  { label: 'Total Requests', count: callbacks.length, description: 'All callback enquiries', icon: PhoneCall, styles: 'border-blue-100 bg-blue-50 text-blue-800', iconStyles: 'bg-blue-100 text-blue-700' },
+                  { label: 'New', count: callbacks.filter((callback) => callback.status === 'New').length, description: 'Awaiting first contact', icon: ClockIcon, styles: 'border-orange-100 bg-orange-50 text-orange-800', iconStyles: 'bg-orange-100 text-orange-700' },
+                  { label: 'Contacted', count: callbacks.filter((callback) => callback.status === 'Contacted').length, description: 'Follow-up in progress', icon: Users, styles: 'border-violet-100 bg-violet-50 text-violet-800', iconStyles: 'bg-violet-100 text-violet-700' },
+                  { label: 'Resolved', count: callbacks.filter((callback) => callback.status === 'Resolved').length, description: 'Requests completed', icon: CheckCircle, styles: 'border-emerald-100 bg-emerald-50 text-emerald-800', iconStyles: 'bg-emerald-100 text-emerald-700' },
+                ].map(({ label, count, description, icon: Icon, styles, iconStyles }) => (
+                  <article key={label} className={`rounded-2xl border p-4 shadow-sm sm:p-5 ${styles}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-bold">{label}</p>
+                        <p className="mt-2 text-3xl font-extrabold tracking-tight text-[#0B1F4D]">{loading ? '—' : count}</p>
+                        <p className="mt-1 text-[11px] opacity-80">{description}</p>
                       </div>
-                      <p className="text-slate-600">{review.review_text}</p>
-                      {review.source && <p className="text-slate-400">{review.source}</p>}
-                      <p className="text-slate-400">{new Date(review.created_at).toLocaleDateString('en-IN')}</p>
+                      <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${iconStyles}`}>
+                        <Icon className="h-5 w-5" aria-hidden="true" />
+                      </span>
                     </div>
-                    <div className="flex items-center gap-3 shrink-0">
-                      <button disabled={loading} onClick={() => setEditingReview(review)} className="font-bold text-orange-600 hover:underline disabled:opacity-50">Edit</button>
-                      <button disabled={loading} onClick={() => handleDeleteReview(review.id)} className="font-bold text-rose-600 hover:underline disabled:opacity-50">Delete</button>
-                    </div>
-                  </div>
-                )) : <p className="p-8 text-center text-xs text-slate-400">{loading ? 'Loading reviews...' : reviews.length ? 'No reviews match the selected rating.' : 'No reviews found.'}</p>}
+                  </article>
+                ))}
+              </section>
+
+              <div className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:p-4">
+                <label className="relative block">
+                  <span className="sr-only">Search callback requests</span>
+                  <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    aria-label="Search callback requests"
+                    value={callbackSearch}
+                    onChange={(event) => setCallbackSearch(event.target.value)}
+                    placeholder="Search name, phone, email, program, or message"
+                    className="min-h-11 w-full rounded-xl border border-slate-200 py-2 pl-9 pr-3 text-sm outline-none transition focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+                  />
+                </label>
+                <label className="flex min-h-11 items-center justify-between gap-3 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-600 sm:justify-start">
+                  Status
+                  <select
+                    aria-label="Filter callback requests by status"
+                    value={callbackFilterStatus}
+                    onChange={(event) => setCallbackFilterStatus(event.target.value as typeof callbackFilterStatus)}
+                    className="min-h-9 min-w-32 rounded-lg bg-white px-2 text-sm text-[#0B1F4D] outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+                  >
+                    {(['All', 'New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status === 'All' ? 'All statuses' : status}</option>)}
+                  </select>
+                </label>
               </div>
+
+              {filteredCallbacks.length > 0 ? (
+                <>
+                  <section className="hidden overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm xl:block">
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[1050px] text-left text-xs">
+                        <thead className="bg-[#F2F5FB] text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+                          <tr>
+                            <th scope="col" className="px-5 py-4">Name</th>
+                            <th scope="col" className="px-4 py-4">Contact</th>
+                            <th scope="col" className="px-4 py-4">Program</th>
+                            <th scope="col" className="px-4 py-4">Preferred time</th>
+                            <th scope="col" className="px-4 py-4">Message</th>
+                            <th scope="col" className="px-4 py-4">Received</th>
+                            <th scope="col" className="px-4 py-4">Status</th>
+                            <th scope="col" className="px-5 py-4 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-slate-700">
+                          {filteredCallbacks.map((callback) => (
+                            <tr key={callback.id} className="align-top transition-colors hover:bg-orange-50/40">
+                              <td className="px-5 py-4">
+                                <p className="font-bold text-[#0B1F4D]">{callback.full_name}</p>
+                                {callback.email && <p className="mt-1 max-w-48 truncate text-[11px] text-slate-500">{callback.email}</p>}
+                              </td>
+                              <td className="px-4 py-4">
+                                <a href={`tel:${callback.mobile.replace(/[^\d+]/g, '')}`} className="inline-flex items-center gap-1.5 font-semibold text-emerald-700 hover:text-emerald-800">
+                                  <PhoneCall className="h-3.5 w-3.5" aria-hidden="true" />{callback.mobile}
+                                </a>
+                              </td>
+                              <td className="max-w-44 px-4 py-4 font-medium text-slate-700">{callback.program_name}</td>
+                              <td className="px-4 py-4">
+                                <span className="inline-flex rounded-full border border-orange-200 bg-orange-50 px-2.5 py-1 text-[10px] font-bold text-orange-800">{callback.preferred_contact_time}</span>
+                              </td>
+                              <td className="max-w-52 px-4 py-4 text-slate-500" title={callback.message || undefined}>
+                                <span className="block truncate">{callback.message || 'No message provided'}</span>
+                              </td>
+                              <td className="whitespace-nowrap px-4 py-4 text-slate-500">
+                                {new Date(callback.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                              </td>
+                              <td className="px-4 py-4">
+                                <label className="sr-only" htmlFor={`callback-status-${callback.id}`}>Status for {callback.full_name}</label>
+                                <select
+                                  id={`callback-status-${callback.id}`}
+                                  value={callback.status}
+                                  disabled={loading}
+                                  onChange={(event) => handleCallbackStatusChange(callback, event.target.value as CallbackRequest['status'])}
+                                  className={`min-h-9 w-32 rounded-lg border px-2.5 text-xs font-bold outline-none focus-visible:ring-2 focus-visible:ring-orange-500 disabled:opacity-60 ${callback.status === 'Resolved' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : callback.status === 'Contacted' ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
+                                >
+                                  {(['New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+                                </select>
+                              </td>
+                              <td className="px-5 py-4">
+                                <div className="flex justify-end gap-2">
+                                  <button type="button" disabled={loading} onClick={() => setSelectedCallback(callback)} className="min-h-9 rounded-lg border border-slate-200 bg-white px-3 font-bold text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 disabled:opacity-60">View</button>
+                                  {isAdminOrHigher && (
+                                    <button
+                                      type="button"
+                                      disabled={loading}
+                                      onClick={() => void handleDeleteCallback(callback)}
+                                      aria-label={`Delete callback request from ${callback.full_name}`}
+                                      title="Delete callback request (Admin only)"
+                                      className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 font-bold text-rose-700 transition-colors hover:bg-rose-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-600 disabled:opacity-50"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />Delete
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+
+                  <div className="grid gap-3 md:grid-cols-2 xl:hidden">
+                    {filteredCallbacks.map((callback) => (
+                      <article key={callback.id} className="min-w-0 space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md sm:p-5">
+                        <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+                          <div className="min-w-0">
+                            <h2 className="break-words font-bold text-[#0B1F4D]">{callback.full_name}</h2>
+                            <p className="mt-1 text-[11px] text-slate-500">
+                              Received {new Date(callback.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                            </p>
+                          </div>
+                          <label className="w-32 shrink-0 space-y-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                            Status
+                            <select
+                              aria-label={`Status for ${callback.full_name}`}
+                              value={callback.status}
+                              disabled={loading}
+                              onChange={(event) => handleCallbackStatusChange(callback, event.target.value as CallbackRequest['status'])}
+                              className={`min-h-9 w-full rounded-lg border px-2 text-xs font-bold normal-case tracking-normal outline-none focus-visible:ring-2 focus-visible:ring-orange-500 disabled:opacity-60 ${callback.status === 'Resolved' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : callback.status === 'Contacted' ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
+                            >
+                              {(['New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+                            </select>
+                          </label>
+                        </div>
+                        <div className="grid gap-3 text-xs sm:grid-cols-2">
+                          <a href={`tel:${callback.mobile.replace(/[^\d+]/g, '')}`} className="flex min-w-0 items-center gap-2 break-all font-semibold text-emerald-700 hover:text-emerald-800">
+                            <PhoneCall className="h-4 w-4 shrink-0" aria-hidden="true" />{callback.mobile}
+                          </a>
+                          {callback.email && <a href={`mailto:${callback.email}`} className="min-w-0 break-all text-slate-600 hover:text-orange-700">{callback.email}</a>}
+                          <p className="text-slate-700"><span className="font-bold text-slate-500">Program: </span>{callback.program_name}</p>
+                          <p><span className="font-bold text-slate-500">Preferred time: </span><span className="font-semibold text-orange-800">{callback.preferred_contact_time}</span></p>
+                        </div>
+                        <p className="rounded-xl bg-slate-50 p-3 text-xs leading-relaxed text-slate-600">
+                          <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-slate-400">Message</span>
+                          {callback.message || 'No message provided.'}
+                        </p>
+                        <div className="flex gap-2 border-t border-slate-100 pt-3">
+                          <button type="button" disabled={loading} onClick={() => setSelectedCallback(callback)} className="min-h-10 flex-1 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-60">View details</button>
+                          {isAdminOrHigher && (
+                            <button
+                              type="button"
+                              disabled={loading}
+                              onClick={() => void handleDeleteCallback(callback)}
+                              aria-label={`Delete callback request from ${callback.full_name}`}
+                              className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 text-xs font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                            >
+                              <Trash2 className="h-4 w-4" aria-hidden="true" />Delete
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-5 py-14 text-center shadow-sm">
+                  <span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-orange-50 text-orange-600">
+                    <PhoneCall className="h-6 w-6" aria-hidden="true" />
+                  </span>
+                  <h2 className="mt-4 font-bold text-[#0B1F4D]">
+                    {loading ? 'Loading callback requests…' : callbacks.length ? 'No matching requests' : 'No callback requests yet'}
+                  </h2>
+                  <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-slate-500">
+                    {callbacks.length ? 'Try adjusting your search or status filter.' : 'New callback enquiries will appear here when prospective learners contact the academy.'}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -2266,9 +2859,9 @@ const res = await fetch(url, {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
                 {programs.map((prog) => (
-                  <div key={prog.id} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex flex-col justify-between">
+                  <div key={prog.id} className="min-w-0 bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex flex-col justify-between">
                     <div>
                       <img
                         src={prog.image_url || 'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80'}
@@ -2329,16 +2922,22 @@ const res = await fetch(url, {
 
           {/* TAB 6: MEDIA GALLERY MANAGEMENT */}
           {activeTab === 'media' && (
-            <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div>
-                  <h1 className="text-2xl font-extrabold text-slate-950">Media Gallery Management</h1>
-                  <p className="text-xs text-slate-500 mt-1">
+            <div className="space-y-5">
+              <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:p-5 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-orange-50 text-orange-600">
+                    <Video className="h-5 w-5" aria-hidden="true" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-orange-600">Gallery workspace</p>
+                    <h1 className="text-xl font-extrabold leading-tight text-[#0B1F4D] sm:text-2xl">Media & Testimonials Management</h1>
+                    <p className="mt-1 text-xs text-slate-500">
                     Manage published and draft photo and YouTube video entries for the public academy gallery.
-                  </p>
+                    </p>
+                  </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                <button type="button" onClick={fetchAllData} disabled={loading} className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-semibold disabled:opacity-60">
+                <div className="grid w-full grid-cols-2 gap-2 lg:flex lg:w-auto lg:flex-wrap lg:justify-end">
+                <button type="button" onClick={fetchAllData} disabled={loading} className="col-span-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-60 lg:col-span-1">
                   Refresh Gallery
                 </button>
                 <button
@@ -2349,10 +2948,10 @@ const res = await fetch(url, {
                     setMediaForm((current) => ({ ...current, media_type: 'photo' }));
                     setActiveTab('media');
                   }}
-                  className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  className="flex cursor-pointer items-center justify-center gap-1.5 rounded-xl bg-orange-600 px-3 py-2.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-orange-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-600 lg:px-4"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>Add Photo</span>
+                  <span className="whitespace-nowrap">Add Photo</span>
                 </button>
                 <button
                   type="button"
@@ -2362,27 +2961,68 @@ const res = await fetch(url, {
                     setMediaForm((current) => ({ ...current, media_type: 'video' }));
                     setActiveTab('media');
                   }}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-60"
+                  className="flex cursor-pointer items-center justify-center gap-1.5 rounded-xl bg-[#0B1F4D] px-3 py-2.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0B1F4D] disabled:opacity-60 lg:px-4"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>Add YouTube Video</span>
+                  <span className="whitespace-nowrap">Add Testimonial</span>
                 </button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-6">
-                <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-lg font-bold text-slate-900">All Media Entries</h2>
-                    <span className="text-[11px] font-bold text-slate-500">{mediaItems.length} total</span>
+              <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
+                <div className="min-w-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:p-5">
+                  <div className="mb-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h2 className="text-base font-bold text-[#0B1F4D] sm:text-lg">All Media Entries</h2>
+                        <p className="mt-0.5 text-[11px] text-slate-500">Browse and manage your gallery content.</p>
+                      </div>
+                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold text-slate-600">
+                        {filteredMediaItems.length} of {mediaItems.length} entries
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-2 border-y border-slate-100 py-3 sm:flex-row sm:items-center">
+                      <div className="flex w-fit max-w-full items-center gap-1 rounded-xl bg-slate-100 p-1">
+                      {([
+                        { value: 'all', label: 'All' },
+                        { value: 'photo', label: 'Photos' },
+                        { value: 'video', label: 'Testimonials' },
+                      ] as const).map(({ value, label }) => (
+                        <button
+                          key={value}
+                          type="button"
+                          aria-pressed={mediaFilter === value}
+                          onClick={() => setMediaFilter(value)}
+                          className={`rounded-lg px-3 py-2 text-xs font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-600 ${
+                            mediaFilter === value
+                              ? 'bg-white text-[#0B1F4D] shadow-sm'
+                              : 'text-slate-500 hover:text-slate-800'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                      </div>
+                      <label className="relative min-w-0 flex-1">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+                        <input
+                          type="search"
+                          value={mediaSearch}
+                          onChange={(event) => setMediaSearch(event.target.value)}
+                          placeholder="Search by name..."
+                          aria-label="Search media by name"
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-xs transition focus:border-orange-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-100"
+                        />
+                      </label>
+                    </div>
                   </div>
 
-                  <div className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
-                    {mediaItems.length > 0 ? (
-                      mediaItems.map((item) => (
-                        <div key={item.id} className="border border-slate-200 rounded-2xl p-3">
+                  <div className="max-h-[620px] space-y-3 overflow-y-auto pr-1">
+                    {filteredMediaItems.length > 0 ? (
+                      filteredMediaItems.map((item) => (
+                        <div key={item.id} className="rounded-xl border border-slate-200 bg-white p-3 transition-colors hover:border-orange-200 hover:bg-orange-50/20">
                           <div className="flex items-start gap-3">
-                            <div className="w-20 h-16 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 shrink-0">
+                            <div className="h-16 w-20 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
                               {(item.cover_image_url || item.media_url || (item.media_type === 'video' && item.youtube_video_id))
                                 ? <img
                                     src={item.cover_image_url || item.media_url || `https://img.youtube.com/vi/${item.youtube_video_id}/hqdefault.jpg`}
@@ -2391,19 +3031,19 @@ const res = await fetch(url, {
                                   />
                                 : <div className="w-full h-full flex items-center justify-center text-slate-400"><Video className="w-6 h-6" aria-label="No preview available" /></div>}
                             </div>
-                            <div className="flex-1 min-w-0">
+                            <div className="min-w-0 flex-1">
                               <div className="flex items-center justify-between gap-2">
                                 <p className="font-bold text-slate-900 text-sm truncate">{item.title}</p>
                                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${item.is_published ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'}`}>
                                   {item.is_published ? 'Published' : 'Draft'}
                                 </span>
                               </div>
-                              <p className="text-[11px] text-slate-500 mt-1">{item.media_type === 'video' ? 'YouTube video' : 'Photo'} • Order {item.display_order || 0}</p>
+                              <p className="mt-1 text-[11px] text-slate-500">{item.media_type === 'video' ? 'Testimonial video' : 'Photo'} · Order {item.display_order || 0}</p>
                               <p className="text-[11px] text-slate-600 mt-2 line-clamp-2">{item.caption || 'No caption set.'}</p>
                             </div>
                           </div>
 
-                          <div className="mt-3 flex items-center justify-end gap-2">
+                          <div className="mt-3 flex items-center justify-end gap-2 border-t border-slate-100 pt-2.5">
                             <button
                               disabled={loading}
                               onClick={() => handleToggleMediaPublished(item)}
@@ -2437,19 +3077,32 @@ const res = await fetch(url, {
                         </div>
                       ))
                     ) : (
-                      <div className="text-center py-12 text-slate-400 text-xs">{loading ? 'Loading gallery...' : 'No media entries found yet.'}</div>
+                      <div className="text-center py-12 text-slate-400 text-xs">
+                        {loading
+                          ? 'Loading gallery...'
+                          : mediaItems.length
+                            ? 'No entries match your filter or search.'
+                            : 'No media entries found yet.'}
+                      </div>
                     )}
                   </div>
                 </div>
 
-                <form onSubmit={handleSaveMedia} className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 space-y-4">
+                <form onSubmit={handleSaveMedia} className="min-w-0 space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:p-5">
                   <div className="flex items-center justify-between">
-                    <h2 className="text-lg font-bold text-slate-900">{editingMediaId ? 'Edit Media' : 'Add Media'}</h2>
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-orange-600">
+                        {editingMediaId ? 'Update gallery' : 'Create gallery entry'}
+                      </p>
+                      <h2 className="mt-0.5 text-base font-bold text-[#0B1F4D] sm:text-lg">
+                        {editingMediaId ? 'Edit Media' : 'Add Media'}
+                      </h2>
+                    </div>
                     <button
                       type="button"
                       disabled={loading}
                       onClick={resetMediaForm}
-                      className="text-[11px] font-semibold text-slate-500 hover:text-slate-700 disabled:opacity-50"
+                      className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange-600 disabled:opacity-50"
                     >
                       Cancel
                     </button>
@@ -2470,7 +3123,7 @@ const res = await fetch(url, {
                         onClick={() => setMediaForm((prev) => ({ ...prev, media_type: 'video' }))}
                         className={`px-3 py-2 rounded-xl border text-xs font-semibold ${mediaForm.media_type === 'video' ? 'bg-orange-600 text-white border-orange-600' : 'bg-slate-50 text-slate-700 border-slate-200'}`}
                       >
-                        YouTube Video
+                        Testimonial
                       </button>
                     </div>
                   </div>
@@ -2746,8 +3399,7 @@ const res = await fetch(url, {
               </div>
 
               <div className="bg-transparent sm:bg-white rounded-2xl sm:border sm:border-slate-200 sm:shadow-xs overflow-hidden">
-                {/* Mobile-friendly notification cards */}
-                <div className="grid grid-cols-1 gap-3 sm:hidden">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:hidden">
                   {notifications.length > 0 ? (
                     notifications.map((notif) => (
                       <article key={notif.id} className="min-w-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm space-y-3">
@@ -2791,8 +3443,7 @@ const res = await fetch(url, {
                     <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-400">No notifications logged in outbox.</div>
                   )}
                 </div>
-                {/* Desktop/tablet table */}
-                <div className="hidden overflow-x-auto overscroll-x-contain sm:block">
+                <div className="hidden overflow-x-auto overscroll-x-contain 2xl:block">
                 <table className="w-full min-w-[900px] text-left text-xs">
                   <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[11px] border-b border-slate-200">
                     <tr>
@@ -2865,139 +3516,164 @@ const res = await fetch(url, {
 
           {/* TAB: SITE BRANDING & ASSETS */}
           {activeTab === 'branding' && (
-            <div className="space-y-6 max-w-4xl">
-              <div>
-                <h1 className="text-2xl font-extrabold text-slate-950">Site Branding & Assets</h1>
-                <p className="text-xs text-slate-500 mt-1">
-                  Configure the academy visual brand identity, logos, favicon, and theme colors stored in the database.
-                </p>
+            <div className="max-w-6xl space-y-5">
+              <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:p-5">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-orange-50 text-orange-600">
+                  <Palette className="h-5 w-5" aria-hidden="true" />
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-orange-600">Website appearance</p>
+                  <h1 className="text-xl font-extrabold leading-tight text-[#0B1F4D] sm:text-2xl">Site Branding & Assets</h1>
+                  <p className="mt-1 text-xs text-slate-500">
+                  {isSuperAdmin
+                    ? 'Manage site-wide branding and visual assets.'
+                    : 'Update the photo shown in the homepage hero section.'}
+                  </p>
+                </div>
               </div>
 
               {editingBranding ? (
-                <form onSubmit={handleSaveBranding} className="bg-white p-6 sm:p-8 rounded-2xl border border-slate-200 shadow-xs space-y-6 text-xs">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="font-bold text-slate-700 block mb-1">Academy Name</label>
-                      <input
-                        type="text"
-                        required
-                        value={editingBranding.academy_name || ''}
-                        onChange={(e) => setEditingBranding({ ...editingBranding, academy_name: e.target.value })}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl"
-                      />
+                <form onSubmit={handleSaveBranding} className="space-y-5 text-xs">
+                  {isSuperAdmin && <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:p-5" aria-labelledby="logo-assets-heading">
+                    <div className="mb-4 border-b border-slate-100 pb-3">
+                      <h2 id="logo-assets-heading" className="text-sm font-bold text-[#0B1F4D]">Logo & Visual Brand Assets</h2>
+                      <p className="mt-1 text-[11px] text-slate-500">Upload the logos used in navigation, browser tabs, and the footer.</p>
                     </div>
-                    <div>
-                      <label className="font-bold text-slate-700 block mb-1">Tagline</label>
-                      <input
-                        type="text"
-                        value={editingBranding.tagline || ''}
-                        onChange={(e) => setEditingBranding({ ...editingBranding, tagline: e.target.value })}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="border-t border-slate-100 pt-4 space-y-4">
-                    <h3 className="font-bold text-slate-900 text-sm">Logo & Visual Brand Assets</h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="font-bold text-slate-700 block mb-1">Main Logo URL</label>
+                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                      <div className="min-w-0 rounded-xl border border-slate-100 bg-slate-50/70 p-3">
+                        <label className="mb-1.5 block font-bold text-slate-700">Main Logo</label>
                         <input
-                          type="text"
-                          value={editingBranding.logo_url || ''}
-                          onChange={(e) => setEditingBranding({ ...editingBranding, logo_url: e.target.value })}
-                          className="w-full px-3 py-2 border border-slate-200 rounded-xl font-mono text-[11px]"
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          onChange={(event) => handleBrandingFileChange('logo_file_base64', event)}
+                          className="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11px]"
                         />
-                      </div>
-                      <div>
-                        <label className="font-bold text-slate-700 block mb-1">Main Logo Alt Text (main_logo_alt)</label>
+                        {(editingBranding.logo_file_base64 || editingBranding.logo_url) && (
+                          <img
+                            src={editingBranding.logo_file_base64 || editingBranding.logo_url}
+                            alt="Main logo preview"
+                            className="mt-2 h-24 w-full rounded-lg border border-slate-200 bg-white p-2 object-contain"
+                          />
+                        )}
+                        <p className="mt-1 text-[10px] text-slate-500">PNG, JPEG, or WebP; maximum 3 MB.</p>
+                        <label className="mb-1 mt-3 block font-bold text-slate-700">Logo Alt Text</label>
                         <input
                           type="text"
                           value={editingBranding.main_logo_alt || editingBranding.logo_alt || ''}
                           onChange={(e) => setEditingBranding({ ...editingBranding, main_logo_alt: e.target.value, logo_alt: e.target.value })}
-                          className="w-full px-3 py-2 border border-slate-200 rounded-xl"
-                          placeholder="e.g. Uptrend's English Academy Official Logo"
+                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2"
+                          placeholder="Describe the academy logo"
                         />
                       </div>
-                      <div>
-                        <label className="font-bold text-slate-700 block mb-1">Favicon URL (favicon_url)</label>
+                      <div className="min-w-0 rounded-xl border border-slate-100 bg-slate-50/70 p-3">
+                        <label className="mb-1.5 block font-bold text-slate-700">Favicon</label>
                         <input
-                          type="text"
-                          value={editingBranding.favicon_url || ''}
-                          onChange={(e) => setEditingBranding({ ...editingBranding, favicon_url: e.target.value })}
-                          className="w-full px-3 py-2 border border-slate-200 rounded-xl font-mono text-[11px]"
-                          placeholder="/favicon.ico or Cloudflare R2 URL"
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,.ico,image/x-icon,image/vnd.microsoft.icon"
+                          onChange={(event) => handleBrandingFileChange('favicon_file_base64', event)}
+                          className="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11px]"
                         />
+                        {(editingBranding.favicon_file_base64 || editingBranding.favicon_url) && (
+                          <img
+                            src={editingBranding.favicon_file_base64 || editingBranding.favicon_url}
+                            alt="Favicon preview"
+                            className="mt-2 h-24 w-full rounded-lg border border-slate-200 bg-white p-2 object-contain"
+                          />
+                        )}
+                        <p className="mt-1 text-[10px] text-slate-500">ICO, PNG, JPEG, or WebP; maximum 1 MB.</p>
                       </div>
-                      <div>
-                        <label className="font-bold text-slate-700 block mb-1">Footer Logo URL (footer_logo_url)</label>
+                      <div className="min-w-0 rounded-xl border border-slate-100 bg-slate-50/70 p-3">
+                        <label className="mb-1.5 block font-bold text-slate-700">Footer Logo</label>
                         <input
-                          type="text"
-                          value={editingBranding.footer_logo_url || ''}
-                          onChange={(e) => setEditingBranding({ ...editingBranding, footer_logo_url: e.target.value })}
-                          className="w-full px-3 py-2 border border-slate-200 rounded-xl font-mono text-[11px]"
-                          placeholder="Logo used in dark footer background"
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          onChange={(event) => handleBrandingFileChange('footer_logo_file_base64', event)}
+                          className="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11px]"
                         />
+                        {(editingBranding.footer_logo_file_base64 || editingBranding.footer_logo_url) && (
+                          <img
+                            src={editingBranding.footer_logo_file_base64 || editingBranding.footer_logo_url}
+                            alt="Footer logo preview"
+                            className="mt-2 h-24 w-full rounded-lg border border-slate-200 bg-white p-2 object-contain"
+                          />
+                        )}
+                        <p className="mt-1 text-[10px] text-slate-500">PNG, JPEG, or WebP; maximum 3 MB.</p>
                       </div>
                     </div>
-                  </div>
+                  </section>}
 
-                  <div className="border-t border-slate-100 pt-4 space-y-4">
-                    <h3 className="font-bold text-slate-900 text-sm">Theme Colors & Official Documents</h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      <div>
-                        <label className="font-bold text-slate-700 block mb-1">Primary Color</label>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="color"
-                            value={editingBranding.primary_color || '#ea580c'}
-                            onChange={(e) => setEditingBranding({ ...editingBranding, primary_color: e.target.value })}
-                            className="w-8 h-8 rounded border border-slate-200 cursor-pointer"
-                          />
-                          <input
-                            type="text"
-                            value={editingBranding.primary_color || '#ea580c'}
-                            onChange={(e) => setEditingBranding({ ...editingBranding, primary_color: e.target.value })}
-                            className="flex-1 px-3 py-2 border border-slate-200 rounded-xl font-mono"
-                          />
+                  <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:p-5" aria-labelledby="hero-photo-heading">
+                    <div className="border-b border-slate-100 pb-3">
+                      <h2 id="hero-photo-heading" className="font-bold text-[#0B1F4D] text-sm">Hero Section Photo</h2>
+                      <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                        This photo appears on the homepage and is shown using its full aspect ratio on desktop and mobile. A transparent PNG is recommended for a student cutout image.
+                      </p>
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-[minmax(0,1.3fr)_minmax(220px,.7fr)] sm:items-start">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap gap-2">
+                          <label className={`inline-flex min-h-10 cursor-pointer items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-blue-700 focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-blue-700 ${loading ? 'pointer-events-none opacity-60' : ''}`}>
+                            <span>{editingBranding.hero_photo_file_base64 ? 'Change Photo' : 'Upload / Change Photo'}</span>
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/webp,.jpg,.jpeg"
+                              disabled={loading}
+                              onChange={(event) => handleBrandingFileChange('hero_photo_file_base64', event)}
+                              className="sr-only"
+                            />
+                          </label>
+                          {(editingBranding.hero_photo_url || editingBranding.hero_photo_file_base64) && (
+                            <button
+                              type="button"
+                              disabled={loading}
+                              onClick={() => {
+                                if (!window.confirm('Remove the current hero photo and use the website default instead?')) return;
+                                setEditingBranding((current) => {
+                                  if (!current) return current;
+                                  const next = { ...current, hero_photo_url: null };
+                                  delete next.hero_photo_file_base64;
+                                  return next;
+                                });
+                                setActionMessage(null);
+                              }}
+                              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-rose-200 bg-white px-4 py-2 text-xs font-bold text-rose-700 transition-colors hover:bg-rose-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-700 disabled:opacity-60"
+                            >
+                              <Trash2 className="h-4 w-4" aria-hidden="true" />
+                              Remove Photo
+                            </button>
+                          )}
                         </div>
+                        <p className="mt-2 text-[10px] text-slate-500">PNG, JPG, JPEG, or WebP; maximum 3 MB. Select a photo, then save to upload it.</p>
+                        {loading && (
+                          <p role="status" className="mt-2 text-xs font-medium text-blue-700">
+                            Uploading and saving hero photo…
+                          </p>
+                        )}
                       </div>
-                      <div>
-                        <label className="font-bold text-slate-700 block mb-1">Secondary Color</label>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="color"
-                            value={editingBranding.secondary_color || '#0f172a'}
-                            onChange={(e) => setEditingBranding({ ...editingBranding, secondary_color: e.target.value })}
-                            className="w-8 h-8 rounded border border-slate-200 cursor-pointer"
-                          />
-                          <input
-                            type="text"
-                            value={editingBranding.secondary_color || '#0f172a'}
-                            onChange={(e) => setEditingBranding({ ...editingBranding, secondary_color: e.target.value })}
-                            className="flex-1 px-3 py-2 border border-slate-200 rounded-xl font-mono"
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="font-bold text-slate-700 block mb-1">Official Fee Structure PDF Path</label>
-                        <input
-                          type="text"
-                          value={editingBranding.official_pdf_url || ''}
-                          onChange={(e) => setEditingBranding({ ...editingBranding, official_pdf_url: e.target.value })}
-                          className="w-full px-3 py-2 border border-slate-200 rounded-xl font-mono"
+                      <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-[#fff8ef]">
+                        <img
+                          src={editingBranding.hero_photo_file_base64 || (editingBranding.hero_photo_url === null ? '/assets/hero-students-reference.png' : editingBranding.hero_photo_url || '/assets/hero-students-reference.png')}
+                          alt="Homepage hero photo preview"
+                          className="aspect-video w-full object-contain"
                         />
+                        <p className="border-t border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold text-slate-500">
+                          {editingBranding.hero_photo_file_base64
+                            ? 'Selected photo preview — save to publish'
+                            : editingBranding.hero_photo_url
+                              ? 'Current saved hero photo'
+                              : 'Default hero photo'}
+                        </p>
                       </div>
                     </div>
-                  </div>
+                  </section>
 
-                  <div className="pt-4 flex justify-end">
+                  <div className="sticky bottom-0 flex justify-end rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-lg backdrop-blur sm:p-4">
                     <button
                       type="submit"
                       disabled={loading}
-                      className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-xl shadow-sm cursor-pointer"
+                      className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-xl shadow-sm cursor-pointer disabled:cursor-wait disabled:opacity-60"
                     >
-                      Save Branding Configurations
+                      {loading ? 'Saving…' : isSuperAdmin ? 'Save Branding Configurations' : 'Save Hero Photo'}
                     </button>
                   </div>
                 </form>
@@ -3019,7 +3695,84 @@ const res = await fetch(url, {
                 </p>
               </div>
 
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:hidden">
+                {adminProfiles.length > 0 ? (
+                  adminProfiles.map((adm) => (
+                    <article key={adm.id} className="min-w-0 space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <h2 className="break-words text-sm font-bold text-slate-900">{adm.full_name}</h2>
+                          <p className="mt-1 break-all text-xs text-slate-500">{adm.email}</p>
+                        </div>
+                        <span
+                          className={`shrink-0 rounded px-2.5 py-1 text-[10px] font-extrabold uppercase ${
+                            adm.role === 'super_admin'
+                              ? 'border border-purple-200 bg-purple-100 text-purple-800'
+                              : adm.role === 'admin'
+                              ? 'border border-blue-200 bg-blue-100 text-blue-800'
+                              : 'border border-emerald-200 bg-emerald-100 text-emerald-800'
+                          }`}
+                        >
+                          {adm.role.replace('_', ' ')}
+                        </span>
+                      </div>
+                      <dl className="grid grid-cols-1 gap-3 border-t border-slate-100 pt-3 sm:grid-cols-2">
+                        <div className="min-w-0">
+                          <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Auth UID</dt>
+                          <dd className="mt-1 break-all font-mono text-[11px] text-slate-600">{adm.id}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Status</dt>
+                          <dd className="mt-1">
+                            <span className={`rounded px-2 py-0.5 text-[10px] font-bold ${adm.is_active ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
+                              {adm.is_active ? 'Active' : 'Suspended'}
+                            </span>
+                          </dd>
+                        </div>
+                        <div className="sm:col-span-2">
+                          <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Last Login</dt>
+                          <dd className="mt-1 text-[11px] text-slate-600">{adm.last_login ? new Date(adm.last_login).toLocaleString('en-IN') : 'Never'}</dd>
+                        </div>
+                      </dl>
+                      <div className="flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center">
+                        {adm.id !== currentAdmin.id ? (
+                          <>
+                            <select
+                              value={adm.role}
+                              aria-label={`Role for ${adm.full_name}`}
+                              onChange={(e) => handleUpdateAdminRole(adm.id, e.target.value as AdminRole, adm.is_active)}
+                              className="min-w-0 flex-1 rounded border border-slate-300 bg-slate-50 px-2 py-2 text-xs font-semibold cursor-pointer"
+                            >
+                              <option value="staff">Staff</option>
+                              <option value="admin">Admin</option>
+                              <option value="super_admin">Super Admin</option>
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateAdminRole(adm.id, adm.role, !adm.is_active)}
+                              className={`rounded px-3 py-2 text-xs font-bold cursor-pointer ${
+                                adm.is_active
+                                  ? 'bg-rose-50 text-rose-700 hover:bg-rose-100'
+                                  : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                              }`}
+                            >
+                              {adm.is_active ? 'Suspend' : 'Activate'}
+                            </button>
+                          </>
+                        ) : (
+                          <span className="text-[11px] font-semibold italic text-slate-400">Current Session</span>
+                        )}
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <p className="col-span-full rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-400">
+                    No admin profiles found.
+                  </p>
+                )}
+              </div>
+
+              <div className="hidden overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs 2xl:block">
                 <div className="overflow-x-auto overscroll-x-contain">
                 <table className="w-full min-w-[920px] text-left text-xs">
                   <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[11px] border-b border-slate-200">
@@ -3116,25 +3869,36 @@ const res = await fetch(url, {
 
           {/* TAB 8: SETTINGS & OFFICIAL PDF */}
           {activeTab === 'settings' && (
-            <div className="space-y-8 max-w-4xl">
-              <div>
-                <h1 className="text-2xl font-extrabold text-slate-950">Settings & Official PDF Configuration</h1>
-                <p className="text-xs text-slate-500 mt-1">
+            <div className="max-w-6xl space-y-5">
+              <div className="flex items-center gap-3 rounded-2xl border border-orange-100 bg-gradient-to-r from-[#fff8ef] via-white to-emerald-50 p-4 shadow-sm sm:p-5">
+                <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[#0B1F4D] text-white shadow-sm">
+                  <FileCheck className="h-5 w-5" aria-hidden="true" />
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-[.16em] text-orange-700">Official documents</p>
+                  <h1 className="text-xl font-extrabold leading-tight text-[#0B1F4D] sm:text-2xl">Settings & Official PDF Configuration</h1>
+                  <p className="mt-1 text-xs text-slate-600">
                   Manage official documents, verified academy contact coordinates, and brand assets.
-                </p>
+                  </p>
+                </div>
               </div>
 
-<div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-5">
-  <div>
-    <h3 className="font-bold text-slate-900 text-sm">
-      Official Fee Structure & Terms PDF
-    </h3>
-    <p className="text-xs text-slate-600 mt-1">
-      Edit the official academy details and course information.
-      Save your settings before generating the final document.
-    </p>
-  </div>
+<div className="space-y-5">
+  <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+    <div className="mb-5 flex items-start gap-3 border-b border-slate-100 pb-4">
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-orange-50 text-orange-700">
+        <FileCheck className="h-4 w-4" aria-hidden="true" />
+      </span>
+      <div>
+        <h2 className="text-sm font-bold text-[#0B1F4D]">Official Fee Structure & Terms PDF</h2>
+        <p className="mt-1 text-xs leading-relaxed text-slate-500">
+          Edit the academy details and course information shown in official documents. Save changes before generating a preview.
+        </p>
+      </div>
+    </div>
 
+  <div className="space-y-3">
+    <h3 className="text-xs font-bold uppercase tracking-wide text-slate-600">Academy details</h3>
   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
     {([
       ['academyName', 'Academy Name'],
@@ -3155,16 +3919,23 @@ const res = await fetch(url, {
               [field]: e.target.value,
             }))
           }
-          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm transition focus:border-orange-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-100"
         />
       </label>
     ))}
   </div>
+  </div>
+  </section>
 
-  <div className="space-y-3 rounded-xl border border-slate-200 p-4">
-    <div>
-      <h4 className="font-bold text-slate-900 text-sm">Joining Information</h4>
-      <p className="text-xs text-slate-600 mt-1">These values appear in the student-view demo PDF. Editing them here does not change student records or payments.</p>
+  <section className="space-y-4 rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50/70 to-white p-4 shadow-sm sm:p-5">
+    <div className="flex items-start gap-3">
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-emerald-100 text-emerald-800">
+        <GraduationCap className="h-4 w-4" aria-hidden="true" />
+      </span>
+      <div>
+        <h2 className="font-bold text-[#0B1F4D] text-sm">Joining Information</h2>
+        <p className="mt-1 text-xs leading-relaxed text-slate-600">These values appear in the student-view demo PDF. Editing them here does not change student records or payments.</p>
+      </div>
     </div>
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       {([
@@ -3178,15 +3949,16 @@ const res = await fetch(url, {
           <input
             value={officialDocumentSettings[field]}
             onChange={(e) => setOfficialDocumentSettings((previous) => ({ ...previous, [field]: e.target.value }))}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm transition focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-100"
             placeholder={field === 'venue' ? 'Academy address or online' : 'To be confirmed'}
           />
         </label>
       ))}
     </div>
-  </div>
+  </section>
 
-  <label className="block space-y-1">
+  <section className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5 lg:grid-cols-2">
+  <label className="block space-y-2">
     <span className="text-xs font-semibold text-slate-700">
       Welcome Message
     </span>
@@ -3199,11 +3971,11 @@ const res = await fetch(url, {
           welcomeMessage: e.target.value,
         }))
       }
-      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm leading-relaxed transition focus:border-orange-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-100"
     />
   </label>
 
-  <label className="block space-y-1">
+  <label className="block space-y-2">
     <span className="text-xs font-semibold text-slate-700">
       Terms and Conditions
     </span>
@@ -3216,20 +3988,31 @@ const res = await fetch(url, {
           terms: e.target.value,
         }))
       }
-      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm leading-relaxed transition focus:border-orange-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-100"
     />
   </label>
+  </section>
 
-  <div className="space-y-3">
-    <h4 className="font-bold text-slate-900 text-sm">
-      Courses, Durations & Fees
-    </h4>
+  <section className="space-y-4 rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50/60 to-white p-4 shadow-sm sm:p-5">
+    <div className="flex items-center gap-3 border-b border-violet-100 pb-3">
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-violet-100 text-violet-800">
+        <BookOpen className="h-4 w-4" aria-hidden="true" />
+      </span>
+      <div>
+        <h2 className="font-bold text-[#0B1F4D] text-sm">Courses, Durations & Fees</h2>
+        <p className="mt-1 text-xs text-slate-500">Review each course's duration and fee information.</p>
+      </div>
+    </div>
 
     {officialDocumentSettings.courses.map((course, index) => (
       <div
         key={index}
-        className="rounded-xl border border-slate-200 p-4 space-y-3"
+        className="space-y-3 rounded-xl border border-violet-100 bg-white p-4 shadow-xs"
       >
+        <div className="flex items-center gap-2">
+          <span className="grid h-6 w-6 place-items-center rounded-full bg-violet-100 text-[10px] font-bold text-violet-800">{index + 1}</span>
+          <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Course details</span>
+        </div>
         <label className="block space-y-1">
           <span className="text-xs font-semibold text-slate-700">
             Course Name
@@ -3244,7 +4027,7 @@ const res = await fetch(url, {
                 ),
               }))
             }
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm transition focus:border-violet-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-violet-100"
           />
         </label>
 
@@ -3265,7 +4048,7 @@ const res = await fetch(url, {
                   ),
                 }))
               }
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm transition focus:border-violet-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-violet-100"
             />
           </label>
 
@@ -3286,55 +4069,88 @@ const res = await fetch(url, {
                 }))
               }
               placeholder="To be confirmed"
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm transition focus:border-violet-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-violet-100"
             />
           </label>
         </div>
       </div>
     ))}
-  </div>
+  </section>
 
-  <button
-    type="button"
-    onClick={saveOfficialDocumentSettings}
-    className="rounded-lg bg-orange-600 px-5 py-3 text-sm font-bold text-white hover:bg-orange-700"
-  >
-    Save Official Settings
-  </button>
+  <div className="sticky bottom-0 flex flex-col gap-2 rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-lg backdrop-blur sm:flex-row sm:justify-end sm:p-4">
+    <button
+      type="button"
+      onClick={saveOfficialDocumentSettings}
+      className="rounded-xl bg-[#0B1F4D] px-5 py-3 text-sm font-bold text-white shadow-sm transition-colors hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-600"
+    >
+      Save Official Settings
+    </button>
 
  <button
   type="button"
   onClick={previewOfficialDocumentPdf}
-  className="ml-3 rounded-lg bg-slate-800 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-700"
+  className="rounded-xl bg-orange-600 px-5 py-3 text-sm font-bold text-white shadow-sm transition-colors hover:bg-orange-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-600"
 >
   Generate PDF Preview
 </button>
-
-{officialPdfPreviewUrl && (
-  <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-4">
-    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-      <div>
-        <h4 className="font-bold text-slate-900">Student-view PDF Preview</h4>
-        <p className="text-xs text-slate-600">Fictional demo student and sample payment figures only. Nothing has been saved.</p>
-      </div>
-      <div className="flex gap-3">
-        <a href={officialPdfPreviewUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-semibold text-orange-700 hover:underline">
-          Open in new tab
-        </a>
-        <button type="button" onClick={() => setOfficialPdfPreviewUrl((url) => { if (url) URL.revokeObjectURL(url); return null; })} className="text-sm font-semibold text-slate-600 hover:underline">
-          Close preview
-        </button>
-      </div>
-    </div>
-    <iframe title="Student-view demo PDF preview" src={officialPdfPreviewUrl} className="h-[75vh] min-h-[520px] w-full rounded-lg border border-slate-300 bg-white" />
   </div>
-)}
+
 </div>
 
             </div>
           )}
         </main>
       </div>
+
+      {officialPdfPreviewUrl && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/75 p-2 backdrop-blur-sm sm:p-5"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setOfficialPdfPreviewUrl(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="official-pdf-preview-title"
+            className="flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/20 bg-white shadow-2xl"
+          >
+            <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-gradient-to-r from-[#0B1F4D] to-[#173B70] px-4 py-3 text-white sm:px-6">
+              <div>
+                <h2 id="official-pdf-preview-title" className="font-bold">
+                  Student-view PDF Preview
+                </h2>
+                <p className="mt-1 text-xs text-blue-100">
+                  Fictional demo student and sample payment figures only. Nothing has been saved.
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <a
+                  href={officialPdfPreviewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="rounded-lg px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
+                >
+                  Open in new tab
+                </a>
+                <button
+                  type="button"
+                  aria-label="Close PDF preview"
+                  onClick={() => setOfficialPdfPreviewUrl(null)}
+                  className="rounded-lg p-2 text-white transition-colors hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </header>
+            <iframe
+              title="Student-view demo PDF preview"
+              src={officialPdfPreviewUrl}
+              className="min-h-0 flex-1 bg-slate-100"
+            />
+          </section>
+        </div>
+      )}
 
       {selectedCallback && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70" role="presentation">
@@ -3355,30 +4171,6 @@ const res = await fetch(url, {
             <label className="block text-xs font-semibold text-slate-700">Status
               <select value={selectedCallback.status} disabled={loading} onChange={(event) => handleCallbackStatusChange(selectedCallback, event.target.value as CallbackRequest['status'])} className="ml-2 px-3 py-2 border border-slate-200 rounded-lg">
                 {(['New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
-              </select>
-            </label>
-          </section>
-        </div>
-      )}
-
-      {selectedContact && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70" role="presentation">
-          <section role="dialog" aria-modal="true" aria-labelledby="contact-detail-title" className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
-            <div className="flex justify-between items-center">
-              <h2 id="contact-detail-title" className="text-lg font-bold text-slate-900">Contact Enquiry</h2>
-              <button type="button" aria-label="Close contact details" onClick={() => setSelectedContact(null)} className="p-2 rounded-lg hover:bg-slate-100"><X className="w-4 h-4" /></button>
-            </div>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div><dt className="text-slate-500">Name</dt><dd className="font-semibold text-slate-900">{selectedContact.full_name}</dd></div>
-              <div><dt className="text-slate-500">Email</dt><dd className="font-semibold text-slate-900">{selectedContact.email}</dd></div>
-              <div><dt className="text-slate-500">Mobile</dt><dd className="font-semibold text-slate-900">{selectedContact.mobile || '—'}</dd></div>
-              <div><dt className="text-slate-500">Received</dt><dd className="font-semibold text-slate-900">{new Date(selectedContact.created_at).toLocaleString('en-IN')}</dd></div>
-            </dl>
-            <h3 className="font-bold text-sm text-slate-900">{selectedContact.subject}</h3>
-            <p className="p-3 bg-slate-50 rounded-xl text-xs text-slate-700 whitespace-pre-wrap">{selectedContact.message}</p>
-            <label className="block text-xs font-semibold text-slate-700">Status
-              <select value={selectedContact.status} disabled={loading} onChange={(event) => handleContactStatusChange(selectedContact, event.target.value as ContactEnquiry['status'])} className="ml-2 px-3 py-2 border border-slate-200 rounded-lg">
-                {(['New', 'Replied', 'Archived'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
               </select>
             </label>
           </section>
@@ -3891,14 +4683,21 @@ const res = await fetch(url, {
       {/* Passport Photo Preview Modal */}
       {appPhotoModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
-          <div className="bg-white p-4 rounded-2xl max-w-sm w-full space-y-4">
+          <div
+            className="bg-white p-4 rounded-2xl space-y-4"
+            style={{ width: 'min(22rem, calc(100vw - 2rem))' }}
+          >
             <div className="flex justify-between items-center">
               <h4 className="font-bold text-sm text-slate-800">Passport Photo Preview</h4>
               <button onClick={() => setAppPhotoModal(null)}>
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <img src={appPhotoModal} alt="Passport" className="w-full h-auto rounded-lg shadow-inner" />
+            <img
+              src={appPhotoModal}
+              alt="Passport"
+              className="mx-auto max-h-[420px] max-w-[320px] rounded-lg object-contain shadow-inner"
+            />
           </div>
         </div>
       )}
@@ -4073,6 +4872,29 @@ const res = await fetch(url, {
                   placeholder="Enter notice text to scroll on website..."
                   className="w-full px-3 py-2 border rounded-xl"
                 />
+              </div>
+              <div>
+                <label htmlFor="ann-button-action" className="font-bold text-slate-700 block mb-1">
+                  Optional Banner Button
+                </label>
+                <select
+                  id="ann-button-action"
+                  value={editingAnnouncement.button_action ?? ''}
+                  onChange={(e) => setEditingAnnouncement({
+                    ...editingAnnouncement,
+                    button_action: e.target.value === 'application' || e.target.value === 'demo'
+                      ? e.target.value
+                      : null,
+                  })}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2"
+                >
+                  <option value="">No button</option>
+                  <option value="application">Application Form</option>
+                  <option value="demo">Book Your Free Demo</option>
+                </select>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Add an optional call-to-action button to this moving announcement.
+                </p>
               </div>
               <div className="flex items-center gap-2">
                 <input

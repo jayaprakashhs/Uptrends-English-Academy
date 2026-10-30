@@ -81,18 +81,6 @@ export interface CallbackRequest {
   created_at: string;
 }
 
-export interface ContactEnquiry {
-  id: string;
-  full_name: string;
-  email: string;
-  mobile?: string | null;
-  subject: string;
-  message: string;
-  consent: boolean;
-  status: 'New' | 'Replied' | 'Archived';
-  created_at: string;
-}
-
 export interface Review {
   id: string;
   author_name: string;
@@ -124,6 +112,7 @@ export interface Announcement {
   content: string;
   is_active: boolean;
   display_order: number;
+  button_action?: 'application' | 'demo' | null;
 }
 
 export interface TeamMember {
@@ -153,6 +142,7 @@ export interface SiteBranding {
   logo_alt?: string;
   favicon_url?: string;
   footer_logo_url?: string;
+  hero_photo_url?: string | null;
   primary_orange?: string;
   primary_green?: string;
   primary_color?: string;

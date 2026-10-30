@@ -1,8 +1,11 @@
 
 import React from 'react';
-import { Program, Review, MediaItem } from '../types';
+import { Program, MediaItem, SiteBranding } from '../types';
 import {
   ArrowRight,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
   PhoneCall,
   Sparkles,
   CheckCircle2,
@@ -13,89 +16,109 @@ import {
   BookOpen,
   Clock,
   Award,
-  ChevronLeft,
-  ChevronRight,
+  UsersRound,
+  GraduationCap,
 } from 'lucide-react';
 import { extractYouTubeId, getYouTubeThumbnail } from '../lib/youtube';
+import { ApplicationCTA } from '../components/ApplicationCTA';
+import { SociableKitGoogleReviews } from '../components/SociableKitGoogleReviews';
+
+// Free Google Business Profile links; replace with the exact listing URL when verified.
+const GOOGLE_BUSINESS_URL =
+  'https://www.google.com/maps/search/?api=1&query=Uptrend%27s%20English%20Academy%20Davangere';
+const GOOGLE_WRITE_REVIEW_URL =
+  `${GOOGLE_BUSINESS_URL}${GOOGLE_BUSINESS_URL.includes('?') ? '&' : '?'}action=writeReview`;
+const HERO_PHOTO_FALLBACK_URL =
+  "https://gpnfznwqwaokfzmozpxo.supabase.co/storage/v1/object/public/Uptrend's%20English%20Academy-photos/hero_photo/Smiling%20Student%20Duo%20with%20Backpacks%20and%20Books.png";
+const LOCAL_HERO_PHOTO_FALLBACK_URL = '/assets/hero-students-reference.png';
 
 interface HomeProps {
   programs: Program[];
-  reviews: Review[];
   mediaItems: MediaItem[];
   dataStatuses: {
     programs: { loading: boolean; error: string | null };
-    reviews: { loading: boolean; error: string | null };
     media: { loading: boolean; error: string | null };
   };
-  onRetryData: (resource: 'programs' | 'reviews' | 'media') => void;
+  onRetryData: (resource: 'programs' | 'media') => void;
   setCurrentPage: (page: string) => void;
   setSelectedProgram: (program: Program) => void;
   openCallbackModal: (programName?: string) => void;
+  openDemoClassModal: () => void;
   openVideoModal: (url: string, title: string) => void;
+  branding?: SiteBranding | null;
 }
 
 export const Home: React.FC<HomeProps> = ({
   programs,
-  reviews,
   mediaItems,
   dataStatuses,
   onRetryData,
   setCurrentPage,
   setSelectedProgram,
   openCallbackModal,
+  openDemoClassModal,
   openVideoModal,
+  branding,
 }) => {
   const publishedPrograms = programs
     .filter((program) => program.is_published)
     .slice(0, 4);
+  const programCarouselRef = React.useRef<HTMLDivElement | null>(null);
+  const [activeProgramIndex, setActiveProgramIndex] = React.useState(0);
+  const [heroPhotoSource, setHeroPhotoSource] = React.useState<string | null>(
+    branding?.hero_photo_url || HERO_PHOTO_FALLBACK_URL,
+  );
+  const currentProgramIndex = Math.min(
+    activeProgramIndex,
+    Math.max(0, publishedPrograms.length - 1),
+  );
 
-  const publishedReviews = reviews
-    .filter((review) => review.is_published)
-    .slice(0, 3);
+  React.useEffect(() => {
+    setHeroPhotoSource(branding?.hero_photo_url || HERO_PHOTO_FALLBACK_URL);
+  }, [branding?.hero_photo_url]);
+
+  const handleHeroPhotoError = () => {
+    setHeroPhotoSource((currentSource) => {
+      if (currentSource === HERO_PHOTO_FALLBACK_URL) return LOCAL_HERO_PHOTO_FALLBACK_URL;
+      if (currentSource === LOCAL_HERO_PHOTO_FALLBACK_URL) return null;
+      return HERO_PHOTO_FALLBACK_URL;
+    });
+  };
 
   const previewMedia = mediaItems
     .filter((item) => item.is_published)
+    .sort((first, second) => first.display_order - second.display_order)
     .slice(0, 3);
 
-  const [reviewIndex, setReviewIndex] = React.useState(0);
+  const handleProgramCarouselScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const slides = event.currentTarget.querySelectorAll<HTMLElement>(
+      '[data-program-slide]',
+    );
+    let closestIndex = 0;
+    let closestDistance = Number.POSITIVE_INFINITY;
 
-  React.useEffect(() => {
-    setReviewIndex((current) => {
-      if (publishedReviews.length === 0) return 0;
-      return current % publishedReviews.length;
+    slides.forEach((slide, index) => {
+      const distance = Math.abs(slide.offsetLeft - event.currentTarget.scrollLeft);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestIndex = index;
+      }
     });
-  }, [publishedReviews.length]);
 
-  const previousReview = () => {
-    if (publishedReviews.length <= 1) return;
-
-    setReviewIndex((current) =>
-      current <= 0 ? publishedReviews.length - 1 : current - 1
-    );
+    setActiveProgramIndex(closestIndex);
   };
 
-  const nextReview = () => {
-    if (publishedReviews.length <= 1) return;
+  const scrollToProgram = (index: number) => {
+    const carousel = programCarouselRef.current;
+    const slide = carousel?.querySelectorAll<HTMLElement>('[data-program-slide]')[index];
+    if (!carousel || !slide) return;
 
-    setReviewIndex((current) =>
-      current >= publishedReviews.length - 1 ? 0 : current + 1
-    );
+    setActiveProgramIndex(index);
+    carousel.scrollTo({ left: slide.offsetLeft, behavior: 'auto' });
   };
-
-  // Keep all published review cards visible and rotate their order.
-  const displayedReviews = React.useMemo(() => {
-    if (publishedReviews.length === 0) return [];
-
-    return publishedReviews.map(
-      (_, index) =>
-        publishedReviews[
-          (index + reviewIndex) % publishedReviews.length
-        ]
-    );
-  }, [publishedReviews, reviewIndex]);
 
   const renderResourceState = (
-    resource: 'programs' | 'reviews' | 'media'
+    resource: 'programs' | 'media'
   ) => {
     const status = dataStatuses[resource];
 
@@ -132,119 +155,111 @@ export const Home: React.FC<HomeProps> = ({
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const whySectionRef = React.useRef<HTMLElement | null>(null);
+  const [whySectionVisible, setWhySectionVisible] = React.useState(false);
+
+  React.useEffect(() => {
+    const section = whySectionRef.current;
+    if (!section) return;
+
+    if (
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches ||
+      !('IntersectionObserver' in window)
+    ) {
+      setWhySectionVisible(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setWhySectionVisible(true);
+          observer.unobserve(entry.target);
+        }
+      },
+      { rootMargin: '0px 0px -64px 0px', threshold: 0.1 },
+    );
+
+    observer.observe(section);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <div className="space-y-20 pb-16">
       {/* HERO SECTION */}
-      <section className="relative overflow-hidden border-b border-slate-200/60 bg-gradient-to-b from-orange-50/70 via-white to-slate-50 pb-20 pt-12">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <div className="grid grid-cols-1 items-center gap-12 lg:grid-cols-12">
-            <div className="space-y-6 lg:col-span-7">
-              <div className="inline-flex items-center gap-2 rounded-full border border-orange-200 bg-orange-100/80 px-3.5 py-1.5 text-xs font-bold uppercase tracking-wider text-orange-800">
+      <section className="relative isolate border-b border-orange-100 bg-[#fff8ef] py-6 sm:py-8 min-[1100px]:!pt-0 min-[1100px]:!pb-0 min-[1100px]:min-h-[calc(100svh-164px)]">
+        <div aria-hidden="true" className="pointer-events-none absolute -left-20 bottom-[-8rem] h-64 w-64 rounded-full border-[2.5rem] border-orange-100/70 sm:h-80 sm:w-80" />
+        <div aria-hidden="true" className="pointer-events-none absolute right-[39%] top-12 hidden h-10 w-10 rotate-45 border border-amber-200 sm:block" />
+        <div className="relative mx-auto max-w-[1360px] px-4 sm:px-6 lg:px-8">
+          <div className="grid min-w-0 grid-cols-1 items-center gap-8 min-[1100px]:h-[calc(100svh-164px)] min-[1100px]:mb-0 min-[1100px]:pb-0 min-[1100px]:grid-cols-[minmax(0,0.78fr)_minmax(0,1.22fr)] min-[1100px]:items-stretch min-[1100px]:gap-4">
+            <div className="relative z-10 flex min-w-0 flex-col justify-center gap-4 py-2 min-[1100px]:py-5">
+              <div className="inline-flex items-center gap-2 rounded-full bg-transparent px-0 py-1 text-[11px] font-bold uppercase tracking-[0.16em] text-orange-700 sm:text-xs">
                 <Sparkles className="h-4 w-4 text-orange-600" />
-                <span>English Communication Training • Davangere</span>
+                <span>WELCOME TO UPTREND'S ENGLISH ACADEMY</span>
               </div>
 
-              <h1 className="text-4xl font-extrabold leading-[1.12] tracking-tight text-slate-950 sm:text-5xl lg:text-6xl">
-                Speak English with{' '}
-                <span className="bg-gradient-to-r from-orange-600 to-amber-600 bg-clip-text text-transparent">
-                  Fluency
-                </span>
-                , Poise, and{' '}
-                <span className="bg-gradient-to-r from-emerald-600 to-teal-700 bg-clip-text text-transparent">
-                  Confidence
-                </span>
-              </h1>
+              <h1 className="w-full max-w-none font-serif text-[clamp(3rem,8vw,3.75rem)] font-bold leading-[0.98] tracking-tight text-slate-950 sm:text-[clamp(3.5rem,5.5vw,4.25rem)] min-[1100px]:text-[clamp(5rem,6.2vw,6.25rem)]">
+  <span className="block whitespace-nowrap">Speak English</span>
+  <span className="block whitespace-nowrap">Fluently and</span>
+  <span className="block whitespace-nowrap">
+    <span className="text-orange-600">Confidently</span>
+  </span>
+  <span className="block whitespace-nowrap">in Davangere</span>
+</h1>
 
-              <p className="max-w-2xl text-lg leading-relaxed text-slate-600">
-                Uptrend’s English Academy is Davangere’s dedicated training
-                center for practical spoken English, communication development,
-                and grammar fundamentals. We empower students, job seekers,
-                professionals, and homemakers to speak naturally without
-                hesitation.
+              <p className="max-w-[38rem] text-base leading-relaxed text-slate-600 sm:text-lg">
+                Uptrend's English Academy offers simple, level-based Spoken English,
+                Grammar, and Kids English classes. Small batches. More speaking
+                practice. Faster results.
               </p>
 
-              <div className="flex flex-wrap items-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCurrentPage('apply');
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
-                  }}
-                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-orange-600 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-orange-600/20 transition hover:bg-orange-500 sm:px-7 sm:text-base"
-                >
-                  Apply Now
-                  <ArrowRight className="h-5 w-5" />
-                </button>
-
+              <div className="flex flex-col items-stretch gap-3 pt-1 min-[420px]:flex-row min-[420px]:flex-wrap min-[420px]:items-center min-[1100px]:flex-nowrap">
                 <button
                   type="button"
                   onClick={() => {
                     setCurrentPage('programs');
                     window.scrollTo({ top: 0, behavior: 'smooth' });
                   }}
-                  className="inline-flex min-h-12 items-center justify-center rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-800 transition hover:border-slate-400 hover:bg-slate-50 sm:px-6 sm:text-base"
+                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-lg bg-orange-600 px-5 py-3 text-sm font-bold text-white shadow-md shadow-orange-600/20 transition hover:bg-orange-500 hover:shadow-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-700 motion-reduce:transition-none sm:px-6 sm:text-base"
                 >
-                  Explore Programs
+                  Explore Courses
+                  <ArrowRight className="h-5 w-5" />
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => openCallbackModal('General English Training')}
-                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-50 hover:text-emerald-800"
+                  onClick={openDemoClassModal}
+                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-lg border border-orange-400 bg-white px-5 py-3 text-sm font-bold text-orange-700 shadow-sm transition hover:border-orange-500 hover:bg-orange-600 hover:text-white hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-700 motion-reduce:transition-none sm:px-6 sm:text-base"
                 >
-                  <PhoneCall className="h-4 w-4 text-emerald-600" />
-                  Request a Call
+                  <CalendarDays className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>Book Your FREE Demo Class</span>
                 </button>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 border-t border-slate-200 pt-4 text-xs font-medium text-slate-600 sm:grid-cols-3">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
-                  <span>Interactive Speaking</span>
+              <div className="grid grid-cols-1 gap-3 border-t border-orange-200 pt-4 text-[11px] font-medium leading-snug text-slate-600 min-[420px]:grid-cols-2 min-[1100px]:grid-cols-3 min-[1100px]:gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <UsersRound className="h-4 w-4 shrink-0 text-emerald-600" />
+                  <span>Trusted by 20,000+ Students in Karnataka</span>
                 </div>
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
-                  <span>Practical Grammar</span>
+                <div className="flex min-w-0 items-center gap-2">
+                  <GraduationCap className="h-4 w-4 shrink-0 text-emerald-600" />
+                  <span>Beginner to Advanced Levels</span>
                 </div>
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
-                  <span>Ram &amp; Co Circle, Davangere</span>
+                <div className="flex min-w-0 items-center gap-2">
+                  <Award className="h-4 w-4 shrink-0 text-emerald-600" />
+                  <span>Affordable Fees</span>
                 </div>
               </div>
             </div>
 
-            {/* HERO IMAGE AND BADGE */}
-            <div className="relative mt-4 lg:col-span-5 lg:mt-0">
-              <div className="group relative mx-auto max-w-md overflow-hidden rounded-3xl border-4 border-white bg-slate-900 shadow-2xl lg:max-w-none">
-                <img
-                  src="https://images.unsplash.com/photo-1523240795612-9a054b0db644?auto=format&fit=crop&w=1000&q=80"
-                  alt="Students learning together in a classroom"
-                  className="aspect-[4/3] w-full object-cover object-center transition-transform duration-500 group-hover:scale-105"
-                />
-
-                <div className="absolute inset-0 flex flex-col justify-end bg-gradient-to-t from-slate-950/80 via-transparent to-transparent p-6 text-white">
-                  <span className="text-xs font-bold uppercase tracking-wider text-orange-300">
-                    Empowering Davangere Learners
-                  </span>
-                  <p className="text-sm font-semibold text-slate-100">
-                    Real speaking practice in a warm, encouraging environment.
-                  </p>
-                </div>
-              </div>
-
-              <div className="absolute -top-4 right-2 z-20 flex max-w-[calc(100%-1rem)] items-center gap-3 rounded-2xl border border-slate-100 bg-white p-3 shadow-xl sm:-right-4 sm:-top-5 sm:p-4">
-                <div className="shrink-0 rounded-xl bg-emerald-100 p-2.5 text-emerald-700 sm:p-3">
-                  <BookOpen className="h-5 w-5 sm:h-6 sm:w-6" />
-                </div>
-                <div className="min-w-0">
-                  <p className="text-xs font-bold text-slate-900 sm:text-sm">
-                    Proven Pedagogy
-                  </p>
-                  <p className="mt-0.5 text-[11px] leading-snug text-slate-500 sm:text-xs">
-                    Foundation to Advanced Modules
-                  </p>
-                </div>
-              </div>
+            {/* HERO IMAGE: aligned to the navigation edge and hero bottom on desktop */}
+            <div className="relative min-h-[320px] min-w-0 w-full overflow-visible min-[1100px]:h-full min-[1100px]:min-h-0">
+              <img
+                src={heroPhotoSource || undefined}
+                alt="Two smiling college students holding books against a warm cream background"
+                onError={handleHeroPhotoError}
+                className="block h-full w-full bg-transparent object-contain object-bottom min-[1100px]:absolute min-[1100px]:top-[22%] min-[1100px]:bottom-0 min-[1100px]:left-0 min-[1100px]:right-0 min-[1100px]:h-auto min-[1100px]:w-full min-[1100px]:max-w-none min-[1100px]:scale-[1.2] min-[1100px]:origin-bottom-right min-[1100px]:translate-x-[20%] min-[1100px]:object-right-bottom"
+              />
             </div>
           </div>
         </div>
@@ -258,7 +273,7 @@ export const Home: React.FC<HomeProps> = ({
               <Compass className="h-4 w-4" />
               <span>Academy Offerings</span>
             </div>
-            <h2 className="text-3xl font-extrabold tracking-tight text-slate-950">
+            <h2 id="featured-programs-heading" className="text-3xl font-extrabold tracking-tight text-slate-950">
               Featured English Programs
             </h2>
             <p className="mt-1 max-w-xl text-sm text-slate-600">
@@ -287,135 +302,225 @@ export const Home: React.FC<HomeProps> = ({
               No published programs are currently available.
             </p>
           ) : (
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-4">
-              {publishedPrograms.map((program) => (
-                <article
-                  key={program.id}
-                  className="group flex min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-all duration-300 hover:shadow-xl"
+            <div
+              role="region"
+              aria-labelledby="featured-programs-heading"
+              aria-roledescription="carousel"
+            >
+              <div className="mb-3 flex items-center justify-between sm:hidden">
+                <button
+                  type="button"
+                  aria-label="Previous programs"
+                  onClick={() => scrollToProgram(Math.max(0, currentProgramIndex - 1))}
+                  disabled={currentProgramIndex === 0}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-slate-900 text-white shadow-sm transition-colors hover:bg-orange-600 hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:opacity-40 motion-reduce:transition-none"
                 >
-                  <div className="relative aspect-[16/10] overflow-hidden bg-slate-100">
-                    <img
-                      src={
-                        program.image_url ||
-                        'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80'
-                      }
-                      alt={program.title}
-                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                    />
-                    {program.level && (
-                      <div className="absolute left-3 top-3 rounded-md bg-slate-950/80 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur-sm">
-                        {program.level}
-                      </div>
-                    )}
-                  </div>
+                  <ChevronLeft className="h-5 w-5" aria-hidden="true" />
+                </button>
+                <span
+                  className="text-xs font-semibold tabular-nums text-slate-600"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  {currentProgramIndex + 1} / {publishedPrograms.length}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Next programs"
+                  onClick={() =>
+                    scrollToProgram(
+                      Math.min(publishedPrograms.length - 1, currentProgramIndex + 1),
+                    )
+                  }
+                  disabled={currentProgramIndex >= publishedPrograms.length - 1}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-slate-900 text-white shadow-sm transition-colors hover:bg-orange-600 hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:opacity-40 motion-reduce:transition-none"
+                >
+                  <ChevronRight className="h-5 w-5" aria-hidden="true" />
+                </button>
+              </div>
 
-                  <div className="flex flex-1 flex-col p-5">
-                    <h3 className="mb-2 text-lg font-bold leading-snug text-slate-900 transition-colors group-hover:text-orange-600">
-                      {program.title}
-                    </h3>
-                    <p className="mb-4 line-clamp-2 text-xs leading-relaxed text-slate-600">
-                      {program.short_description}
-                    </p>
-
-                    <div className="mt-auto space-y-2 border-t border-slate-100 pt-3 text-xs text-slate-600">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <Users className="h-3.5 w-3.5 shrink-0 text-orange-500" />
-                        <span className="min-w-0 truncate">
-                          <strong>Audience:</strong> {program.target_audience}
-                        </span>
-                      </div>
-
-                      {program.duration && (
-                        <div className="flex items-center gap-2">
-                          <Clock className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
-                          <span>
-                            <strong>Duration:</strong> {program.duration}
-                          </span>
+              <div
+                ref={programCarouselRef}
+                onScroll={handleProgramCarouselScroll}
+                className="relative flex snap-x snap-mandatory gap-4 overflow-x-auto overscroll-x-contain scroll-smooth pb-1 motion-reduce:scroll-auto sm:grid sm:grid-cols-2 sm:gap-6 sm:overflow-visible sm:pb-0 lg:grid-cols-4"
+              >
+                {publishedPrograms.map((program, index) => (
+                  <article
+                    key={program.id}
+                    data-program-slide
+                    aria-roledescription="slide"
+                    aria-label={`${index + 1} of ${publishedPrograms.length}: ${program.title}`}
+                    className="group flex min-w-0 flex-[0_0_100%] shrink-0 snap-start flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-all duration-300 hover:shadow-xl sm:flex-auto"
+                  >
+                    <div className="relative aspect-[16/10] overflow-hidden bg-slate-100">
+                      <img
+                        src={
+                          program.image_url ||
+                          'https://images.unsplash.com/photo-1543269865-cbf427effbad?auto=format&fit=crop&w=800&q=80'
+                        }
+                        alt={program.title}
+                        className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                      />
+                      {program.level && (
+                        <div className="absolute left-3 top-3 rounded-md bg-slate-950/80 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur-sm">
+                          {program.level}
                         </div>
                       )}
                     </div>
 
-                    <div className="mt-4 grid grid-cols-2 gap-2 border-t border-slate-100 pt-4">
-                      <button
-                        type="button"
-                        onClick={() => handleProgramClick(program)}
-                        className="flex min-w-0 min-h-11 w-full items-center justify-center rounded-xl bg-slate-100 px-2 py-2.5 text-center text-xs font-bold text-slate-800 transition hover:bg-slate-200 sm:px-3"
-                      >
-                        View Program
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => openCallbackModal(program.title)}
-                        className="flex min-w-0 min-h-11 w-full items-center justify-center gap-1 rounded-xl border border-orange-500 px-2 py-2.5 text-center text-xs font-bold text-orange-600 transition hover:bg-orange-50 sm:px-3"
-                      >
-                        <PhoneCall className="h-3.5 w-3.5 shrink-0" />
-                        <span>Request Call</span>
-                      </button>
+                    <div className="flex flex-1 flex-col p-5">
+                      <h3 className="mb-2 text-lg font-bold leading-snug text-slate-900 transition-colors group-hover:text-orange-600">
+                        {program.title}
+                      </h3>
+                      <p className="mb-4 line-clamp-2 text-xs leading-relaxed text-slate-600">
+                        {program.short_description}
+                      </p>
+
+                      <div className="mt-auto space-y-2 border-t border-slate-100 pt-3 text-xs text-slate-600">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Users className="h-3.5 w-3.5 shrink-0 text-orange-500" />
+                          <span className="min-w-0 truncate">
+                            <strong>Audience:</strong> {program.target_audience}
+                          </span>
+                        </div>
+
+                        {program.duration && (
+                          <div className="flex items-center gap-2">
+                            <Clock className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                            <span>
+                              <strong>Duration:</strong> {program.duration}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="mt-4 flex flex-col gap-2 border-t border-slate-100 pt-4">
+                        <button
+                          type="button"
+                          onClick={() => handleProgramClick(program)}
+                          className="flex min-h-12 w-full min-w-0 items-center justify-center rounded-xl bg-slate-900 px-4 py-3 text-center text-sm font-bold leading-snug text-white shadow-sm transition-colors transition-shadow duration-200 hover:bg-orange-600 hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 motion-reduce:transition-none"
+                        >
+                          View Program
+                        </button>
+                        <button
+                          type="button"
+                          onClick={openDemoClassModal}
+                          className="flex min-h-12 w-full min-w-0 items-center justify-center gap-2 rounded-xl border border-orange-500 bg-white px-4 py-3 text-center text-sm font-bold leading-snug text-orange-600 transition-colors transition-shadow duration-200 hover:bg-orange-600 hover:text-white hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 motion-reduce:transition-none"
+                        >
+                          <CalendarDays className="h-4 w-4 shrink-0" aria-hidden="true" />
+                          <span className="min-w-0 break-words">Book Your Free Demo Class</span>
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                </article>
-              ))}
+                  </article>
+                ))}
+              </div>
             </div>
           ))}
       </section>
 
       {/* WHY CHOOSE US */}
-      <section className="bg-slate-900 py-16 text-white sm:py-20">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <div className="mx-auto mb-12 max-w-3xl text-center">
-            <span className="text-xs font-bold uppercase tracking-wider text-orange-400">
+      <section
+        ref={whySectionRef}
+        className={`overflow-hidden border-y border-orange-100 bg-[#fbfaf7] py-5 transition-[opacity,transform] duration-700 ease-out motion-reduce:translate-y-0 motion-reduce:opacity-100 motion-reduce:transition-none sm:py-16 lg:py-20 ${
+          whySectionVisible ? 'translate-y-0 opacity-100' : 'translate-y-5 opacity-0'
+        }`}
+      >
+        <div className="mx-auto max-w-7xl px-3 sm:px-6 lg:px-8">
+          <div className="mx-auto mb-3 max-w-3xl text-center sm:mb-10 lg:mb-12">
+            <span className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.16em] text-orange-700 sm:text-xs sm:tracking-[0.18em]">
+              <span className="h-px w-7 bg-emerald-600" aria-hidden="true" />
               The Uptrend’s Advantage
+              <span className="h-px w-7 bg-emerald-600" aria-hidden="true" />
             </span>
-            <h2 className="mt-2 text-3xl font-extrabold tracking-tight sm:text-4xl">
+            <h2 className="mt-2 text-[clamp(1.25rem,5vw,1.55rem)] font-extrabold leading-tight tracking-tight text-slate-950 sm:mt-4 sm:text-4xl lg:text-5xl">
               Why Learn English with Us?
             </h2>
-            <p className="mt-3 text-sm leading-relaxed text-slate-400 sm:text-base">
-              Our training methodology focuses on practical speaking
-              habituation rather than rote memorization.
+            <p className="mx-auto mt-2 max-w-2xl text-xs leading-4 text-slate-600 sm:mt-4 sm:text-base sm:leading-relaxed">
+              Our training methodology focuses on practical speaking habituation rather than rote memorization.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-            <div className="flex flex-col items-center rounded-3xl border border-slate-700/70 bg-slate-800/80 p-7 text-center transition-all duration-300 hover:-translate-y-1 hover:border-orange-500/40 hover:shadow-xl sm:p-8">
-              <div className="mb-5 flex h-20 w-20 items-center justify-center rounded-2xl bg-orange-600/20 text-orange-400">
-                <Users className="h-9 w-9" />
-              </div>
-              <h3 className="mb-3 text-lg font-bold text-white">
+          <div className="grid min-w-0 grid-cols-2 auto-rows-fr gap-2 sm:gap-5 lg:gap-6">
+            <article className="group flex min-w-0 flex-col items-center rounded-2xl border border-orange-200/80 bg-white p-2.5 text-center shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-orange-300 hover:shadow-lg motion-reduce:transform-none sm:rounded-3xl sm:p-7 lg:p-8">
+              <span className="mb-1.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-orange-50 text-orange-700 transition-colors duration-300 group-hover:bg-orange-100 sm:mb-5 sm:h-12 sm:w-12 sm:rounded-2xl">
+                <Users className="h-4 w-4 sm:h-6 sm:w-6" aria-hidden="true" />
+              </span>
+              <h3 className="text-center text-xs font-bold leading-tight tracking-tight text-slate-950 sm:text-xl sm:leading-snug lg:text-2xl">
                 Interactive Speaking Practice
               </h3>
-              <p className="max-w-sm text-sm leading-relaxed text-slate-400">
-                Overcome the fear of making mistakes with supportive pair
-                work, everyday situational dialogues, and structured speaking
-                drills.
+              <p className="mt-1.5 text-center text-xs leading-[1.3] text-slate-600 sm:mt-3 sm:text-sm sm:leading-7 lg:text-base">
+                <span className="sm:hidden" aria-hidden="true">
+                  Practise with pair work, everyday dialogues, and speaking drills.
+                </span>
+                <span className="sr-only sm:hidden">
+                  Overcome the fear of making mistakes with supportive pair work, everyday situational dialogues, and structured speaking drills.
+                </span>
+                <span className="hidden sm:inline">
+                  Overcome the fear of making mistakes with supportive pair work, everyday situational dialogues, and structured speaking drills.
+                </span>
               </p>
-            </div>
+            </article>
 
-            <div className="flex flex-col items-center rounded-3xl border border-slate-700/70 bg-slate-800/80 p-7 text-center transition-all duration-300 hover:-translate-y-1 hover:border-emerald-500/40 hover:shadow-xl sm:p-8">
-              <div className="mb-5 flex h-20 w-20 items-center justify-center rounded-2xl bg-emerald-600/20 text-emerald-400">
-                <Award className="h-9 w-9" />
-              </div>
-              <h3 className="mb-3 text-lg font-bold text-white">
+            <article className="group flex min-w-0 flex-col items-center rounded-2xl border border-emerald-200/80 bg-white p-2.5 text-center shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-emerald-300 hover:shadow-lg motion-reduce:transform-none sm:rounded-3xl sm:p-7 lg:p-8">
+              <span className="mb-1.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 transition-colors duration-300 group-hover:bg-emerald-100 sm:mb-5 sm:h-12 sm:w-12 sm:rounded-2xl">
+                <BookOpen className="h-4 w-4 sm:h-6 sm:w-6" aria-hidden="true" />
+              </span>
+              <h3 className="text-center text-xs font-bold leading-tight tracking-tight text-slate-950 sm:text-xl sm:leading-snug lg:text-2xl">
                 Grammar with Immediate Application
               </h3>
-              <p className="max-w-sm text-sm leading-relaxed text-slate-400">
-                Learn core tenses, sentence structures, and functional
-                vocabulary with immediate speaking reinforcement in context.
+              <p className="mt-1.5 text-center text-xs leading-[1.3] text-slate-600 sm:mt-3 sm:text-sm sm:leading-7 lg:text-base">
+                <span className="sm:hidden" aria-hidden="true">
+                  Apply grammar, sentence structure, and vocabulary in speech.
+                </span>
+                <span className="sr-only sm:hidden">
+                  Learn core tenses, sentence structures, and functional vocabulary with immediate speaking reinforcement in context.
+                </span>
+                <span className="hidden sm:inline">
+                  Learn core tenses, sentence structures, and functional vocabulary with immediate speaking reinforcement in context.
+                </span>
               </p>
-            </div>
+            </article>
 
-            <div className="flex flex-col items-center rounded-3xl border border-slate-700/70 bg-slate-800/80 p-7 text-center transition-all duration-300 hover:-translate-y-1 hover:border-amber-500/40 hover:shadow-xl sm:p-8">
-              <div className="mb-5 flex h-20 w-20 items-center justify-center rounded-2xl bg-amber-600/20 text-amber-400">
-                <BookOpen className="h-9 w-9" />
-              </div>
-              <h3 className="mb-3 text-lg font-bold text-white">
-                Central Davangere Location
+            <article className="group flex min-w-0 flex-col items-center rounded-2xl border border-emerald-200/80 bg-white p-2.5 text-center shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-emerald-300 hover:shadow-lg motion-reduce:transform-none sm:rounded-3xl sm:p-7 lg:p-8">
+              <span className="mb-1.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 transition-colors duration-300 group-hover:bg-emerald-100 sm:mb-5 sm:h-12 sm:w-12 sm:rounded-2xl">
+                <UsersRound className="h-4 w-4 sm:h-6 sm:w-6" aria-hidden="true" />
+              </span>
+              <h3 className="text-center text-xs font-bold leading-tight tracking-tight text-slate-950 sm:text-xl sm:leading-snug lg:text-2xl">
+                Small-Batch Learning Experience
               </h3>
-              <p className="max-w-sm text-sm leading-relaxed text-slate-400">
-                Conveniently located at Ram And Co Circle, Devi Building,
-                2nd Floor, accessible from across Davangere city and nearby
-                towns.
+              <p className="mt-1.5 text-center text-xs leading-[1.3] text-slate-600 sm:mt-3 sm:text-sm sm:leading-7 lg:text-base">
+                <span className="sm:hidden" aria-hidden="true">
+                  More chances to practise, ask questions, and get personal attention.
+                </span>
+                <span className="sr-only sm:hidden">
+                  Enjoy more opportunities to practise speaking, ask questions, and receive personal attention in a supportive learning environment.
+                </span>
+                <span className="hidden sm:inline">
+                  Enjoy more opportunities to practise speaking, ask questions, and receive personal attention in a supportive learning environment.
+                </span>
               </p>
-            </div>
+            </article>
+
+            <article className="group flex min-w-0 flex-col items-center rounded-2xl border border-orange-200/80 bg-white p-2.5 text-center shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-orange-300 hover:shadow-lg motion-reduce:transform-none sm:rounded-3xl sm:p-7 lg:p-8">
+              <span className="mb-1.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-orange-50 text-orange-700 transition-colors duration-300 group-hover:bg-orange-100 sm:mb-5 sm:h-12 sm:w-12 sm:rounded-2xl">
+                <GraduationCap className="h-4 w-4 sm:h-6 sm:w-6" aria-hidden="true" />
+              </span>
+              <h3 className="text-center text-xs font-bold leading-tight tracking-tight text-slate-950 sm:text-xl sm:leading-snug lg:text-2xl">
+                Personalized Learning Support
+              </h3>
+              <p className="mt-1.5 text-center text-xs leading-[1.3] text-slate-600 sm:mt-3 sm:text-sm sm:leading-7 lg:text-base">
+                <span className="sm:hidden" aria-hidden="true">
+                  Step-by-step guidance to build confidence and communication.
+                </span>
+                <span className="sr-only sm:hidden">
+                  Build your English skills step by step with guidance suited to your learning level, helping you improve your confidence and communication skills.
+                </span>
+                <span className="hidden sm:inline">
+                  Build your English skills step by step with guidance suited to your learning level, helping you improve your confidence and communication skills.
+                </span>
+              </p>
+            </article>
           </div>
         </div>
       </section>
@@ -428,7 +533,7 @@ export const Home: React.FC<HomeProps> = ({
               About Uptrend’s English Academy
             </span>
             <h2 className="text-2xl font-extrabold tracking-tight sm:text-3xl">
-              An Approximately 25-Year Journey in English Language Training
+              25+ Years of Building English-Speaking Confidence
             </h2>
             <p className="text-sm leading-relaxed text-emerald-100/90">
               Founded in Davangere, Karnataka, Uptrend’s English Academy has
@@ -451,102 +556,71 @@ export const Home: React.FC<HomeProps> = ({
         </div>
       </section>
 
-      {/* REVIEWS WITH LEFT AND RIGHT SIDE ARROWS */}
-      {(publishedReviews.length > 0 ||
-        dataStatuses.reviews.loading ||
-        dataStatuses.reviews.error) && (
-        <section className="relative mx-auto w-full max-w-[1600px] px-4 py-2 sm:px-8 lg:px-20">
-          {/* LEFT-SIDE PREVIOUS ARROW */}
-          <button
-            type="button"
-            onClick={previousReview}
-            disabled={publishedReviews.length <= 1}
-            aria-label="Previous reviews"
-            title="Previous reviews"
-            className="absolute left-1 top-1/2 z-20 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-lg transition hover:border-orange-500 hover:bg-orange-50 hover:text-orange-600 disabled:cursor-not-allowed disabled:opacity-40 sm:left-4 lg:left-6"
-          >
-            <ChevronLeft className="h-6 w-6" />
-          </button>
-
-          {/* RIGHT-SIDE NEXT ARROW */}
-          <button
-            type="button"
-            onClick={nextReview}
-            disabled={publishedReviews.length <= 1}
-            aria-label="Next reviews"
-            title="Next reviews"
-            className="absolute right-1 top-1/2 z-20 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-lg transition hover:border-orange-500 hover:bg-orange-50 hover:text-orange-600 disabled:cursor-not-allowed disabled:opacity-40 sm:right-4 lg:right-6"
-          >
-            <ChevronRight className="h-6 w-6" />
-          </button>
-
-          <div className="mx-auto max-w-7xl">
-            <div className="mb-8 text-center">
-              <div className="mb-2 inline-flex items-center justify-center gap-1.5 text-xs font-bold uppercase tracking-wider text-emerald-600">
-                <MessageSquareQuote className="h-4 w-4" />
-                <span>Verified Feedback</span>
-              </div>
-              <h2 className="text-2xl font-extrabold text-slate-950 sm:text-3xl">
-                What Our Students Say
-              </h2>
-              <p className="mt-2 text-sm text-slate-600">
-                Hear from our students about their learning experience.
-              </p>
+      {/* GOOGLE REVIEWS WIDGET */}
+      <section className="relative mx-auto w-full max-w-[1600px] px-4 py-2 sm:px-8 lg:px-20">
+        <div className="mx-auto max-w-7xl">
+          <div className="mb-8 text-center">
+            <div className="mb-2 inline-flex items-center justify-center gap-1.5 text-xs font-bold uppercase tracking-wider text-emerald-600">
+              <MessageSquareQuote className="h-4 w-4" />
+              <span>Google Reviews</span>
             </div>
-
-            {renderResourceState('reviews') ||
-              (publishedReviews.length === 0 ? (
-                <p className="py-6 text-center text-sm text-slate-500">
-                  No published reviews are currently available.
-                </p>
-              ) : (
-                <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-                  {displayedReviews.map((review) => (
-                    <article
-                      key={review.id}
-                      className="flex h-full min-w-0 flex-col justify-between rounded-3xl border border-slate-200/80 bg-white p-6 shadow-md transition-all duration-300 hover:-translate-y-1 hover:shadow-xl sm:p-7"
-                    >
-                      <div>
-                        <div
-                          className="mb-4 flex items-center gap-1 text-amber-400"
-                          aria-label={`${review.rating} out of 5 stars`}
-                        >
-                          {Array.from(
-                            { length: Math.max(0, Math.min(5, review.rating)) },
-                            (_, index) => (
-                              <span
-                                key={index}
-                                className="text-xl"
-                                aria-hidden="true"
-                              >
-                                ★
-                              </span>
-                            )
-                          )}
-                        </div>
-
-                        <MessageSquareQuote className="mb-3 h-7 w-7 text-emerald-600/70" />
-
-                        <p className="break-words text-sm italic leading-relaxed text-slate-700 sm:text-base">
-                          “{review.review_text}”
-                        </p>
-                      </div>
-
-                      <div className="mt-6 border-t border-slate-100 pt-4">
-                        <p className="font-bold text-slate-900">
-                          {review.author_name}
-                        </p>
-                        <span className="mt-2 inline-block rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-                          {review.source || 'Verified Student'}
-                        </span>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ))}
+            <h2 className="text-2xl font-extrabold text-slate-950 sm:text-3xl">
+              What Our Customers Say on Google
+            </h2>
+            <p className="mt-2 text-sm text-slate-600">
+              Read reviews shared on our Google Business Profile.
+            </p>
           </div>
-        </section>
-      )}
+
+          <div className="min-w-0 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:p-5">
+            <SociableKitGoogleReviews />
+          </div>
+
+        </div>
+      </section>
+
+      {/* GOOGLE REVIEWS LINKS */}
+      <section className="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
+        <div className="overflow-hidden rounded-3xl border border-slate-200 bg-gradient-to-br from-orange-50 via-white to-emerald-50 p-7 text-center shadow-sm sm:p-10">
+          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-white text-amber-500 shadow-sm ring-1 ring-slate-200">
+            <span className="text-2xl font-black" aria-hidden="true">★</span>
+          </div>
+          <p className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-700">
+            Find Us on Google
+          </p>
+          <h2 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-950 sm:text-3xl">
+            Your Feedback Matters
+          </h2>
+          <p className="mx-auto mt-3 max-w-2xl text-sm leading-relaxed text-slate-600 sm:text-base">
+            See what learners are saying about Uptrend’s English Academy, or
+            share your own experience on Google.
+          </p>
+
+          <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
+            <a
+              href={GOOGLE_BUSINESS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-orange-600 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-orange-600/20 transition hover:bg-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2"
+            >
+              Read Google Reviews
+              <ArrowRight className="h-4 w-4" />
+            </a>
+            <a
+              href={GOOGLE_WRITE_REVIEW_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-h-12 items-center justify-center rounded-xl border border-slate-300 bg-white px-6 py-3 text-sm font-bold text-slate-800 transition hover:border-emerald-500 hover:bg-emerald-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2"
+            >
+              Write a Google Review
+            </a>
+          </div>
+
+          <p className="mt-4 text-xs text-slate-500">
+            Opens Google in a new tab. Sign in to Google to post a review.
+          </p>
+        </div>
+      </section>
 
       {/* MEDIA GALLERY PREVIEW */}
       {(previewMedia.length > 0 ||
@@ -559,7 +633,7 @@ export const Home: React.FC<HomeProps> = ({
                 Academy Highlights
               </span>
               <h2 className="mt-1 text-2xl font-extrabold text-slate-950 sm:text-3xl">
-                Media &amp; Video Gallery
+                Media &amp; Testimonials
               </h2>
             </div>
             <button
@@ -638,40 +712,10 @@ export const Home: React.FC<HomeProps> = ({
         </section>
       )}
 
-      {/* APPLY NOW CTA */}
-      <section className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="flex flex-col items-center justify-between gap-8 rounded-3xl bg-gradient-to-r from-orange-600 via-orange-500 to-amber-600 p-8 text-white shadow-xl md:flex-row sm:p-12">
-          <div className="max-w-xl space-y-2 text-center md:text-left">
-            <h2 className="text-2xl font-extrabold tracking-tight sm:text-3xl">
-              Ready to Speak with Confidence?
-            </h2>
-            <p className="text-sm text-orange-100">
-              Submit your application online. Our admissions team will review
-              your details and confirm your admission via email.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-center gap-3">
-            <button
-              type="button"
-              onClick={() => {
-                setCurrentPage('apply');
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              className="cursor-pointer rounded-xl bg-white px-7 py-3.5 text-sm font-bold text-orange-600 shadow-md transition-all hover:bg-orange-50"
-            >
-              Start Online Application →
-            </button>
-            <button
-              type="button"
-              onClick={() => openCallbackModal('Admission Enquiry')}
-              className="cursor-pointer rounded-xl bg-black/20 px-5 py-3.5 text-sm font-semibold text-white transition-all hover:bg-black/30"
-            >
-              Request a Call
-            </button>
-          </div>
-        </div>
-      </section>
+      <ApplicationCTA
+        openDemoClassModal={openDemoClassModal}
+        openCallbackModal={openCallbackModal}
+      />
     </div>
   );
 };

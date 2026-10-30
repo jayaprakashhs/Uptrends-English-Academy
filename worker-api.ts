@@ -33,11 +33,13 @@ interface AdminProfile {
 
 interface ImagePayload {
   bytes: Uint8Array;
-  mime: 'image/jpeg' | 'image/png' | 'image/webp';
+  mime: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/x-icon';
 }
 
-const MAX_JSON_BYTES = 7 * 1024 * 1024;
+const MAX_JSON_BYTES = 15 * 1024 * 1024;
 const MAX_MEDIA_BYTES = 5 * 1024 * 1024;
+const MAX_BRANDING_IMAGE_BYTES = 1024 * 1024;
+const MAX_BRANDING_LOGO_HERO_IMAGE_BYTES = 3 * 1024 * 1024;
 const MAX_PASSPORT_BYTES = 300 * 1024;
 const ROLE_RANK: Record<string, number> = { staff: 1, admin: 2, super_admin: 3 };
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -290,11 +292,11 @@ const messageOf = (error: unknown): string => error instanceof Error ? error.mes
 
 const parseJson = async (request: Request): Promise<Record<string, unknown> | Response> => {
   const contentLength = Number(request.headers.get('content-length') || 0);
-  if (contentLength > MAX_JSON_BYTES) return errorResponse('Request body exceeds the 7 MB limit.', 413);
+  if (contentLength > MAX_JSON_BYTES) return errorResponse('Request body exceeds the 15 MB limit.', 413);
 
   try {
     const raw = await request.text();
-    if (new TextEncoder().encode(raw).byteLength > MAX_JSON_BYTES) return errorResponse('Request body exceeds the 7 MB limit.', 413);
+    if (new TextEncoder().encode(raw).byteLength > MAX_JSON_BYTES) return errorResponse('Request body exceeds the 15 MB limit.', 413);
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return errorResponse('A JSON object request body is required.', 400);
     return parsed as Record<string, unknown>;
@@ -355,10 +357,20 @@ const checkContactDuplicates = async (
   return errorResponse('Contact verification is temporarily unavailable. Please try again.', 503);
 };
 
-const decodeImage = (value: unknown, maxBytes: number): ImagePayload | Response => {
+const decodeImage = (
+  value: unknown,
+  maxBytes: number,
+  allowIcon = false,
+): ImagePayload | Response => {
   if (typeof value !== 'string') return errorResponse('An image data URL is required.', 400);
-  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/i.exec(value);
-  if (!match) return errorResponse('Invalid image upload. Please use a valid JPEG, PNG, or WebP image.', 400);
+  const allowedTypes = allowIcon
+    ? 'jpeg|png|webp|x-icon|vnd\\.microsoft\\.icon'
+    : 'jpeg|png|webp';
+  const match = new RegExp(
+    `^data:(image/(?:${allowedTypes}));base64,([A-Za-z0-9+/]+={0,2})$`,
+    'i',
+  ).exec(value);
+  if (!match) return errorResponse('Invalid image upload. Please use a supported image file.', 400);
 
   try {
     const binary = atob(match[2]);
@@ -367,16 +379,24 @@ const decodeImage = (value: unknown, maxBytes: number): ImagePayload | Response 
       const size = maxBytes === MAX_PASSPORT_BYTES ? `${(binary.length / 1024).toFixed(1)} KB` : `${(binary.length / (1024 * 1024)).toFixed(1)} MB`;
       return errorResponse(maxBytes === MAX_PASSPORT_BYTES
         ? `Passport photograph exceeds 300 KB limit (${size}). Please compress or choose a smaller image.`
-        : 'Photo upload exceeds 5 MB limit.', 400);
+        : maxBytes === MAX_BRANDING_IMAGE_BYTES || maxBytes === MAX_BRANDING_LOGO_HERO_IMAGE_BYTES
+          ? `Branding images must be ${maxBytes / (1024 * 1024)} MB or smaller.`
+          : 'Photo upload exceeds 5 MB limit.', 400);
     }
 
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const mime = match[1].toLowerCase() as ImagePayload['mime'];
+    const detectedMime = match[1].toLowerCase();
+    const mime: ImagePayload['mime'] =
+      detectedMime === 'image/x-icon' || detectedMime === 'image/vnd.microsoft.icon'
+        ? 'image/x-icon'
+        : detectedMime as ImagePayload['mime'];
     const signatureIsValid = mime === 'image/jpeg'
       ? bytes[0] === 0xff && bytes[1] === 0xd8 && bytes.at(-2) === 0xff && bytes.at(-1) === 0xd9
       : mime === 'image/png'
         ? bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
-        : new TextDecoder().decode(bytes.slice(0, 4)) === 'RIFF' && new TextDecoder().decode(bytes.slice(8, 12)) === 'WEBP';
+        : mime === 'image/x-icon'
+          ? bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 1 && bytes[3] === 0
+          : new TextDecoder().decode(bytes.slice(0, 4)) === 'RIFF' && new TextDecoder().decode(bytes.slice(8, 12)) === 'WEBP';
     if (!signatureIsValid) return errorResponse('Image contents do not match the declared file type.', 400);
     return { bytes, mime };
   } catch {
@@ -386,39 +406,51 @@ const decodeImage = (value: unknown, maxBytes: number): ImagePayload | Response 
 
 const bucketForPrefix = (
   env: Env,
-  prefix: 'applications' | 'media' | 'programs',
+  prefix: 'applications' | 'branding' | 'demo-class-requests' | 'media' | 'programs',
 ): R2BucketBinding | undefined =>
-  prefix === 'applications' ? env.APPLICATION_MEDIA : env.PUBLIC_MEDIA;
+  prefix === 'applications' || prefix === 'demo-class-requests'
+    ? env.APPLICATION_MEDIA
+    : env.PUBLIC_MEDIA;
 
 function uploadToR2(env: Env, image: ImagePayload, prefix: 'applications'): Promise<{ key: string } | Response>;
-function uploadToR2(env: Env, image: ImagePayload, prefix: 'media' | 'programs'): Promise<{ key: string; url: string } | Response>;
+function uploadToR2(env: Env, image: ImagePayload, prefix: 'demo-class-requests'): Promise<{ key: string } | Response>;
+function uploadToR2(env: Env, image: ImagePayload, prefix: 'branding' | 'media' | 'programs'): Promise<{ key: string; url: string } | Response>;
 async function uploadToR2(
   env: Env,
   image: ImagePayload,
-  prefix: 'applications' | 'media' | 'programs',
+  prefix: 'applications' | 'branding' | 'demo-class-requests' | 'media' | 'programs',
 ): Promise<{ key: string; url?: string } | Response> {
   const bucket = bucketForPrefix(env, prefix);
   const publicUrl = env.CLOUDFLARE_R2_PUBLIC_URL?.replace(/\/+$/, '');
 
   if (!bucket) {
-    return errorResponse(prefix === 'applications'
+    return errorResponse(prefix === 'applications' || prefix === 'demo-class-requests'
       ? 'Private application photo storage is not configured.'
       : 'Public R2 media storage is not configured.', 503);
   }
 
   if (
     prefix !== 'applications' &&
+    prefix !== 'demo-class-requests' &&
     (!publicUrl || !URL.canParse(publicUrl) || new URL(publicUrl).protocol !== 'https:')
   ) {
     return errorResponse('A valid HTTPS R2 public URL is not configured, so uploaded images cannot be served.', 503);
   }
 
-  const extension = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg';
+  const extension = image.mime === 'image/png'
+  ? 'png'
+  : image.mime === 'image/webp'
+    ? 'webp'
+    : image.mime === 'image/x-icon'
+      ? 'ico'
+      : 'jpg';
   const key = `${prefix}/${crypto.randomUUID()}.${extension}`;
 
   try {
     await bucket.put(key, image.bytes, { httpMetadata: { contentType: image.mime } });
-    return prefix === 'applications' ? { key } : { key, url: `${publicUrl}/${key}` };
+    return prefix === 'applications' || prefix === 'demo-class-requests'
+      ? { key }
+      : { key, url: `${publicUrl}/${key}` };
   } catch (error) {
     return errorResponse(`R2 upload failed: ${messageOf(error)}`, 502);
   }
@@ -427,7 +459,7 @@ async function uploadToR2(
 const deleteFromR2 = async (
   env: Env,
   key: string,
-  prefix: 'applications' | 'media' | 'programs',
+  prefix: 'applications' | 'branding' | 'media' | 'programs',
 ): Promise<void> => {
   if (managedR2ObjectKeyFromMetadata(key, undefined, prefix) !== key) {
     throw new Error('R2 object key is invalid.');
@@ -440,7 +472,7 @@ const deleteFromR2 = async (
 const objectKeyFromMetadata = (
   env: Env,
   value: unknown,
-  expectedPrefix: 'applications' | 'media' | 'programs',
+  expectedPrefix: 'applications' | 'branding' | 'media' | 'programs',
 ): string | null => {
   return managedR2ObjectKeyFromMetadata(value, env.CLOUDFLARE_R2_PUBLIC_URL, expectedPrefix);
 };
@@ -619,14 +651,14 @@ const readTable = async (
 
 const READ_COLUMNS = {
   programs: 'id,title,slug,short_description,description,duration,level,target_audience,age_range,image_url,image_object_key,is_published,display_order,created_at,updated_at',
-  announcements: 'id,content,is_active,display_order,created_at,updated_at',
+  announcements: 'id,content,is_active,display_order,button_action,created_at,updated_at',
   reviews: 'id,author_name,rating,review_text,source,is_published,created_at,updated_at',
   media: 'id,media_type,title,caption,r2_object_key,media_url,youtube_url,youtube_video_id,cover_image_url,alt_text,is_published,display_order,created_at,updated_at',
   faqs: 'id,question,answer,is_published,display_order,created_at,updated_at',
   applications: 'id,application_reference,student_name,mobile,email,qualification,program_name,date_of_birth,address,photo_object_key,photo_data_url,message,status,approved_by_name,approved_at,created_at',
+  demoClassRequests: 'id,full_name,mobile,email,qualification_category,parent_name,school_or_college_name,college_name,profession,educational_qualification,date_of_birth,address,city,additional_information,status,created_at',
   notifications: 'id,application_id,notification_type,recipient_email,status,attempt_count,provider_message_id,error_message,pdf_attached,sent_at,created_at,updated_at',
   callbacks: 'id,full_name,mobile,email,program_name,preferred_contact_time,message,consent,status,created_at,updated_at',
-  contacts: 'id,full_name,email,mobile,subject,message,consent,status,created_at,updated_at',
   profiles: 'id,email,full_name,role,is_active,created_at,updated_at',
 } as const;
 
@@ -830,6 +862,10 @@ const createAnnouncement = async (request: Request, env: Env): Promise<Response>
   if (isResponse(content)) return content;
   if (body.is_active !== undefined && typeof body.is_active !== 'boolean') return errorResponse('is_active must be a boolean.', 400);
   if (body.display_order !== undefined && !Number.isInteger(body.display_order)) return errorResponse('display_order must be an integer.', 400);
+  if (body.button_action !== undefined && body.button_action !== null &&
+      body.button_action !== 'application' && body.button_action !== 'demo') {
+    return errorResponse('button_action must be application, demo, or null.', 400);
+  }
   let displayOrder = Number(body.display_order);
   if (!Number.isInteger(body.display_order)) {
     const { data: lastAnnouncement, error: orderError } = await auth.supabase
@@ -842,6 +878,7 @@ const createAnnouncement = async (request: Request, env: Env): Promise<Response>
     content,
     is_active: body.is_active !== false,
     display_order: displayOrder,
+    button_action: body.button_action ?? null,
   }).select().single();
   if (error) return errorResponse(`Failed to create announcement: ${error.message}`, 500);
   return json(data, 201);
@@ -865,6 +902,12 @@ const updateAnnouncement = async (request: Request, env: Env, id: string): Promi
   if (body.display_order !== undefined) {
     if (!Number.isInteger(body.display_order)) return errorResponse('display_order must be an integer.', 400);
     updates.display_order = body.display_order;
+  }
+  if (body.button_action !== undefined) {
+    if (body.button_action !== null && body.button_action !== 'application' && body.button_action !== 'demo') {
+      return errorResponse('button_action must be application, demo, or null.', 400);
+    }
+    updates.button_action = body.button_action;
   }
   if (!Object.keys(updates).length) return errorResponse('At least one editable announcement field is required.', 400);
   const { data, error } = await auth.supabase.from('announcements').update(updates).eq('id', id).select().maybeSingle();
@@ -989,6 +1032,20 @@ const createMedia = async (request: Request, env: Env): Promise<Response> => {
   for (const value of [caption, altText, coverImageUrl]) if (isResponse(value)) return value;
   if (body.is_published !== undefined && typeof body.is_published !== 'boolean') return errorResponse('is_published must be a boolean.', 400);
   if (body.display_order !== undefined && !Number.isInteger(body.display_order)) return errorResponse('display_order must be an integer.', 400);
+  const displayOrder = typeof body.display_order === 'number' && Number.isInteger(body.display_order)
+    ? body.display_order
+    : 0;
+  const { data: matchingOrder, error: orderLookupError } = await auth.supabase.from('media_items')
+    .select('id,title')
+    .eq('display_order', displayOrder)
+    .limit(1);
+  if (orderLookupError) return errorResponse(`Unable to verify media display order: ${orderLookupError.message}`, 500);
+  if (matchingOrder?.length) {
+    return errorResponse(
+      `This display order number is already taken by "${matchingOrder[0].title}". Please choose another number.`,
+      409,
+    );
+  }
 
   let youtube: ReturnType<typeof safeYouTube> = null;
   if (mediaType === 'video') {
@@ -1037,7 +1094,7 @@ const createMedia = async (request: Request, env: Env): Promise<Response> => {
     cover_image_url: uploadedCover?.url || coverImageUrl,
     alt_text: altText || title,
     is_published: body.is_published !== false,
-    display_order: Number.isInteger(body.display_order) ? body.display_order : 0,
+    display_order: displayOrder,
   }).select().single();
 
   if (error) {
@@ -1071,6 +1128,23 @@ const updateMedia = async (request: Request, env: Env, id: string): Promise<Resp
     .eq('id', id).maybeSingle();
   if (readError) return errorResponse(`Unable to load media item: ${readError.message}`, 500);
   if (!current) return errorResponse('Media item not found.', 404);
+  const requestedDisplayOrder = body.display_order === undefined ? current.display_order : body.display_order;
+  if (typeof requestedDisplayOrder !== 'number' || !Number.isInteger(requestedDisplayOrder)) {
+    return errorResponse('display_order must be an integer.', 400);
+  }
+  const displayOrder = requestedDisplayOrder;
+  const { data: matchingOrder, error: orderLookupError } = await auth.supabase.from('media_items')
+    .select('id,title')
+    .eq('display_order', displayOrder)
+    .neq('id', id)
+    .limit(1);
+  if (orderLookupError) return errorResponse(`Unable to verify media display order: ${orderLookupError.message}`, 500);
+  if (matchingOrder?.length) {
+    return errorResponse(
+      `This display order number is already taken by "${matchingOrder[0].title}". Please choose another number.`,
+      409,
+    );
+  }
 
   const mediaType = body.media_type === undefined ? current.media_type : body.media_type;
   if (mediaType !== 'photo' && mediaType !== 'video') return errorResponse('media_type must be either photo or video.', 400);
@@ -1090,10 +1164,7 @@ const updateMedia = async (request: Request, env: Env, id: string): Promise<Resp
     if (typeof body.is_published !== 'boolean') return errorResponse('is_published must be a boolean.', 400);
     updates.is_published = body.is_published;
   }
-  if (body.display_order !== undefined) {
-    if (!Number.isInteger(body.display_order)) return errorResponse('display_order must be an integer.', 400);
-    updates.display_order = body.display_order;
-  }
+  updates.display_order = displayOrder;
 
   let youtube: ReturnType<typeof safeYouTube> = null;
   if (mediaType === 'video') {
@@ -1475,44 +1546,6 @@ const submitCallback = async (request: Request, env: Env): Promise<Response> => 
   return contactAcknowledgement();
 };
 
-const submitContact = async (request: Request, env: Env): Promise<Response> => {
-  const body = await parseJson(request);
-  if (isResponse(body)) return body;
-  if (body.consent !== true) return errorResponse('Consent is required to submit this request.', 400);
-  const supabase = getSupabaseClient(env, true, 'contacts.submit');
-  if (!supabase) return errorResponse('Contact enquiries are unavailable because Supabase is not configured.', 503);
-
-  const fullName = requiredString(body.full_name, 'Full name', 300);
-  const email = requiredString(body.email, 'Email', 320);
-  const subject = requiredString(body.subject, 'Subject', 500);
-  const message = requiredString(body.message, 'Message', 10000);
-  if (isResponse(fullName)) return fullName;
-  if (isResponse(email)) return email;
-  if (isResponse(subject)) return subject;
-  if (isResponse(message)) return message;
-  if (!validEmail(email)) return errorResponse('Please provide a valid email address.', 400);
-  const mobile = optionalString(body.mobile, 'mobile', 30);
-  if (isResponse(mobile)) return mobile;
-
-  const { error } = await supabase.from('contact_enquiries').insert({
-    full_name: fullName,
-    email,
-    mobile,
-    subject,
-    message,
-    consent: true,
-    status: 'New',
-  });
-  if (error) return errorResponse(`Failed to record contact enquiry: ${error.message}`, 500);
-
-  await sendEmail(env, {
-    to: env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com',
-    subject: `New Contact Enquiry: ${subject} — ${fullName}`,
-    html: `<p>New contact message received:</p><p><strong>From:</strong> ${escapeHtml(fullName)} (${escapeHtml(email)}, ${escapeHtml(mobile || 'No phone')})</p><p><strong>Subject:</strong> ${escapeHtml(subject)}</p><p><strong>Message:</strong><br>${escapeHtml(message)}</p>`,
-  });
-  return json({ success: true, message: 'Thank you for reaching out. We have received your message and will respond shortly.' }, 201);
-};
-
 const approveApplication = async (request: Request, env: Env): Promise<Response> => {
   const auth = await requireAdmin(request, env, 'staff');
   if (isResponse(auth)) return auth;
@@ -1726,7 +1759,7 @@ const updateApplicationStatus = async (request: Request, env: Env, id: string): 
 const updateRequestStatus = async (
   request: Request,
   env: Env,
-  table: 'callback_requests' | 'contact_enquiries',
+  table: 'callback_requests',
   id: string,
   allowedStatuses: readonly string[],
 ): Promise<Response> => {
@@ -1745,6 +1778,75 @@ const updateRequestStatus = async (
     .maybeSingle();
   if (error) return errorResponse(`Unable to update request status: ${error.message}`, 500);
   return data ? json(data) : errorResponse('Request record not found.', 404);
+};
+
+const DEMO_CLASS_STATUSES = ['Pending', 'Contacted', 'Scheduled', 'Completed', 'Cancelled'] as const;
+
+const updateDemoClassRequestStatus = async (
+  request: Request,
+  env: Env,
+  id: string,
+): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'staff');
+  if (isResponse(auth)) return auth;
+  const body = await parseJson(request);
+  if (isResponse(body)) return body;
+  if (typeof body.status !== 'string' || !DEMO_CLASS_STATUSES.includes(body.status as typeof DEMO_CLASS_STATUSES[number])) {
+    return errorResponse(`status must be one of: ${DEMO_CLASS_STATUSES.join(', ')}.`, 400);
+  }
+
+  const { data, error } = await auth.supabase
+    .from('demo_class_requests')
+    .update({ status: body.status, updated_by_user_id: auth.profile.id })
+    .eq('id', id)
+    .select('id,full_name,mobile,email,qualification_category,parent_name,school_or_college_name,college_name,profession,educational_qualification,date_of_birth,address,city,additional_information,status,created_at')
+    .maybeSingle();
+  if (error) return errorResponse(`Unable to update demo request status: ${error.message}`, 500);
+  return data ? json(data) : errorResponse('Demo class request not found.', 404);
+};
+
+const getDemoClassRequestPhoto = async (
+  request: Request,
+  env: Env,
+  id: string,
+): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'staff');
+  if (isResponse(auth)) return auth;
+  const { data, error } = await auth.supabase
+    .from('demo_class_requests')
+    .select('photo_object_key')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) return errorResponse(`Unable to load applicant photo record: ${error.message}`, 500);
+  if (!data) return errorResponse('Demo class request not found.', 404);
+
+  const key = data.photo_object_key;
+  if (typeof key !== 'string' || !/^demo-class-requests\/[0-9a-f-]+\.(?:jpg|png|webp)$/i.test(key)) {
+    return errorResponse('Applicant photo storage metadata is invalid.', 500);
+  }
+  const bucket = env.APPLICATION_MEDIA;
+  if (!bucket?.get) return errorResponse('Private applicant photo storage is not configured.', 503);
+
+  try {
+    const object = await bucket.get(key);
+    if (!object?.body) return errorResponse('Applicant photo was not found in private storage.', 404);
+    const contentType = object.httpMetadata?.contentType;
+    if (!contentType || !['image/jpeg', 'image/png', 'image/webp'].includes(contentType)) {
+      return errorResponse('Applicant photo has an unsupported stored content type.', 500);
+    }
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': contentType,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+      },
+    });
+  } catch (photoError) {
+    console.error('Unable to retrieve private demo applicant photo.', {
+      error: messageOf(photoError),
+    });
+    return errorResponse('Unable to retrieve applicant photo from private storage.', 502);
+  }
 };
 
 const DEFAULT_OFFICIAL_DOCUMENT_SETTINGS = {
@@ -1934,32 +2036,101 @@ const saveOfficialDocumentSettings = async (
   });
 };
 const updateBranding = async (request: Request, env: Env): Promise<Response> => {
-  const auth = await requireAdmin(request, env, 'super_admin');
+  const auth = await requireAdmin(request, env, 'admin');
   if (isResponse(auth)) return auth;
   const body = await parseJson(request);
   if (isResponse(body)) return body;
+  if (auth.profile.role !== 'super_admin') {
+    const allowedFields = new Set(['hero_photo_file_base64', 'hero_photo_url']);
+    if (
+      Object.keys(body).some((field) => !allowedFields.has(field)) ||
+      (body.hero_photo_file_base64 === undefined && body.hero_photo_url !== null) ||
+      (body.hero_photo_url !== undefined && body.hero_photo_url !== null)
+    ) {
+      return errorResponse('Admins may only upload a new hero photo or remove the current hero photo.', 403);
+    }
+  }
   const normalizedBody = { ...body };
   if (body.main_logo_alt !== undefined) normalizedBody.logo_alt = body.main_logo_alt;
   if (body.primary_color !== undefined) normalizedBody.primary_orange = body.primary_color;
   if (body.secondary_color !== undefined) normalizedBody.primary_green = body.secondary_color;
   const columns = [
     'academy_name', 'tagline', 'logo_url', 'logo_alt', 'favicon_url',
-    'footer_logo_url', 'primary_orange', 'primary_green', 'official_pdf_url',
+    'footer_logo_url', 'hero_photo_url', 'primary_orange', 'primary_green', 'official_pdf_url',
   ] as const;
+  const imageColumns = ['logo_url', 'favicon_url', 'footer_logo_url', 'hero_photo_url'] as const;
   const updates: Record<string, unknown> = {};
+  const uploadedImages: Array<{ column: (typeof imageColumns)[number]; key: string; url: string }> = [];
+  const imageFields = [
+    { field: 'logo_file_base64', column: 'logo_url' },
+    { field: 'favicon_file_base64', column: 'favicon_url' },
+    { field: 'footer_logo_file_base64', column: 'footer_logo_url' },
+    { field: 'hero_photo_file_base64', column: 'hero_photo_url' },
+  ] as const;
+  const cleanupUploadedImages = async () => {
+    for (const image of uploadedImages) {
+      try {
+        await deleteFromR2(env, image.key, 'branding');
+      } catch (error) {
+        console.error('[branding_upload_cleanup_failed]', {
+          key: image.key,
+          error: messageOf(error),
+        });
+      }
+    }
+  };
+
+  for (const { field, column } of imageFields) {
+    if (body[field] === undefined) continue;
+    const image = decodeImage(
+      body[field],
+      field === 'favicon_file_base64' ? MAX_BRANDING_IMAGE_BYTES : MAX_BRANDING_LOGO_HERO_IMAGE_BYTES,
+      field === 'favicon_file_base64',
+    );
+    if (isResponse(image)) {
+      await cleanupUploadedImages();
+      return image;
+    }
+    const upload = await uploadToR2(env, image, 'branding');
+    if (isResponse(upload)) {
+      await cleanupUploadedImages();
+      return upload;
+    }
+    uploadedImages.push({ column, key: upload.key, url: upload.url });
+    updates[column] = upload.url;
+  }
+
   for (const column of columns) {
+    if (column === 'hero_photo_url' && body.hero_photo_file_base64 !== undefined) continue;
     if (normalizedBody[column] === undefined) continue;
     if (['academy_name', 'tagline', 'logo_alt'].includes(column)) {
       const value = optionalString(normalizedBody[column], column, 500);
-      if (isResponse(value)) return value;
+      if (isResponse(value)) {
+        await cleanupUploadedImages();
+        return value;
+      }
       updates[column] = value;
     } else {
       const value = optionalString(normalizedBody[column], column, 2048);
-      if (isResponse(value)) return value;
+      if (isResponse(value)) {
+        await cleanupUploadedImages();
+        return value;
+      }
+      if (
+        (column === 'primary_orange' || column === 'primary_green') &&
+        value !== null &&
+        !/^#[0-9a-f]{6}$/i.test(value)
+      ) {
+        await cleanupUploadedImages();
+        return errorResponse(`${column} must be a six-digit hexadecimal color.`, 400);
+      }
       updates[column] = value;
     }
   }
-  if (!Object.keys(updates).length) return errorResponse('At least one branding field is required.', 400);
+  if (!Object.keys(updates).length) {
+    await cleanupUploadedImages();
+    return errorResponse('At least one branding field is required.', 400);
+  }
   if (updates.academy_name === null) updates.academy_name = "Uptrend's English Academy";
   if (updates.tagline === null) updates.tagline = 'Professional Spoken English & Communication Skills';
   if (updates.logo_alt === null) updates.logo_alt = "Uptrend's English Academy Davangere Logo";
@@ -1969,8 +2140,15 @@ const updateBranding = async (request: Request, env: Env): Promise<Response> => 
   if (updates.official_pdf_url === null) updates.official_pdf_url = '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf';
   updates.updated_at = new Date().toISOString();
 
-  const { data: existing, error: readError } = await auth.supabase.from('site_branding').select('id').limit(1).maybeSingle();
-  if (readError) return errorResponse(`Unable to load site branding: ${readError.message}`, 500);
+  const { data: existing, error: readError } = await auth.supabase
+    .from('site_branding')
+    .select('id,logo_url,favicon_url,footer_logo_url,hero_photo_url')
+    .limit(1)
+    .maybeSingle();
+  if (readError) {
+    await cleanupUploadedImages();
+    return errorResponse(`Unable to load site branding: ${readError.message}`, 500);
+  }
   const result = existing?.id
     ? await auth.supabase.from('site_branding').update(updates).eq('id', existing.id).select().single()
     : await auth.supabase.from('site_branding').insert({
@@ -1983,7 +2161,26 @@ const updateBranding = async (request: Request, env: Env): Promise<Response> => 
       primary_green: '#16a34a',
       ...updates,
     }).select().single();
-  if (result.error) return errorResponse(`Failed to update site branding: ${result.error.message}`, 500);
+  if (result.error) {
+    await cleanupUploadedImages();
+    return errorResponse(`Failed to update site branding: ${result.error.message}`, 500);
+  }
+
+  for (const column of imageColumns) {
+    if (updates[column] === undefined) continue;
+    const previousKey = objectKeyFromMetadata(env, existing?.[column], 'branding');
+    const replacementKey = uploadedImages.find((image) => image.column === column)?.key;
+    if (!previousKey || previousKey === replacementKey) continue;
+    try {
+      await deleteFromR2(env, previousKey, 'branding');
+    } catch (error) {
+      console.error('[branding_old_asset_cleanup_failed]', {
+        key: previousKey,
+        error: messageOf(error),
+      });
+    }
+  }
+
   return json(result.data);
 };
 
@@ -2392,7 +2589,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     if (pathname === '/api/branding' && method === 'GET') {
       const supabase = getSupabaseClient(env, false, 'public.branding.read');
       if (!supabase) return errorResponse('Supabase is not configured.', 503);
-      const { data, error } = await supabase.from('site_branding').select('id,academy_name,tagline,logo_url,logo_alt,favicon_url,footer_logo_url,primary_orange,primary_green,official_pdf_url,updated_at').limit(1).maybeSingle();
+      const { data, error } = await supabase.from('site_branding').select('id,academy_name,tagline,logo_url,logo_alt,favicon_url,footer_logo_url,hero_photo_url,primary_orange,primary_green,official_pdf_url,updated_at').limit(1).maybeSingle();
       if (error) return errorResponse(`Unable to read branding: ${error.message}`, 500);
       return json(data || {});
     }
@@ -2400,7 +2597,6 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     if (pathname === '/api/apply' && method === 'POST') return submitApplication(request, env);
     if (pathname === '/api/demo-class-requests' && method === 'POST') return submitDemoClassRequest(request, env);
     if (pathname === '/api/callback-request' && method === 'POST') return submitCallback(request, env);
-    if (pathname === '/api/contact' && method === 'POST') return submitContact(request, env);
     if (pathname === '/api/approve-application' && method === 'POST') return approveApplication(request, env);
     if (pathname === '/api/retry-notification' && method === 'POST') return retryNotification(request, env);
 
@@ -2474,7 +2670,18 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       return methodNotAllowed(['PUT', 'DELETE']);
     }
 
-    const idRoute = pathname.match(/^\/api\/admin\/(programs|announcements|reviews|faqs|media|applications|callbacks|contacts|profiles)\/([^/]+)$/);
+    const demoPhotoRoute = pathname.match(/^\/api\/admin\/demo-class-requests\/([^/]+)\/photo$/);
+    if (demoPhotoRoute) {
+      let requestId: string;
+      try { requestId = decodeURIComponent(demoPhotoRoute[1]); } catch {
+        return errorResponse('Invalid demo class request ID.', 400);
+      }
+      if (!validId(requestId)) return errorResponse('Demo class request ID must be a valid UUID.', 400);
+      if (method === 'GET') return getDemoClassRequestPhoto(request, env, requestId);
+      return methodNotAllowed(['GET']);
+    }
+
+    const idRoute = pathname.match(/^\/api\/admin\/(programs|announcements|reviews|faqs|media|applications|demo-class-requests|callbacks|profiles)\/([^/]+)$/);
     if (idRoute) {
       let id: string;
       try { id = decodeURIComponent(idRoute[2]); } catch { return errorResponse('Invalid resource ID.', 400); }
@@ -2510,20 +2717,24 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         if (method === 'DELETE') return deleteApplication(request, env, id);
         return methodNotAllowed(['PUT', 'DELETE']);
       }
-      if (resource === 'callbacks' && method === 'PUT') {
-        return updateRequestStatus(request, env, 'callback_requests', id, ['New', 'Contacted', 'Resolved']);
+      if (resource === 'demo-class-requests') {
+        if (method === 'PUT') return updateDemoClassRequestStatus(request, env, id);
+        if (method === 'DELETE') return deleteRow(request, env, 'demo_class_requests', id, 'admin', 'Demo class request');
+        return methodNotAllowed(['PUT', 'DELETE']);
       }
-      if (resource === 'contacts' && method === 'PUT') {
-        return updateRequestStatus(request, env, 'contact_enquiries', id, ['New', 'Replied', 'Archived']);
+      if (resource === 'callbacks') {
+        if (method === 'PUT') return updateRequestStatus(request, env, 'callback_requests', id, ['New', 'Contacted', 'Resolved']);
+        if (method === 'DELETE') return deleteRow(request, env, 'callback_requests', id, 'admin', 'Callback request');
+        return methodNotAllowed(['PUT', 'DELETE']);
       }
       if (resource === 'profiles' && method === 'PUT') return updateProfile(request, env, id);
       return methodNotAllowed(resource === 'profiles' ? ['PUT'] : ['PUT', 'DELETE']);
     }
 
     if (pathname === '/api/admin/applications' && method === 'GET') return adminTable(request, env, 'applications', READ_COLUMNS.applications, 'created_at');
+    if (pathname === '/api/admin/demo-class-requests' && method === 'GET') return adminTable(request, env, 'demo_class_requests', READ_COLUMNS.demoClassRequests, 'created_at');
     if (pathname === '/api/admin/notifications' && method === 'GET') return adminTable(request, env, 'application_notifications', READ_COLUMNS.notifications, 'created_at', false, 'super_admin');
     if (pathname === '/api/admin/callbacks' && method === 'GET') return adminTable(request, env, 'callback_requests', READ_COLUMNS.callbacks, 'created_at');
-    if (pathname === '/api/admin/contacts' && method === 'GET') return adminTable(request, env, 'contact_enquiries', READ_COLUMNS.contacts, 'created_at');
     if (pathname === '/api/admin/profiles' && method === 'GET') return adminTable(request, env, 'admin_profiles', READ_COLUMNS.profiles, 'created_at', true, 'super_admin');
     if (pathname === '/api/admin/branding' && method === 'PUT') return updateBranding(request, env);
     if (pathname === '/api/admin/official-document' && method === 'GET') {
@@ -2545,13 +2756,12 @@ if (pathname === '/api/admin/official-document' && method === 'PUT') {
         '/api/apply': ['POST'],
         '/api/demo-class-requests': ['POST'],
         '/api/callback-request': ['POST'],
-        '/api/contact': ['POST'],
         '/api/approve-application': ['POST'],
         '/api/retry-notification': ['POST'],
         '/api/admin/applications': ['GET'],
+        '/api/admin/demo-class-requests': ['GET'],
         '/api/admin/notifications': ['GET'],
         '/api/admin/callbacks': ['GET'],
-        '/api/admin/contacts': ['GET'],
         '/api/admin/profiles': ['GET'],
         '/api/admin/branding': ['PUT'],
         '/api/admin/official-document': ['GET', 'PUT'],
@@ -2567,7 +2777,7 @@ if (pathname === '/api/admin/official-document' && method === 'PUT') {
     }
     return errorResponse('Not an API request.', 404);
   } catch (error) {
-    const resource = pathname.match(/^\/api\/admin\/(programs|announcements|reviews|faqs|media|applications|callbacks|contacts|profiles)(?:\/|$)/)?.[1];
+    const resource = pathname.match(/^\/api\/admin\/(programs|announcements|reviews|faqs|media|applications|demo-class-requests|callbacks|profiles)(?:\/|$)/)?.[1];
     const operation = pathname === '/api/system-status'
       ? 'system_status'
       : pathname.startsWith('/api/admin/')

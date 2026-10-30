@@ -6,7 +6,6 @@ import {
   X,
   PhoneCall,
   ArrowRight,
-  ShieldCheck,
   Phone,
 } from 'lucide-react';
 import { SiteBranding } from '../types';
@@ -31,7 +30,7 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'about', label: 'About Us' },
     { id: 'programs', label: 'Programs' },
     { id: 'reviews', label: 'Reviews' },
-    { id: 'media', label: 'Media Gallery' },
+    { id: 'media', label: 'Media & Testimonials' },
     { id: 'faqs', label: 'FAQs' },
     { id: 'contact', label: 'Contact Us' },
   ];
@@ -43,9 +42,9 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/95 shadow-xs backdrop-blur-md">
+    <header className="sticky top-0 z-40 border-b border-orange-100 bg-[#fff8ef]/95 shadow-xs backdrop-blur-md">
       {/* Top contact bar — separate from the 80px main navigation */}
-      <div className="hidden bg-slate-900 px-4 py-1.5 text-xs font-medium text-slate-300 lg:block">
+      <div className="hidden border-b border-orange-100 bg-[#f7ecdf] px-4 py-1.5 text-xs font-medium text-slate-700 lg:block">
         <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <span className="flex items-center gap-1.5 whitespace-nowrap">
@@ -57,7 +56,7 @@ export const Header: React.FC<HeaderProps> = ({
 
             <a
               href="tel:+919008000211"
-              className="flex items-center gap-1.5 whitespace-nowrap transition-colors hover:text-white"
+              className="flex items-center gap-1.5 whitespace-nowrap transition-colors hover:text-orange-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-700"
             >
               <Phone className="h-3.5 w-3.5 text-orange-400" />
               +91 900 8000 211
@@ -70,13 +69,6 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           </div>
 
-          <button
-            onClick={() => handleNavigate('admin')}
-            className="flex shrink-0 items-center gap-1 text-xs text-slate-400 transition-colors hover:text-orange-400"
-          >
-            <ShieldCheck className="h-3.5 w-3.5" />
-            Admin Portal
-          </button>
         </div>
       </div>
 
@@ -87,10 +79,10 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => handleNavigate('home')}
             aria-label="Go to home page"
-            className="flex shrink-0 items-center rounded-lg p-1 text-left focus:outline-none focus:ring-2 focus:ring-orange-500"
+            className="flex shrink-0 items-center rounded-lg p-1 text-left focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
           >
             <Logo
-              size="lg"
+              size="sm"
               logoUrl={branding?.logo_url}
               altText={branding?.main_logo_alt || branding?.logo_alt}
             />
@@ -107,8 +99,9 @@ export const Header: React.FC<HeaderProps> = ({
               return (
                 <button
                   key={link.id}
+                  type="button"
                   onClick={() => handleNavigate(link.id)}
-                  className={`shrink-0 whitespace-nowrap rounded-lg px-2 py-2 text-sm font-semibold transition-colors 2xl:px-3 ${
+                  className={`shrink-0 whitespace-nowrap rounded-lg px-2 py-2 text-sm font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-700 motion-reduce:transition-none 2xl:px-3 ${
                     isActive
                       ? 'bg-orange-50 text-orange-600'
                       : 'text-slate-700 hover:bg-slate-50 hover:text-orange-600'
@@ -123,22 +116,24 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Desktop action buttons */}
           <div className="hidden shrink-0 items-center gap-2 xl:flex 2xl:gap-3">
             <button
+              type="button"
               onClick={() => openCallbackModal()}
-              className="inline-flex items-center gap-2 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-xs transition-all hover:border-orange-500 hover:text-orange-600"
+              className="inline-flex items-center gap-2 whitespace-nowrap rounded-lg border border-slate-300 bg-white/80 px-3 py-2 text-sm font-semibold text-slate-700 shadow-xs transition-all hover:border-orange-500 hover:text-orange-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-700 motion-reduce:transition-none"
             >
               <PhoneCall className="h-4 w-4 text-orange-600" />
               <span>Request a Call</span>
             </button>
 
             <button
+              type="button"
               onClick={() => handleNavigate('apply')}
-              className={`inline-flex items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold shadow-sm transition-all 2xl:px-4 ${
+              className={`inline-flex items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold shadow-sm transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-700 motion-reduce:transition-none 2xl:px-4 ${
                 currentPage === 'apply'
                   ? 'bg-emerald-700 text-white ring-2 ring-emerald-500 ring-offset-2'
                   : 'bg-gradient-to-r from-orange-600 to-orange-500 text-white hover:from-orange-500 hover:to-orange-600 hover:shadow-md'
               }`}
             >
-              <span>Apply Now</span>
+              <span>Join Now</span>
               <ArrowRight className="h-4 w-4" />
             </button>
           </div>
@@ -146,8 +141,9 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Mobile and tablet menu button */}
           <div className="ml-auto flex shrink-0 items-center gap-2 lg:hidden">
             <button
+              type="button"
               onClick={() => openCallbackModal()}
-              className="rounded-lg border border-orange-200 p-2 text-orange-600 hover:bg-orange-50 md:hidden"
+              className="rounded-lg border border-orange-200 p-2 text-orange-600 transition-colors hover:bg-orange-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-700 motion-reduce:transition-none md:hidden"
               aria-label="Request a call"
               title="Request a Call"
             >
@@ -155,8 +151,9 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
 
             <button
+              type="button"
               onClick={() => setMobileMenuOpen((open) => !open)}
-              className="rounded-lg p-2 text-slate-700 hover:bg-slate-100 hover:text-orange-600 focus:outline-none focus:ring-2 focus:ring-orange-500"
+              className="rounded-lg p-2 text-slate-700 transition-colors hover:bg-orange-50 hover:text-orange-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-600 motion-reduce:transition-none"
               aria-label={
                 mobileMenuOpen
                   ? 'Close navigation menu'
@@ -176,7 +173,7 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Mobile and tablet navigation drawer */}
       {mobileMenuOpen && (
-        <div className="border-b border-slate-200 bg-white px-4 pb-6 pt-2 shadow-xl lg:hidden">
+        <div className="border-b border-orange-100 bg-[#fff8ef] px-4 pb-6 pt-2 shadow-xl lg:hidden">
           <nav
             aria-label="Mobile navigation"
             className="grid grid-cols-1 gap-1"
@@ -184,8 +181,9 @@ export const Header: React.FC<HeaderProps> = ({
             {navLinks.map((link) => (
               <button
                 key={link.id}
+                type="button"
                 onClick={() => handleNavigate(link.id)}
-                className={`rounded-lg px-4 py-3 text-left text-base font-semibold transition-colors ${
+                className={`rounded-lg px-4 py-3 text-left text-base font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange-700 motion-reduce:transition-none ${
                   currentPage === link.id
                     ? 'border-l-4 border-orange-500 bg-orange-50 text-orange-600'
                     : 'text-slate-800 hover:bg-slate-50'
@@ -198,6 +196,7 @@ export const Header: React.FC<HeaderProps> = ({
 
           <div className="mt-4 flex flex-col gap-2.5 border-t border-slate-100 pt-4">
             <button
+              type="button"
               onClick={() => {
                 setMobileMenuOpen(false);
                 openCallbackModal();
@@ -209,19 +208,14 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
 
             <button
+              type="button"
               onClick={() => handleNavigate('apply')}
               className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-3 text-base font-bold text-white shadow-sm"
             >
-              <span>Apply Now</span>
+              <span>Join Now</span>
               <ArrowRight className="h-4 w-4" />
             </button>
 
-            <button
-              onClick={() => handleNavigate('admin')}
-              className="w-full py-2 text-center text-xs text-slate-500 hover:text-slate-800"
-            >
-              Admin Portal
-            </button>
           </div>
         </div>
       )}

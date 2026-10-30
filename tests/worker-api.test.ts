@@ -31,6 +31,476 @@ function mockR2Bucket(options: { putError?: boolean; deleteError?: boolean; list
   };
 }
 
+const contactAcknowledgement = {
+  success: true,
+  message: 'We received your request. If it can be processed, the academy will contact you.',
+};
+
+const publicContactSubmissions: Array<{
+  path: string;
+  table: string;
+  body: Record<string, unknown>;
+}> = [
+  {
+    path: '/api/apply',
+    table: 'applications',
+    body: {
+      student_name: 'Test Student',
+      mobile: '+91 (98765) 43210',
+      email: '  STUDENT@EXAMPLE.COM ',
+      qualification: 'Graduate',
+      program_name: 'English',
+      privacy_consent: true,
+      photo_base64: 'data:image/jpeg;base64,/9j/2Q==',
+    },
+  },
+  {
+    path: '/api/callback-request',
+    table: 'callback_requests',
+    body: {
+      full_name: 'Test Student',
+      mobile: '09876543210',
+      email: '  STUDENT@EXAMPLE.COM ',
+      preferred_contact_time: 'Morning',
+      consent: true,
+    },
+  },
+  {
+    path: '/api/demo-class-requests',
+    table: 'demo_class_requests',
+    body: {
+      full_name: 'Test Student',
+      mobile: '0091 98765 43210',
+      email: '  STUDENT@EXAMPLE.COM ',
+      qualification_category: 'Student',
+      parent_name: 'Parent Name',
+      school_or_college_name: 'Test College',
+      educational_qualification: 'B.Com',
+      date_of_birth: '2000-01-01',
+      address: '1 Test Street',
+      city: 'Davangere',
+    },
+  },
+];
+
+async function submitPublicContact(
+  path: string,
+  body: Record<string, unknown>,
+  duplicateCheck: () => Response | Promise<Response> = () => Response.json(false),
+  options: { insertDuplicate?: boolean; cleanupFailure?: boolean } = {},
+) {
+  const originalFetch = globalThis.fetch;
+  const applicationMedia = mockR2Bucket({ deleteError: options.cleanupFailure });
+  const duplicateCheckPayloads: Array<Record<string, unknown>> = [];
+  const insertedRecords: Array<{ path: string; body: Record<string, unknown> }> = [];
+
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') {
+      duplicateCheckPayloads.push(await request.json() as Record<string, unknown>);
+      return duplicateCheck();
+    }
+    if (url.pathname === '/rest/v1/application_notifications') {
+      return new Response(null, { status: 201 });
+    }
+    if (url.pathname.startsWith('/rest/v1/') && request.method === 'POST') {
+      if (options.insertDuplicate && url.pathname === '/rest/v1/applications') {
+        return Response.json({ code: '23505', message: 'duplicate_contact' }, { status: 409 });
+      }
+      const record = { path: url.pathname, body: await request.json() as Record<string, unknown> };
+      insertedRecords.push(record);
+      if (url.pathname === '/rest/v1/demo_class_requests') {
+        return Response.json({ id: '550e8400-e29b-41d4-a716-446655440000' }, { status: 201 });
+      }
+      return new Response(null, { status: 201 });
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const response = await handleApiRequest(
+      new Request(`https://academy.example${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+      {
+        SUPABASE_URL: 'https://project.example',
+        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+        APPLICATION_MEDIA: applicationMedia.binding,
+      },
+    );
+    return { response, duplicateCheckPayloads, insertedRecords, applicationMedia };
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test('branding updates store uploaded image files and persist mapped theme colors', async () => {
+  const originalFetch = globalThis.fetch;
+  const publicMedia = mockR2Bucket();
+  const existingBranding = {
+    id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    logo_url: 'https://media.example/branding/old-logo.png',
+    favicon_url: '/favicon.ico',
+    footer_logo_url: null,
+    hero_photo_url: 'https://media.example/branding/old-hero.png',
+    primary_orange: '#ea580c',
+    primary_green: '#16a34a',
+  };
+  let savedBranding = { ...existingBranding };
+
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/auth/v1/user') {
+      return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    }
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        full_name: 'Test Admin',
+        role: 'super_admin',
+        is_active: true,
+      }]);
+    }
+    if (url.pathname === '/rest/v1/site_branding' && request.method === 'GET') {
+      return Response.json([savedBranding]);
+    }
+    if (url.pathname === '/rest/v1/site_branding' && request.method === 'PATCH') {
+      savedBranding = { ...savedBranding, ...await request.json() as typeof savedBranding };
+      return Response.json(savedBranding);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const response = await handleApiRequest(
+      new Request('https://academy.example/api/admin/branding', {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          logo_file_base64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/S2cAAAAASUVORK5CYII=',
+          hero_photo_file_base64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/S2cAAAAASUVORK5CYII=',
+          primary_color: '#123456',
+          secondary_color: '#654321',
+        }),
+      }),
+      {
+        SUPABASE_URL: 'https://project.example',
+        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+        CLOUDFLARE_R2_PUBLIC_URL: 'https://media.example',
+        PUBLIC_MEDIA: publicMedia.binding,
+      },
+    );
+
+    assert.equal(response.status, 200);
+    const result = await response.json() as typeof savedBranding;
+    assert.match(result.logo_url, /^https:\/\/media\.example\/branding\/.+\.png$/);
+    assert.match(result.hero_photo_url || '', /^https:\/\/media\.example\/branding\/.+\.png$/);
+    assert.equal(result.primary_orange, '#123456');
+    assert.equal(result.primary_green, '#654321');
+    assert.equal(publicMedia.puts.length, 2);
+    assert.equal(publicMedia.puts[0].options?.httpMetadata?.contentType, 'image/png');
+    assert.deepEqual(publicMedia.deletes, ['branding/old-logo.png', 'branding/old-hero.png']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('branding API enforces the 3 MB limit for logos and hero photos', async () => {
+  const originalFetch = globalThis.fetch;
+  const publicMedia = mockR2Bucket();
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/auth/v1/user') return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', full_name: 'Test Admin', role: 'super_admin', is_active: true }]);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const oversizedImage = `data:image/png;base64,${Buffer.alloc(3 * 1024 * 1024 + 1).toString('base64')}`;
+    for (const field of ['logo_file_base64', 'hero_photo_file_base64']) {
+      const response = await handleApiRequest(
+        new Request('https://academy.example/api/admin/branding', {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [field]: oversizedImage }),
+        }),
+        {
+          SUPABASE_URL: 'https://project.example',
+          SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+          CLOUDFLARE_R2_PUBLIC_URL: 'https://media.example',
+          PUBLIC_MEDIA: publicMedia.binding,
+        },
+      );
+      assert.equal(response.status, 400);
+      assert.match((await response.json() as { error: string }).error, /3 MB or smaller/);
+    }
+    assert.equal(publicMedia.puts.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('admins can upload and remove the hero photo without gaining access to other branding fields', async () => {
+  const originalFetch = globalThis.fetch;
+  const publicMedia = mockR2Bucket();
+  const existingBranding = {
+    id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    logo_url: 'https://media.example/branding/site-logo.png',
+    hero_photo_url: 'https://media.example/branding/hero-photo.png',
+  };
+  let savedBranding = { ...existingBranding };
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/auth/v1/user') return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', full_name: 'Test Admin', role: 'admin', is_active: true }]);
+    }
+    if (url.pathname === '/rest/v1/site_branding' && request.method === 'GET') return Response.json([savedBranding]);
+    if (url.pathname === '/rest/v1/site_branding' && request.method === 'PATCH') {
+      savedBranding = { ...savedBranding, ...await request.json() as typeof savedBranding };
+      return Response.json(savedBranding);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const uploadResponse = await handleApiRequest(
+      new Request('https://academy.example/api/admin/branding', {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hero_photo_file_base64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/S2cAAAAASUVORK5CYII=',
+        }),
+      }),
+      {
+        SUPABASE_URL: 'https://project.example',
+        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+        CLOUDFLARE_R2_PUBLIC_URL: 'https://media.example',
+        PUBLIC_MEDIA: publicMedia.binding,
+      },
+    );
+    assert.equal(uploadResponse.status, 200);
+    assert.match(savedBranding.hero_photo_url || '', /^https:\/\/media\.example\/branding\/.+\.png$/);
+    assert.equal(savedBranding.logo_url, existingBranding.logo_url);
+    const uploadedHeroKey = publicMedia.puts[0].key;
+    assert.deepEqual(publicMedia.deletes, ['branding/hero-photo.png']);
+
+    const removeResponse = await handleApiRequest(
+      new Request('https://academy.example/api/admin/branding', {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hero_photo_url: null }),
+      }),
+      {
+        SUPABASE_URL: 'https://project.example',
+        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+        CLOUDFLARE_R2_PUBLIC_URL: 'https://media.example',
+        PUBLIC_MEDIA: publicMedia.binding,
+      },
+    );
+
+    assert.equal(removeResponse.status, 200);
+    assert.equal(savedBranding.hero_photo_url, null);
+    assert.equal(savedBranding.logo_url, existingBranding.logo_url);
+    assert.equal(publicMedia.puts.length, 1);
+    assert.deepEqual(publicMedia.deletes, ['branding/hero-photo.png', uploadedHeroKey]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('admins cannot change logo or theme settings through the branding API', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.pathname === '/auth/v1/user') return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', full_name: 'Test Admin', role: 'admin', is_active: true }]);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const response = await handleApiRequest(
+      new Request('https://academy.example/api/admin/branding', {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ logo_url: 'https://media.example/branding/changed-logo.png' }),
+      }),
+      {
+        SUPABASE_URL: 'https://project.example',
+        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+      },
+    );
+
+    assert.equal(response.status, 403);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('staff cannot change hero branding through the admin API', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/auth/v1/user') return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', full_name: 'Test Staff', role: 'staff', is_active: true }]);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const response = await handleApiRequest(
+      new Request('https://academy.example/api/admin/branding', {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer staff-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hero_photo_url: null }),
+      }),
+      {
+        SUPABASE_URL: 'https://project.example',
+        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+      },
+    );
+
+    assert.equal(response.status, 403);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('demo class request deletion is admin-only and deletes the requested record', async () => {
+  const originalFetch = globalThis.fetch;
+  const requestId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  let deletingRole: 'staff' | 'admin' = 'staff';
+  let deleteCount = 0;
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/auth/v1/user') {
+      return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    }
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        full_name: 'Test Admin',
+        role: deletingRole,
+        is_active: true,
+      }]);
+    }
+    if (url.pathname === '/rest/v1/demo_class_requests' && request.method === 'DELETE') {
+      deleteCount += 1;
+      assert.equal(url.searchParams.get('id'), `eq.${requestId}`);
+      return Response.json([{ id: requestId }]);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  const env = {
+    SUPABASE_URL: 'https://project.example',
+    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+  };
+
+  try {
+    const makeDeleteRequest = () => new Request(`https://academy.example/api/admin/demo-class-requests/${requestId}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer test-admin-token' },
+    });
+
+    deletingRole = 'staff';
+    const staffResponse = await handleApiRequest(makeDeleteRequest(), env);
+    assert.equal(staffResponse.status, 403);
+    assert.equal(deleteCount, 0);
+
+    deletingRole = 'admin';
+    const adminResponse = await handleApiRequest(makeDeleteRequest(), env);
+    assert.equal(adminResponse.status, 200);
+    assert.deepEqual(await adminResponse.json(), {
+      success: true,
+      message: 'Demo class request deleted successfully.',
+    });
+    assert.equal(deleteCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('callback request deletion is admin-only and deletes the requested record', async () => {
+  const originalFetch = globalThis.fetch;
+  const requestId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  let deletingRole: 'staff' | 'admin' = 'staff';
+  let deleteCount = 0;
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/auth/v1/user') {
+      return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    }
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        full_name: 'Test Admin',
+        role: deletingRole,
+        is_active: true,
+      }]);
+    }
+    if (url.pathname === '/rest/v1/callback_requests' && request.method === 'DELETE') {
+      deleteCount += 1;
+      assert.equal(url.searchParams.get('id'), `eq.${requestId}`);
+      return Response.json([{ id: requestId }]);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  const env = {
+    SUPABASE_URL: 'https://project.example',
+    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+  };
+
+  try {
+    const makeDeleteRequest = () => new Request(`https://academy.example/api/admin/callbacks/${requestId}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer test-admin-token' },
+    });
+
+    deletingRole = 'staff';
+    const staffResponse = await handleApiRequest(makeDeleteRequest(), env);
+    assert.equal(staffResponse.status, 403);
+    assert.equal(deleteCount, 0);
+
+    deletingRole = 'admin';
+    const adminResponse = await handleApiRequest(makeDeleteRequest(), env);
+    assert.equal(adminResponse.status, 200);
+    assert.deepEqual(await adminResponse.json(), {
+      success: true,
+      message: 'Callback request deleted successfully.',
+    });
+    assert.equal(deleteCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 async function withCapturedLogs<T>(run: (logs: string[]) => Promise<T>): Promise<T> {
   const logs: string[] = [];
   const originalError = console.error;
@@ -177,113 +647,6 @@ async function deleteMediaWithStoredKey(
       applicationDeleteCount: applicationMedia.deletes.length,
       publicDeletes: publicMedia.deletes,
     };
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-}
-
-const contactAcknowledgement = {
-  success: true,
-  message: 'We received your request. If it can be processed, the academy will contact you.',
-};
-
-const publicContactSubmissions: Array<{
-  path: string;
-  table: string;
-  body: Record<string, unknown>;
-}> = [
-  {
-    path: '/api/apply',
-    table: 'applications',
-    body: {
-      student_name: 'Test Student',
-      mobile: '+91 (98765) 43210',
-      email: '  STUDENT@EXAMPLE.COM ',
-      qualification: 'Graduate',
-      program_name: 'English',
-      privacy_consent: true,
-      photo_base64: 'data:image/jpeg;base64,/9j/2Q==',
-    },
-  },
-  {
-    path: '/api/callback-request',
-    table: 'callback_requests',
-    body: {
-      full_name: 'Test Student',
-      mobile: '09876543210',
-      email: '  STUDENT@EXAMPLE.COM ',
-      preferred_contact_time: 'Morning',
-      consent: true,
-    },
-  },
-  {
-    path: '/api/demo-class-requests',
-    table: 'demo_class_requests',
-    body: {
-      full_name: 'Test Student',
-      mobile: '0091 98765 43210',
-      email: '  STUDENT@EXAMPLE.COM ',
-      qualification_category: 'Student',
-      parent_name: 'Parent Name',
-      school_or_college_name: 'Test College',
-      educational_qualification: 'B.Com',
-      date_of_birth: '2000-01-01',
-      address: '1 Test Street',
-      city: 'Davangere',
-    },
-  },
-];
-
-async function submitPublicContact(
-  path: string,
-  body: Record<string, unknown>,
-  duplicateCheck: () => Response | Promise<Response> = () => Response.json(false),
-  options: { insertDuplicate?: boolean; cleanupFailure?: boolean } = {},
-) {
-  const originalFetch = globalThis.fetch;
-  const applicationMedia = mockR2Bucket({ deleteError: options.cleanupFailure });
-  const duplicateCheckPayloads: Array<Record<string, unknown>> = [];
-  const insertedRecords: Array<{ path: string; body: Record<string, unknown> }> = [];
-
-  globalThis.fetch = async (input, init) => {
-    const request = input instanceof Request ? input : new Request(input, init);
-    const url = new URL(request.url);
-    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
-    if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') {
-      duplicateCheckPayloads.push(await request.json() as Record<string, unknown>);
-      return duplicateCheck();
-    }
-    if (url.pathname === '/rest/v1/application_notifications') {
-      return new Response(null, { status: 201 });
-    }
-    if (url.pathname.startsWith('/rest/v1/') && request.method === 'POST') {
-      if (options.insertDuplicate && url.pathname === '/rest/v1/applications') {
-        return Response.json({ code: '23505', message: 'duplicate_contact' }, { status: 409 });
-      }
-      const record = { path: url.pathname, body: await request.json() as Record<string, unknown> };
-      insertedRecords.push(record);
-      if (url.pathname === '/rest/v1/demo_class_requests') {
-        return Response.json({ id: '550e8400-e29b-41d4-a716-446655440000' }, { status: 201 });
-      }
-      return new Response(null, { status: 201 });
-    }
-    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
-  };
-
-  try {
-    const response = await handleApiRequest(
-      new Request(`https://academy.example${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }),
-      {
-        SUPABASE_URL: 'https://project.example',
-        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
-        APPLICATION_MEDIA: applicationMedia.binding,
-      },
-    );
-    return { response, duplicateCheckPayloads, insertedRecords, applicationMedia };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -633,6 +996,9 @@ test('application and gallery uploads use separate native buckets and content me
     if (url.pathname === '/rest/v1/application_notifications' && request.method === 'POST') {
       return new Response(null, { status: 201 });
     }
+    if (url.pathname === '/rest/v1/media_items' && request.method === 'GET') {
+      return Response.json([]);
+    }
     if (url.pathname === '/rest/v1/media_items' && request.method === 'POST') {
       const insertedMedia = await request.json() as Record<string, unknown>;
       insertedMediaItems.push(insertedMedia);
@@ -710,6 +1076,85 @@ test('application and gallery uploads use separate native buckets and content me
   }
 });
 
+test('media display order rejects numbers already assigned to another entry', async () => {
+  const originalFetch = globalThis.fetch;
+  const publicMedia = mockR2Bucket();
+  const currentId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const duplicateId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const currentItem = {
+    id: currentId,
+    media_type: 'video',
+    title: 'Existing testimonial',
+    caption: null,
+    r2_object_key: null,
+    media_url: null,
+    youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk',
+    youtube_video_id: 'abcdefghijk',
+    cover_image_url: null,
+    alt_text: 'Existing testimonial',
+    is_published: true,
+    display_order: 2,
+  };
+
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/auth/v1/user') return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        full_name: 'Test Admin',
+        role: 'admin',
+        is_active: true,
+      }]);
+    }
+    if (url.pathname === '/rest/v1/media_items' && request.method === 'GET') {
+      if (url.searchParams.get('id') === `eq.${currentId}`) return Response.json([currentItem]);
+      return Response.json([{ id: duplicateId, title: 'Existing duplicate title' }]);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const env = {
+      SUPABASE_URL: 'https://project.example',
+      SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+      CLOUDFLARE_R2_PUBLIC_URL: 'https://media.example',
+      PUBLIC_MEDIA: publicMedia.binding,
+    };
+    const createResponse = await handleApiRequest(
+      new Request('https://academy.example/api/admin/media', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          media_type: 'video',
+          title: 'New testimonial',
+          youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk',
+          display_order: 2,
+        }),
+      }),
+      env,
+    );
+    assert.equal(createResponse.status, 409);
+    assert.match((await createResponse.json() as { error: string }).error, /Existing duplicate title/);
+
+    const updateResponse = await handleApiRequest(
+      new Request(`https://academy.example/api/admin/media/${currentId}`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ display_order: 3 }),
+      }),
+      env,
+    );
+    assert.equal(updateResponse.status, 409);
+    assert.match((await updateResponse.json() as { error: string }).error, /already taken by "Existing duplicate title"/i);
+    assert.equal(publicMedia.puts.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('native R2 upload failures return errors without persisting application or gallery rows', async () => {
   const originalFetch = globalThis.fetch;
   const applicationMedia = mockR2Bucket({ putError: true });
@@ -730,6 +1175,7 @@ test('native R2 upload failures return errors without persisting application or 
       }]);
     }
     if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') return Response.json(false);
+    if (url.pathname === '/rest/v1/media_items' && request.method === 'GET') return Response.json([]);
     if (request.method === 'POST') {
       databaseWriteCount += 1;
       return new Response(null, { status: 201 });
@@ -796,6 +1242,7 @@ test('database write failures clean up uploads from the matching native bucket',
       }]);
     }
     if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') return Response.json(false);
+    if (url.pathname === '/rest/v1/media_items' && request.method === 'GET') return Response.json([]);
     if (url.pathname === '/rest/v1/applications' && request.method === 'POST') {
       return Response.json({ message: 'mock application insert failure' }, { status: 500 });
     }

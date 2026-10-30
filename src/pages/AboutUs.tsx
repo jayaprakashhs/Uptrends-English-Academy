@@ -107,7 +107,7 @@ export const AboutUs: React.FC<AboutUsProps> = ({
         </div>
       </section>
 
-      {/* 3. Our Journey (~25-year journey) */}
+      {/* 3. Our Journey (25+ years of dedicated training) */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="bg-slate-900 text-white rounded-3xl p-8 sm:p-12 border border-slate-800 shadow-xl">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
@@ -117,10 +117,10 @@ export const AboutUs: React.FC<AboutUsProps> = ({
                 <span>Our Heritage in Davangere</span>
               </div>
               <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
-                An Approximately 25-Year Journey of Dedication
+                25+ Years of Building English-Speaking Confidence
               </h2>
               <p className="text-sm text-slate-300 leading-relaxed">
-                With an approximately 25-year journey of dedicated English language training in Davangere, Karnataka, Uptrend’s English Academy has continually evolved its methods to help learners break through language barriers.
+                With 25+ years of dedicated English language training in Davangere, Karnataka, Uptrend’s English Academy has continually evolved its methods to help learners break through language barriers.
               </p>
               <p className="text-sm text-slate-400 leading-relaxed">
                 Located conveniently at Ram And Co Circle, Devi Building, we take pride in offering focused spoken training that respects the individual learning pace of students, graduates, working professionals, and homemakers alike.
@@ -129,7 +129,7 @@ export const AboutUs: React.FC<AboutUsProps> = ({
 
             <div className="lg:col-span-4 flex flex-col items-center justify-center p-6 bg-slate-800/80 rounded-2xl border border-slate-700/60 text-center">
               <span className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-amber-300">
-                ~25
+                25+
               </span>
               <span className="text-sm font-bold text-white mt-1 uppercase tracking-wider">
                 Years of Training
