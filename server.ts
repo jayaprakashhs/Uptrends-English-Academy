@@ -695,22 +695,6 @@ app.get('/api/announcements', async (req, res) => {
   }
 });
 
-app.get('/api/reviews', async (req, res) => {
-  try {
-    if (supabase) {
-      const { data, error } = await supabase
-        .from('reviews')
-        .select('*')
-        .eq('is_published', true)
-        .order('created_at', { ascending: false });
-      if (!error && data) return res.json(data);
-    }
-    res.json(memoryStore.reviews.filter(r => r.is_published));
-  } catch {
-    res.json(memoryStore.reviews.filter(r => r.is_published));
-  }
-});
-
 app.get('/api/admin/programs', async (req, res) => {
   const admin = await requireAdminAuth(req, res, 'admin');
   if (!admin) return;

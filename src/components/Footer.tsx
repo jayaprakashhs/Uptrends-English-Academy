@@ -86,14 +86,6 @@ export const Footer: React.FC<FooterProps> = ({
               </li>
               <li>
                 <button
-                  onClick={() => handleNav('reviews')}
-                  className="hover:text-orange-400 transition-colors text-slate-400"
-                >
-                  Student Reviews
-                </button>
-              </li>
-              <li>
-                <button
                   onClick={() => handleNav('media')}
                   className="hover:text-orange-400 transition-colors text-slate-400"
                 >

@@ -2574,10 +2574,6 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const supabase = getSupabaseClient(env, false, 'public.announcements.read');
       return supabase ? readTable(supabase, 'announcements', READ_COLUMNS.announcements, { publishedColumn: 'is_active', orderColumn: 'display_order' }) : errorResponse('Supabase is not configured.', 503);
     }
-    if (pathname === '/api/reviews' && method === 'GET') {
-      const supabase = getSupabaseClient(env, false, 'public.reviews.read');
-      return supabase ? readTable(supabase, 'reviews', READ_COLUMNS.reviews, { publishedColumn: 'is_published', orderColumn: 'created_at', ascending: false }) : errorResponse('Supabase is not configured.', 503);
-    }
     if (pathname === '/api/media' && method === 'GET') {
       const supabase = getSupabaseClient(env, false, 'public.media.read');
       return supabase ? readTable(supabase, 'media_items', READ_COLUMNS.media, { publishedColumn: 'is_published', orderColumn: 'display_order' }) : errorResponse('Supabase is not configured.', 503);
@@ -2749,7 +2745,6 @@ if (pathname === '/api/admin/official-document' && method === 'PUT') {
         '/api/system-status': ['GET'],
         '/api/programs': ['GET'],
         '/api/announcements': ['GET'],
-        '/api/reviews': ['GET'],
         '/api/media': ['GET'],
         '/api/faqs': ['GET'],
         '/api/branding': ['GET'],

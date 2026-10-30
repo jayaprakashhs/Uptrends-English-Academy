@@ -81,16 +81,6 @@ export interface CallbackRequest {
   created_at: string;
 }
 
-export interface Review {
-  id: string;
-  author_name: string;
-  rating: number;
-  review_text: string;
-  source?: string;
-  is_published: boolean;
-  created_at: string;
-}
-
 export interface MediaItem {
   id: string;
   media_type: 'photo' | 'video';

@@ -736,7 +736,7 @@ test('system status recognizes all documented runtime bindings as configured', a
 });
 
 test('public Supabase-backed routes return JSON 503 when public bindings are missing', async () => {
-  const routes = ['/api/programs', '/api/media', '/api/branding', '/api/faqs', '/api/reviews', '/api/announcements'];
+  const routes = ['/api/programs', '/api/media', '/api/branding', '/api/faqs', '/api/announcements'];
   await withCapturedLogs(async () => {
     for (const route of routes) {
       const response = await handleApiRequest(requestFor(route), {});
@@ -744,6 +744,12 @@ test('public Supabase-backed routes return JSON 503 when public bindings are mis
       assert.equal(body.error, 'Supabase is not configured.', route);
     }
   });
+});
+
+test('obsolete public reviews route is no longer available', async () => {
+  const response = await handleApiRequest(requestFor('/api/reviews'), {});
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: 'API route not found.' });
 });
 
 test('admin routes preserve fail-closed behavior when privileged bindings are missing', async () => {

@@ -29,7 +29,6 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'home', label: 'Home' },
     { id: 'about', label: 'About Us' },
     { id: 'programs', label: 'Programs' },
-    { id: 'reviews', label: 'Reviews' },
     { id: 'media', label: 'Media & Testimonials' },
     { id: 'faqs', label: 'FAQs' },
     { id: 'contact', label: 'Contact Us' },

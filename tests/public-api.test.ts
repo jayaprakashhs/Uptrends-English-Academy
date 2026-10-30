@@ -17,7 +17,6 @@ test('requests each homepage data endpoint and retains its response', async () =
     '/api/announcements',
     '/api/branding',
     '/api/programs',
-    '/api/reviews',
     '/api/media',
     '/api/faqs',
   ];
@@ -38,7 +37,6 @@ test('surfaces failed API responses for every homepage data endpoint', async () 
     '/api/announcements',
     '/api/branding',
     '/api/programs',
-    '/api/reviews',
     '/api/media',
     '/api/faqs',
   ];
@@ -65,7 +63,7 @@ test('surfaces a safe service-unavailable error for API 503', async () => {
 
 test('classifies invalid JSON and network failures without exposing raw errors', async () => {
   await assert.rejects(
-    fetchPublicJson('/api/reviews', undefined, async () => new Response('not json')),
+    fetchPublicJson('/api/media', undefined, async () => new Response('not json')),
     (error: unknown) => error instanceof PublicApiError && error.category === 'invalid_response',
   );
   await assert.rejects(

@@ -11,7 +11,6 @@ import { Home } from './pages/Home';
 import { AboutUs } from './pages/AboutUs';
 import { Programs } from './pages/Programs';
 import { ProgramDetails } from './pages/ProgramDetails';
-import { Reviews } from './pages/Reviews';
 import { MediaGallery } from './pages/MediaGallery';
 import { FAQs } from './pages/FAQs';
 import { ContactUs } from './pages/ContactUs';
@@ -22,9 +21,9 @@ import { NotFound } from './pages/NotFound';
 import { fetchPublicJson, getPublicApiErrorMessage, PublicApiError } from './lib/publicApi';
 import { supabase } from './lib/supabase';
 
-import { Program, Review, MediaItem, TeamMember, FAQ, AdminProfile, SiteBranding } from './types';
+import { Program, MediaItem, TeamMember, FAQ, AdminProfile, SiteBranding } from './types';
 
-type PublicResource = 'branding' | 'programs' | 'reviews' | 'media' | 'faqs';
+type PublicResource = 'branding' | 'programs' | 'media' | 'faqs';
 type PublicResourceStatus = { loading: boolean; error: string | null };
 type PublicResourceStatuses = Record<PublicResource, PublicResourceStatus>;
 
@@ -57,7 +56,6 @@ const applyBrandColorPalette = (name: 'orange' | 'emerald' | 'green', color?: st
 const emptyPublicStatuses: PublicResourceStatuses = {
   branding: { loading: true, error: null },
   programs: { loading: true, error: null },
-  reviews: { loading: true, error: null },
   media: { loading: true, error: null },
   faqs: { loading: true, error: null },
 };
@@ -82,7 +80,6 @@ export function App() {
 
   // Data Collections
   const [programs, setPrograms] = useState<Program[]>([]);
-  const [reviews, setReviews] = useState<Review[]>([]);
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
@@ -107,7 +104,6 @@ export function App() {
       } else {
         if (!Array.isArray(data)) throw new PublicApiError('unexpected_response');
         if (resource === 'programs') setPrograms(data as Program[]);
-        if (resource === 'reviews') setReviews(data as Review[]);
         if (resource === 'media') setMediaItems(data as MediaItem[]);
         if (resource === 'faqs') setFaqs(data as FAQ[]);
       }
@@ -126,7 +122,7 @@ export function App() {
 
   const refreshPublicCatalogue = async () => {
     await Promise.all(
-      (['branding', 'programs', 'reviews', 'media', 'faqs'] as const).map((resource) =>
+      (['branding', 'programs', 'media', 'faqs'] as const).map((resource) =>
         loadPublicResource(resource),
       ),
     );
@@ -135,7 +131,7 @@ export function App() {
   useEffect(() => {
     const controller = new AbortController();
     void Promise.all(
-      (['branding', 'programs', 'reviews', 'media', 'faqs'] as const).map((resource) =>
+      (['branding', 'programs', 'media', 'faqs'] as const).map((resource) =>
         loadPublicResource(resource, controller.signal),
       ),
     );
@@ -322,21 +318,6 @@ export function App() {
           />
         )}
 
-        <div
-          aria-hidden={currentPage !== 'reviews'}
-          inert={currentPage !== 'reviews'}
-          className={
-            currentPage === 'reviews'
-              ? 'contents'
-              : 'pointer-events-none invisible absolute left-[-10000px] top-0 w-full'
-          }
-        >
-          <Reviews
-            openDemoClassModal={() => setDemoClassModalOpen(true)}
-            openCallbackModal={openCallbackModal}
-          />
-        </div>
-
         {currentPage === 'media' && (
           <MediaGallery
             mediaItems={mediaItems}
@@ -381,7 +362,6 @@ export function App() {
           'about',
           'programs',
           'program-details',
-          'reviews',
           'media',
           'faqs',
           'contact',
