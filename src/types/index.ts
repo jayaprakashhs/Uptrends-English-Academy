@@ -32,6 +32,7 @@ export type ApplicationStatus = 'Pending' | 'Accepted';
 export interface StudentApplication {
   id: string;
   application_reference: string;
+  student_id?: string | null;
   student_name: string;
   mobile: string;
   email: string;

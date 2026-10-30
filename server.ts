@@ -102,6 +102,83 @@ const r2Client = (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY)
     })
   : null;
 
+const applicationMedia: R2BucketBinding | undefined = r2Client
+  ? {
+      put: async (key, value, options) => {
+        const body = value instanceof ArrayBuffer
+          ? Buffer.from(value)
+          : Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+        await r2Client.send(new PutObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: key,
+          Body: body,
+          ContentType: options?.httpMetadata?.contentType,
+        }));
+      },
+      delete: async (key) => {
+        await r2Client.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+      },
+      get: async (key) => {
+        const object = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+        if (!object.Body) return null;
+        const bytes = await object.Body.transformToByteArray();
+        return {
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(bytes));
+              controller.close();
+            },
+          }),
+          httpMetadata: { contentType: object.ContentType },
+        };
+      },
+      list: async () => ({ objects: [] }),
+    }
+  : undefined;
+
+async function dispatchWorkerApi(req: express.Request, res: express.Response) {
+  try {
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (typeof value === 'string') headers.set(key, value);
+      else if (Array.isArray(value)) headers.set(key, value.join(', '));
+    }
+
+    const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+    const hasBody = !['GET', 'HEAD'].includes(req.method.toUpperCase());
+    const requestBody = hasBody ? JSON.stringify(req.body ?? {}) : undefined;
+    if (requestBody !== undefined) {
+      headers.delete('content-length');
+      headers.set('content-type', 'application/json');
+    }
+
+    const workerResponse = await handleApiRequest(
+      new Request(url, {
+        method: req.method,
+        headers,
+        ...(requestBody !== undefined ? { body: requestBody } : {}),
+      }),
+      {
+        SUPABASE_URL: process.env.SUPABASE_URL || SUPABASE_URL,
+        VITE_SUPABASE_URL: SUPABASE_URL,
+        VITE_SUPABASE_ANON_KEY: process.env.VITE_SUPABASE_ANON_KEY || '',
+        SUPABASE_SERVICE_ROLE_KEY: SUPABASE_SERVICE_KEY,
+        APPLICATION_MEDIA: applicationMedia,
+        CLOUDFLARE_R2_PUBLIC_URL: R2_PUBLIC_URL,
+        RESEND_API_KEY,
+        RESEND_FROM_EMAIL,
+        APPLICATION_NOTIFICATION_EMAIL,
+      },
+    );
+    res.status(workerResponse.status);
+    workerResponse.headers.forEach((value, key) => res.setHeader(key, value));
+    return res.send(Buffer.from(await workerResponse.arrayBuffer()));
+  } catch (error) {
+    console.error('Worker API bridge failed.', error);
+    return res.status(500).json({ error: 'Unable to process this request.' });
+  }
+}
+
 // -------------------------------------------------------------
 // SERVER-SIDE AUTHENTICATION & ROLE-BASED ACCESS CONTROL
 // -------------------------------------------------------------
@@ -1402,344 +1479,9 @@ app.get('/api/branding', async (req, res) => {
   }
 });
 
-app.post('/api/apply', async (req, res) => {
-  try {
-    const {
-      student_name,
-      mobile,
-      email,
-      qualification,
-      program_id,
-      program_name,
-      date_of_birth,
-      address,
-      message,
-      photo_base64,
-      photo_mime_type,
-      privacy_consent,
-    } = req.body;
+app.post('/api/apply', dispatchWorkerApi);
 
-    if (!student_name || !mobile || !email || !qualification || !program_name) {
-      return res.status(400).json({ error: 'Missing mandatory fields.' });
-    }
-    if (typeof mobile !== 'string' || typeof email !== 'string') {
-      return res.status(400).json({ error: 'Enter a valid email address and Indian mobile number.' });
-    }
-    const normalizedEmail = normalizeContactEmail(email);
-    const normalizedMobile = normalizeIndianMobileNumber(mobile);
-    if (!isValidContactEmail(normalizedEmail) || !normalizedMobile) {
-      return res.status(400).json({ error: 'Enter a valid email address and Indian mobile number.' });
-    }
-
-    if (!privacy_consent) {
-      return res.status(400).json({ error: 'Privacy consent is required to process your application.' });
-    }
-
-    let duplicateContact: boolean;
-    try {
-      duplicateContact = await checkContactDuplicates(normalizedEmail, normalizedMobile);
-    } catch (validationError) {
-      return res.status(503).json({
-        error: validationError instanceof Error ? validationError.message : 'Contact verification is temporarily unavailable.',
-      });
-    }
-    if (duplicateContact) return sendDuplicateContactResponse(res);
-
-    // Process photograph
-    let photo_object_key = '';
-    let photo_data_url = '';
-
-    if (photo_base64) {
-      const cleanBase64 = photo_base64.replace(/^data:image\/\w+;base64,/, '');
-      const buffer = Buffer.from(cleanBase64, 'base64');
-      
-      if (buffer.length > 300 * 1024) {
-        return res.status(400).json({
-          error: `Passport photograph exceeds 300 KB limit (${(buffer.length / 1024).toFixed(1)} KB). Please compress or choose a smaller image.`,
-        });
-      }
-
-      const mime = photo_mime_type || 'image/jpeg';
-      const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
-      const filename = `applications/${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
-
-      try {
-        photo_object_key = await uploadToR2(buffer, filename, mime);
-        photo_data_url = photo_base64;
-      } catch (uploadErr: any) {
-        console.error('[Upload to R2 Error]', uploadErr);
-        photo_object_key = `local_${Date.now()}.${ext}`;
-        photo_data_url = photo_base64;
-      }
-    }
-
-    // Generate valid UUID and human-readable reference e.g., UEA-2026-8942
-    const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
-    const application_reference = `UEA-2026-${randomCode}`;
-    const newId = crypto.randomUUID();
-
-    const newApplication = {
-      id: newId,
-      application_reference,
-      student_name,
-      mobile: normalizedMobile,
-      email: normalizedEmail,
-      qualification,
-      program_id: program_id || null,
-      program_name,
-      date_of_birth: date_of_birth || null,
-      address: address || null,
-      photo_object_key,
-      photo_data_url,
-      message: message || null,
-      status: 'Pending',
-      privacy_consent: true,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    if (supabase) {
-      const { error } = await supabase.from('applications').insert([newApplication]);
-      if (error) {
-        if (isDuplicateContactError(error)) return sendDuplicateContactResponse(res);
-        console.error('[Supabase Insert Application Error]', error);
-        return res.status(500).json({ error: 'Failed to record application in database. Please retry.' });
-      }
-    } else {
-      memoryStore.applications.unshift(newApplication);
-    }
-
-    // Prepare Confirmation Email to Student
-    const studentEmailHtml = `
-      <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
-        <div style="text-align: center; margin-bottom: 24px;">
-          <h2 style="color: #ea580c; margin: 0; font-size: 24px;">Uptrend's English Academy</h2>
-          <p style="color: #16a34a; font-weight: 600; margin: 4px 0 0 0;">Davangere, Karnataka</p>
-        </div>
-        <p>Dear <strong>${student_name}</strong>,</p>
-        <p>Thank you for applying to <strong>Uptrend's English Academy</strong>.</p>
-        <p>Your application for <strong>${program_name}</strong> has been submitted successfully. It is currently <strong>waiting for approval</strong> from our staff or teacher.</p>
-        <p>We will notify you by email when your application status changes.</p>
-        <div style="background-color: #f8fafc; border-left: 4px solid #ea580c; padding: 12px 16px; margin: 20px 0;">
-          <p style="margin: 0; font-size: 14px; color: #64748b;">Application Reference:</p>
-          <p style="margin: 4px 0 0 0; font-size: 18px; font-weight: 700; color: #0f172a;">${application_reference}</p>
-        </div>
-        <p>Thank you for your interest in Uptrend's English Academy.</p>
-        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
-        <p style="margin: 0; font-size: 13px; color: #64748b;">
-          Regards,<br>
-          <strong>Uptrend's English Academy</strong><br>
-          #259/1A1, Devi Building, 2nd Floor, Ram And Co Circle, Davangere, Karnataka 577002<br>
-          Phone: +91 900 8000 211 | Email: uptrendsinstitute@gmail.com
-        </p>
-      </div>
-    `;
-
-    const submissionDate = new Date().toLocaleDateString('en-IN', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-
-    const staffEmailHtml = `
-      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
-        <h3 style="color: #0f172a; margin-top: 0;">New Student Application Received</h3>
-        <p>A new student application has been submitted:</p>
-        <ul>
-          <li><strong>Student Name:</strong> ${student_name}</li>
-          <li><strong>Program:</strong> ${program_name}</li>
-          <li><strong>Mobile:</strong> ${mobile}</li>
-          <li><strong>Email:</strong> ${email}</li>
-          <li><strong>Qualification:</strong> ${qualification}</li>
-          <li><strong>Application Reference:</strong> ${application_reference}</li>
-          <li><strong>Submission Date:</strong> ${submissionDate}</li>
-          <li><strong>Status:</strong> Pending</li>
-        </ul>
-        <p>Please review and approve this application in the secure admin portal.</p>
-        <p style="font-size: 12px; color: #94a3b8;">Confidential academy notification.</p>
-      </div>
-    `;
-
-    let studentEmailResult = await sendEmailViaResend({
-      to: email,
-      subject: "Application Received — Uptrend's English Academy",
-      html: studentEmailHtml,
-    });
-
-    await sendEmailViaResend({
-      to: APPLICATION_NOTIFICATION_EMAIL,
-      subject: `New Student Application — ${student_name}`,
-      html: staffEmailHtml,
-    });
-
-    // Record notification log with UUID
-    const notificationRecord = {
-      id: crypto.randomUUID(),
-      application_id: newId,
-      notification_type: 'student_confirmation',
-      recipient_email: email,
-      status: studentEmailResult.success ? 'Sent' : 'Failed',
-      attempt_count: 1,
-      provider_message_id: studentEmailResult.provider_message_id,
-      error_message: studentEmailResult.error || null,
-      created_at: new Date().toISOString(),
-    };
-
-    if (supabase) {
-      await supabase.from('application_notifications').insert([notificationRecord]);
-    } else {
-      memoryStore.notifications.unshift(notificationRecord);
-    }
-
-    return res.status(202).json(contactAcknowledgement);
-  } catch (error: any) {
-    console.error('[Application Submission Exception]', error);
-    res.status(500).json({ error: error.message || 'Internal server error while processing application.' });
-  }
-});
-
-// POST Approve Application (Staff / Admin / Super Admin)
-app.post('/api/approve-application', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'staff');
-  if (!admin) return;
-
-  try {
-    const { application_id, approved_by_name } = req.body;
-
-    if (!application_id) {
-      return res.status(400).json({ error: 'Application ID is required.' });
-    }
-
-    // Verify official PDF is available
-    const localPdfPath = path.resolve(__dirname, 'public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf');
-    let pdfBuffer: Buffer | null = null;
-
-    if (fs.existsSync(localPdfPath)) {
-      pdfBuffer = fs.readFileSync(localPdfPath);
-    }
-
-    if (!pdfBuffer && !APPROVED_FEE_STRUCTURE_PDF_URL) {
-      return res.status(400).json({
-        error: 'Official Fee Structure PDF is not configured. Please configure APPROVED_FEE_STRUCTURE_PDF_URL or ensure Uptrends_Fee_Structure_and_Terms.pdf exists before approving.',
-      });
-    }
-
-    // Find application
-    let targetApp: any = null;
-    if (supabase) {
-      const { data, error } = await supabase
-        .from('applications')
-        .select('*')
-        .eq('id', application_id)
-        .single();
-      if (error || !data) {
-        return res.status(404).json({ error: 'Application record not found in database.' });
-      }
-      targetApp = data;
-    } else {
-      targetApp = memoryStore.applications.find(a => a.id === application_id);
-      if (!targetApp) {
-        return res.status(404).json({ error: 'Application record not found in memory store.' });
-      }
-    }
-
-    const approvedAt = new Date().toISOString();
-    const approverName = approved_by_name || admin.full_name || 'Authorized Staff';
-
-    // Update status to 'Accepted'
-    if (supabase) {
-      const { error: updateErr } = await supabase
-        .from('applications')
-        .update({
-          status: 'Accepted',
-          approved_by_user_id: admin.id,
-          approved_by_name: approverName,
-          approved_at: approvedAt,
-        })
-        .eq('id', application_id);
-      if (updateErr) {
-        return res.status(500).json({ error: 'Failed to update application status in database.' });
-      }
-    } else {
-      targetApp.status = 'Accepted';
-      targetApp.approved_by_name = approverName;
-      targetApp.approved_at = approvedAt;
-    }
-
-    // Send Approval Email to Student with PDF attached
-    const approvalHtml = `
-      <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
-        <div style="text-align: center; margin-bottom: 24px;">
-          <h2 style="color: #16a34a; margin: 0; font-size: 24px;">Congratulations!</h2>
-          <h3 style="color: #ea580c; margin: 6px 0 0 0;">Uptrend's English Academy</h3>
-        </div>
-        <p>Dear <strong>${targetApp.student_name}</strong>,</p>
-        <p>Congratulations!</p>
-        <p>Your application to <strong>Uptrend's English Academy</strong> for <strong>${targetApp.program_name}</strong> has been approved.</p>
-        <p>Please find the attached PDF containing the academy's fee structure and terms and conditions.</p>
-        <p>Read the document carefully and contact the academy if you need clarification.</p>
-        <div style="background-color: #f0fdf4; border-left: 4px solid #16a34a; padding: 12px 16px; margin: 20px 0;">
-          <p style="margin: 0; font-size: 14px; color: #166534;">Application Reference:</p>
-          <p style="margin: 4px 0 0 0; font-size: 18px; font-weight: 700; color: #14532d;">${targetApp.application_reference}</p>
-        </div>
-        <p>We look forward to welcoming you to Uptrend's English Academy.</p>
-        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
-        <p style="margin: 0; font-size: 13px; color: #64748b;">
-          Regards,<br>
-          <strong>Uptrend's English Academy</strong><br>
-          #259/1A1, Devi Building, 2nd Floor, Ram And Co Circle, Davangere, Karnataka 577002<br>
-          Phone: +91 900 8000 211 | Email: uptrendsinstitute@gmail.com
-        </p>
-      </div>
-    `;
-
-    const attachments: any[] = [];
-    if (pdfBuffer) {
-      attachments.push({
-        filename: 'Uptrends_Fee_Structure_and_Terms.pdf',
-        content: pdfBuffer,
-      });
-    }
-
-    const emailResult = await sendEmailViaResend({
-      to: targetApp.email,
-      subject: "Congratulations! Your Application Has Been Approved — Uptrend's English Academy",
-      html: approvalHtml,
-      attachments,
-    });
-
-    const approvalNotif = {
-      id: crypto.randomUUID(),
-      application_id,
-      notification_type: 'student_approval',
-      recipient_email: targetApp.email,
-      status: emailResult.success ? 'Sent' : 'Failed',
-      attempt_count: 1,
-      provider_message_id: emailResult.provider_message_id,
-      error_message: emailResult.error || null,
-      pdf_attached: true,
-      created_at: new Date().toISOString(),
-    };
-
-    if (supabase) {
-      await supabase.from('application_notifications').insert([approvalNotif]);
-    } else {
-      memoryStore.notifications.unshift(approvalNotif);
-    }
-
-    res.json({
-      success: true,
-      message: 'Application approved successfully.',
-      email_status: emailResult.success ? 'Sent with official PDF attachment' : 'Recorded (Email delivery requires verified Resend sender domain)',
-      pdf_attached: true,
-    });
-  } catch (error: any) {
-    console.error('[Approve Application Exception]', error);
-    res.status(500).json({ error: error.message || 'Error approving application.' });
-  }
-});
+app.post('/api/approve-application', dispatchWorkerApi);
 
 // POST Retry Failed Notification
 app.post('/api/retry-notification', async (req, res) => {
@@ -1872,8 +1614,7 @@ app.post('/api/callback-request', async (req, res) => {
   }
 });
 
-// Bridge manual payment endpoints to the existing Worker handlers.
-// Preserve the original Bearer token and Worker-side role checks.
+// Route document, fee, and demo-request workflows through the shared Worker handlers.
 app.all(
   [
     '/api/admin/applications/:id/fee',
@@ -1883,102 +1624,15 @@ app.all(
     '/api/admin/demo-class-requests',
     '/api/admin/demo-class-requests/:id',
     '/api/admin/demo-class-requests/:id/photo',
+    '/api/admin/program-fees',
+    '/api/admin/programs/:id/fee',
+    '/api/admin/programs/:id/fee/history',
+    '/api/admin/official-document',
+    '/api/admin/official-document/preview',
+    '/api/admin/official-document/issued',
+    '/api/admin/official-document/assets',
   ],
-  async (req, res) => {
-    try {
-      const headers = new Headers();
-
-      for (const [key, value] of Object.entries(req.headers)) {
-        if (typeof value === 'string') {
-          headers.set(key, value);
-        } else if (Array.isArray(value)) {
-          headers.set(key, value.join(', '));
-        }
-      }
-
-      const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
-      const hasBody = !['GET', 'HEAD'].includes(req.method.toUpperCase());
-      const requestBody = hasBody ? JSON.stringify(req.body ?? {}) : undefined;
-      if (requestBody !== undefined) {
-        headers.delete('content-length');
-        headers.set('content-type', 'application/json');
-      }
-
-      const workerRequest = new Request(url, {
-        method: req.method,
-        headers,
-        ...(requestBody !== undefined ? { body: requestBody } : {}),
-      });
-
-      const applicationMedia: R2BucketBinding | undefined = r2Client
-        ? {
-            put: async (key, value, options) => {
-              const body = value instanceof ArrayBuffer
-                ? Buffer.from(value)
-                : Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-              await r2Client.send(new PutObjectCommand({
-                Bucket: R2_BUCKET,
-                Key: key,
-                Body: body,
-                ContentType: options?.httpMetadata?.contentType,
-              }));
-            },
-            delete: async (key) => {
-              await r2Client.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
-            },
-            get: async (key) => {
-              const object = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
-              if (!object.Body) return null;
-              const bytes = await object.Body.transformToByteArray();
-              return {
-                body: new ReadableStream<Uint8Array>({
-                  start(controller) {
-                    controller.enqueue(new Uint8Array(bytes));
-                    controller.close();
-                  },
-                }),
-                httpMetadata: { contentType: object.ContentType },
-              };
-            },
-            list: async () => ({ objects: [] }),
-          }
-        : undefined;
-
-      const workerEnv = {
-        SUPABASE_URL: process.env.SUPABASE_URL || SUPABASE_URL,
-        VITE_SUPABASE_URL: SUPABASE_URL,
-        VITE_SUPABASE_ANON_KEY:
-          process.env.VITE_SUPABASE_ANON_KEY || '',
-        SUPABASE_SERVICE_ROLE_KEY: SUPABASE_SERVICE_KEY,
-        APPLICATION_MEDIA: applicationMedia,
-        RESEND_API_KEY,
-        RESEND_FROM_EMAIL,
-        APPLICATION_NOTIFICATION_EMAIL,
-      };
-
-      const workerResponse = await handleApiRequest(
-        workerRequest,
-        workerEnv,
-      );
-
-      res.status(workerResponse.status);
-
-      workerResponse.headers.forEach((value, key) => {
-        res.setHeader(key, value);
-      });
-
-      const responseBody = Buffer.from(
-        await workerResponse.arrayBuffer(),
-      );
-
-      return res.send(responseBody);
-    } catch (error) {
-      console.error('Manual payment route bridge failed.');
-      return res.status(500).json({
-        error: 'Unable to process the payment request.',
-      });
-    }
-  },
+  dispatchWorkerApi,
 );
 // -------------------------------------------------------------
 // PROTECTED ADMIN DATA ENDPOINTS (Staff and above)

@@ -466,7 +466,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                 )}
               </button>
               <p className="text-center text-[11px] text-slate-400 mt-2">
-                Upon saving, you will immediately receive your unique Application Reference (UEA-2026-XXXX).
+                Upon saving, you will receive your database-generated Application Number (UEA-APP-YYYY-0001).
               </p>
             </div>
           </form>

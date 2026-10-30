@@ -111,6 +111,9 @@ async function submitPublicContact(
       }
       const record = { path: url.pathname, body: await request.json() as Record<string, unknown> };
       insertedRecords.push(record);
+      if (url.pathname === '/rest/v1/applications') {
+        return Response.json({ application_reference: 'UEA-APP-2026-0001' }, { status: 201 });
+      }
       if (url.pathname === '/rest/v1/demo_class_requests') {
         return Response.json({ id: '550e8400-e29b-41d4-a716-446655440000' }, { status: 201 });
       }
@@ -997,7 +1000,7 @@ test('application and gallery uploads use separate native buckets and content me
     if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') return Response.json(false);
     if (url.pathname === '/rest/v1/applications' && request.method === 'POST') {
       insertedApplications.push(await request.json() as Record<string, unknown>);
-      return new Response(null, { status: 201 });
+      return Response.json({ application_reference: 'UEA-APP-2026-0001' }, { status: 201 });
     }
     if (url.pathname === '/rest/v1/application_notifications' && request.method === 'POST') {
       return new Response(null, { status: 201 });
