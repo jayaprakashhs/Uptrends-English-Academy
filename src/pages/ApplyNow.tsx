@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { Program } from '../types';
 import { compressPassportPhoto } from '../lib/imageCompressor';
 import { CheckCircle2, AlertCircle, Upload, ArrowRight, ShieldCheck, FileCheck, RefreshCw } from 'lucide-react';
+import { isValidContactEmail, normalizeIndianMobileNumber } from '../../contact-validation';
+import { ContactValidationMessage, useContactDuplicateValidation } from '../hooks/useContactDuplicateValidation';
 
 interface ApplyNowProps {
   programs: Program[];
@@ -39,9 +41,8 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
   // Submission states
   const [submitting, setSubmitting] = useState(false);
   const [submissionSuccess, setSubmissionSuccess] = useState(false);
-  const [appReference, setAppReference] = useState('');
-  const [emailStatusMessage, setEmailStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const contactValidation = useContactDuplicateValidation(email, mobile);
 
   // Handle Photo Selection & Compression (Strict <= 300 KB)
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -82,11 +83,11 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
       setErrorMessage('Student full name is required.');
       return;
     }
-    if (!mobile.trim() || mobile.trim().length < 8) {
-      setErrorMessage('Please provide a valid mobile number.');
+    if (!normalizeIndianMobileNumber(mobile)) {
+      setErrorMessage('Please provide a valid Indian mobile number.');
       return;
     }
-    if (!email.trim() || !email.includes('@')) {
+    if (!isValidContactEmail(email)) {
       setErrorMessage('A valid email address is mandatory to receive confirmation and admission decisions.');
       return;
     }
@@ -104,6 +105,15 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
     }
     if (!privacyConsent) {
       setErrorMessage('You must agree to the privacy policy to submit your application.');
+      return;
+    }
+
+    const [emailResult, mobileResult] = await Promise.all([
+      contactValidation.validateEmail(email),
+      contactValidation.validateMobile(mobile),
+    ]);
+    if (emailResult.error || mobileResult.error) {
+      setErrorMessage(emailResult.error || mobileResult.error || 'Unable to verify your contact information. Please try again.');
       return;
     }
 
@@ -138,8 +148,6 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
         throw new Error(result.error || 'Failed to submit application. Please retry.');
       }
 
-      setAppReference(result.application_reference);
-      setEmailStatusMessage(result.email_status);
       setSubmissionSuccess(true);
       window.scrollTo({ top: 100, behavior: 'smooth' });
     } catch (err: any) {
@@ -158,38 +166,9 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
           </div>
 
           <div className="space-y-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-emerald-600">
-              Application Status: Pending Review
-            </span>
-            <h1 className="text-3xl font-extrabold text-slate-950">Application Submitted!</h1>
+            <h1 className="text-3xl font-extrabold text-slate-950">Request Received</h1>
             <p className="text-sm text-slate-600 max-w-lg mx-auto">
-              Thank you, <strong>{studentName}</strong>. Your application has been saved successfully in our system and is currently waiting for approval from academy staff.
-            </p>
-          </div>
-
-          <div className="max-w-md mx-auto bg-slate-50 border border-slate-200 rounded-2xl p-6 text-left space-y-3">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <span className="text-xs font-semibold text-slate-500">Application Reference</span>
-              <span className="text-base font-extrabold text-orange-600 tracking-wider">
-                {appReference}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-slate-500">Registered Email:</span>
-              <span className="font-semibold text-slate-800">{email}</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-slate-500">Email Notification Status:</span>
-              <span className="font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">
-                {emailStatusMessage}
-              </span>
-            </div>
-          </div>
-
-          <div className="p-4 bg-orange-50 border border-orange-100 rounded-2xl text-xs text-orange-900 max-w-lg mx-auto">
-            <p className="font-semibold mb-1">What happens next?</p>
-            <p className="text-orange-800 text-[11px] leading-relaxed">
-              Our academic counselors will evaluate your application details. Once approved by our team, an official approval email will be sent to your inbox with the official fee structure and terms document attached.
+              Thank you. If we can process your request, the academy will contact you using the details provided.
             </p>
           </div>
 
@@ -278,9 +257,13 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                     required
                     value={mobile}
                     onChange={(e) => setMobile(e.target.value)}
+                    onBlur={() => void contactValidation.validateMobile(mobile)}
+                    aria-invalid={contactValidation.mobileCheck.duplicate || Boolean(contactValidation.mobileCheck.error)}
+                    aria-describedby="application-mobile-validation"
                     placeholder="+91 98765 43210"
-                    className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500"
+                    className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${contactValidation.mobileCheck.duplicate || contactValidation.mobileCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
                   />
+                  <ContactValidationMessage id="application-mobile-validation" state={contactValidation.mobileCheck} />
                 </div>
               </div>
 
@@ -294,9 +277,13 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    onBlur={() => void contactValidation.validateEmail(email)}
+                    aria-invalid={contactValidation.emailCheck.duplicate || Boolean(contactValidation.emailCheck.error)}
+                    aria-describedby="application-email-validation"
                     placeholder="student@example.com"
-                    className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500"
+                    className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${contactValidation.emailCheck.duplicate || contactValidation.emailCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
                   />
+                  <ContactValidationMessage id="application-email-validation" state={contactValidation.emailCheck} />
                   <p className="text-[11px] text-slate-400 mt-1">
                     Confirmation & approval notifications will be delivered to this address.
                   </p>
@@ -464,10 +451,13 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
               <button
                 type="submit"
                 disabled={submitting || compressing}
-                className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-orange-600 to-orange-500 hover:from-orange-500 hover:to-orange-600 text-white font-extrabold text-base shadow-lg shadow-orange-600/20 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                className="form-submit-button w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-orange-600 to-orange-500 hover:from-orange-500 hover:to-orange-600 text-white font-extrabold text-base shadow-lg shadow-orange-600/20 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 {submitting ? (
-                  <span>Saving application & sending confirmation...</span>
+                  <>
+                    <span aria-hidden="true" className="h-5 w-5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                    <span role="status" aria-live="polite">Saving application &amp; sending confirmation...</span>
+                  </>
                 ) : (
                   <>
                     <span>Submit Student Application</span>

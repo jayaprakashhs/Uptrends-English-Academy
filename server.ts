@@ -10,6 +10,11 @@ import { DeleteObjectCommand, HeadBucketCommand, S3Client, PutObjectCommand } fr
 import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
 import { removeLegacyUploadFile } from './local-upload-storage';
 import { handleApiRequest } from './worker-api';
+import {
+  isValidContactEmail,
+  normalizeContactEmail,
+  normalizeIndianMobileNumber,
+} from './contact-validation';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,6 +49,36 @@ export const supabase = (SUPABASE_URL && SUPABASE_SERVICE_KEY)
       },
     })
   : null;
+
+const checkContactDuplicates = async (
+  email: string | null,
+  mobile: string | null,
+): Promise<boolean> => {
+  if (!supabase) throw new Error('Contact verification is temporarily unavailable. Please try again.');
+  const { data, error } = await supabase.rpc('check_application_contact_duplicate', {
+    p_email: email,
+    p_mobile: mobile,
+  });
+  if (error || typeof data !== 'boolean') {
+    console.error('Unable to verify submitted contact information.', {
+      operation: 'application_contact_duplicate_check',
+      error_code: error?.code || 'invalid_response',
+    });
+    throw new Error('Contact verification is temporarily unavailable. Please try again.');
+  }
+  return data;
+};
+
+const isDuplicateContactError = (error: { code?: string; message?: string }): boolean =>
+  error.code === '23505' && error.message === 'duplicate_contact';
+
+const contactAcknowledgement = {
+  success: true,
+  message: 'We received your request. If it can be processed, the academy will contact you.',
+};
+
+const sendDuplicateContactResponse = (res: express.Response) =>
+  res.status(202).json(contactAcknowledgement);
 
 // Initialize Resend if key exists
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
@@ -1350,10 +1385,28 @@ app.post('/api/apply', async (req, res) => {
     if (!student_name || !mobile || !email || !qualification || !program_name) {
       return res.status(400).json({ error: 'Missing mandatory fields.' });
     }
+    if (typeof mobile !== 'string' || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Enter a valid email address and Indian mobile number.' });
+    }
+    const normalizedEmail = normalizeContactEmail(email);
+    const normalizedMobile = normalizeIndianMobileNumber(mobile);
+    if (!isValidContactEmail(normalizedEmail) || !normalizedMobile) {
+      return res.status(400).json({ error: 'Enter a valid email address and Indian mobile number.' });
+    }
 
     if (!privacy_consent) {
       return res.status(400).json({ error: 'Privacy consent is required to process your application.' });
     }
+
+    let duplicateContact: boolean;
+    try {
+      duplicateContact = await checkContactDuplicates(normalizedEmail, normalizedMobile);
+    } catch (validationError) {
+      return res.status(503).json({
+        error: validationError instanceof Error ? validationError.message : 'Contact verification is temporarily unavailable.',
+      });
+    }
+    if (duplicateContact) return sendDuplicateContactResponse(res);
 
     // Process photograph
     let photo_object_key = '';
@@ -1392,8 +1445,8 @@ app.post('/api/apply', async (req, res) => {
       id: newId,
       application_reference,
       student_name,
-      mobile,
-      email,
+      mobile: normalizedMobile,
+      email: normalizedEmail,
       qualification,
       program_id: program_id || null,
       program_name,
@@ -1411,6 +1464,7 @@ app.post('/api/apply', async (req, res) => {
     if (supabase) {
       const { error } = await supabase.from('applications').insert([newApplication]);
       if (error) {
+        if (isDuplicateContactError(error)) return sendDuplicateContactResponse(res);
         console.error('[Supabase Insert Application Error]', error);
         return res.status(500).json({ error: 'Failed to record application in database. Please retry.' });
       }
@@ -1502,13 +1556,7 @@ app.post('/api/apply', async (req, res) => {
       memoryStore.notifications.unshift(notificationRecord);
     }
 
-    return res.json({
-      success: true,
-      application_reference,
-      status: 'Pending',
-      email_status: studentEmailResult.success ? 'Sent' : 'Recorded (Resend API key required for live delivery)',
-      message: 'Your application has been submitted successfully and is waiting for approval from academy staff.',
-    });
+    return res.status(202).json(contactAcknowledgement);
   } catch (error: any) {
     console.error('[Application Submission Exception]', error);
     res.status(500).json({ error: error.message || 'Internal server error while processing application.' });
@@ -1731,12 +1779,31 @@ app.post('/api/callback-request', async (req, res) => {
     if (!full_name || !mobile || !preferred_contact_time) {
       return res.status(400).json({ error: 'Full name, mobile number, and preferred contact time are required.' });
     }
+    if (typeof mobile !== 'string' || (email !== null && email !== undefined && typeof email !== 'string')) {
+      return res.status(400).json({ error: 'Enter a valid email address and Indian mobile number.' });
+    }
+    const normalizedMobile = normalizeIndianMobileNumber(mobile);
+    const normalizedEmail = typeof email === 'string' && email.trim()
+      ? normalizeContactEmail(email)
+      : null;
+    if (!normalizedMobile || (normalizedEmail && !isValidContactEmail(normalizedEmail))) {
+      return res.status(400).json({ error: 'Enter a valid email address and Indian mobile number.' });
+    }
+    let duplicateContact: boolean;
+    try {
+      duplicateContact = await checkContactDuplicates(normalizedEmail, normalizedMobile);
+    } catch (validationError) {
+      return res.status(503).json({
+        error: validationError instanceof Error ? validationError.message : 'Contact verification is temporarily unavailable.',
+      });
+    }
+    if (duplicateContact) return sendDuplicateContactResponse(res);
 
     const newRecord = {
       id: crypto.randomUUID(),
       full_name,
-      mobile,
-      email: email || null,
+      mobile: normalizedMobile,
+      email: normalizedEmail,
       program_name: program_name || 'General Inquiry',
       preferred_contact_time,
       message: message || null,
@@ -1746,7 +1813,12 @@ app.post('/api/callback-request', async (req, res) => {
     };
 
     if (supabase) {
-      await supabase.from('callback_requests').insert([newRecord]);
+      const { error } = await supabase.from('callback_requests').insert([newRecord]);
+      if (error) {
+        if (isDuplicateContactError(error)) return sendDuplicateContactResponse(res);
+        console.error('[Supabase Insert Callback Error]', { code: error.code || 'unknown' });
+        return res.status(500).json({ error: 'Failed to record callback request. Please retry.' });
+      }
     } else {
       memoryStore.callbacks.unshift(newRecord);
     }
@@ -1757,10 +1829,7 @@ app.post('/api/callback-request', async (req, res) => {
       html: `<p>New callback request received:</p><p><strong>Name:</strong> ${full_name}<br><strong>Mobile:</strong> ${mobile}<br><strong>Program:</strong> ${program_name}<br><strong>Preferred Time:</strong> ${preferred_contact_time}<br><strong>Message:</strong> ${message || 'None'}</p>`,
     });
 
-    res.json({
-      success: true,
-      message: 'Your callback request has been received. Our team will contact you during your preferred time.',
-    });
+    res.status(202).json(contactAcknowledgement);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1815,6 +1884,7 @@ app.all(
     '/api/admin/applications/:id/fee',
     '/api/admin/applications/:id/payments',
     '/api/admin/payments/:paymentId',
+    '/api/demo-class-requests',
   ],
   async (req, res) => {
     try {
@@ -1845,6 +1915,9 @@ app.all(
         VITE_SUPABASE_ANON_KEY:
           process.env.VITE_SUPABASE_ANON_KEY || '',
         SUPABASE_SERVICE_ROLE_KEY: SUPABASE_SERVICE_KEY,
+        RESEND_API_KEY,
+        RESEND_FROM_EMAIL,
+        APPLICATION_NOTIFICATION_EMAIL,
       };
 
       const workerResponse = await handleApiRequest(

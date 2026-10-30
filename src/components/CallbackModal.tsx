@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { X, PhoneCall, CheckCircle, AlertCircle, Clock, Send } from 'lucide-react';
+import { isValidContactEmail, normalizeIndianMobileNumber } from '../../contact-validation';
+import { ContactValidationMessage, useContactDuplicateValidation } from '../hooks/useContactDuplicateValidation';
 
 interface CallbackModalProps {
   isOpen: boolean;
@@ -23,6 +25,7 @@ export const CallbackModal: React.FC<CallbackModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const contactValidation = useContactDuplicateValidation(email, mobile, isOpen);
 
   if (!isOpen) return null;
 
@@ -34,9 +37,26 @@ export const CallbackModal: React.FC<CallbackModalProps> = ({
       setError('Please provide your full name and a valid mobile number.');
       return;
     }
+    if (!normalizeIndianMobileNumber(mobile)) {
+      setError('Please provide a valid Indian mobile number.');
+      return;
+    }
+    if (email.trim() && !isValidContactEmail(email)) {
+      setError('Please provide a valid email address.');
+      return;
+    }
 
     if (!consent) {
       setError('Please provide consent for the academy to contact you.');
+      return;
+    }
+
+    const [emailResult, mobileResult] = await Promise.all([
+      contactValidation.validateEmail(email),
+      contactValidation.validateMobile(mobile),
+    ]);
+    if (emailResult.error || mobileResult.error) {
+      setError(emailResult.error || mobileResult.error || 'Unable to verify your contact information. Please try again.');
       return;
     }
 
@@ -107,8 +127,7 @@ export const CallbackModal: React.FC<CallbackModalProps> = ({
               </div>
               <h4 className="text-xl font-bold text-slate-800">Callback Request Received!</h4>
               <p className="text-sm text-slate-600 max-w-sm mx-auto">
-                Thank you, <strong>{fullName}</strong>. Our academic team will call you back on{' '}
-                <strong>{mobile}</strong> during your preferred <strong>{preferredTime}</strong> time.
+                Thank you. If we can process your request, our academic team will contact you using the details provided.
               </p>
               <button
                 onClick={handleClose}
@@ -150,9 +169,13 @@ export const CallbackModal: React.FC<CallbackModalProps> = ({
                     required
                     value={mobile}
                     onChange={(e) => setMobile(e.target.value)}
+                    onBlur={() => void contactValidation.validateMobile(mobile)}
+                    aria-invalid={contactValidation.mobileCheck.duplicate || Boolean(contactValidation.mobileCheck.error)}
+                    aria-describedby="callback-mobile-validation"
                     placeholder="+91 98765 43210"
-                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-orange-500 text-sm"
+                    className={`w-full px-3.5 py-2.5 rounded-lg border focus:outline-hidden focus:ring-2 focus:ring-orange-500 text-sm ${contactValidation.mobileCheck.duplicate || contactValidation.mobileCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
                   />
+                  <ContactValidationMessage id="callback-mobile-validation" state={contactValidation.mobileCheck} />
                 </div>
 
                 <div>
@@ -163,9 +186,13 @@ export const CallbackModal: React.FC<CallbackModalProps> = ({
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    onBlur={() => void contactValidation.validateEmail(email)}
+                    aria-invalid={contactValidation.emailCheck.duplicate || Boolean(contactValidation.emailCheck.error)}
+                    aria-describedby="callback-email-validation"
                     placeholder="student@example.com"
-                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-orange-500 text-sm"
+                    className={`w-full px-3.5 py-2.5 rounded-lg border focus:outline-hidden focus:ring-2 focus:ring-orange-500 text-sm ${contactValidation.emailCheck.duplicate || contactValidation.emailCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
                   />
+                  <ContactValidationMessage id="callback-email-validation" state={contactValidation.emailCheck} />
                 </div>
               </div>
 
@@ -236,11 +263,14 @@ export const CallbackModal: React.FC<CallbackModalProps> = ({
               <div className="pt-2">
                 <button
                   type="submit"
-                  disabled={loading}
-                  className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-orange-600 hover:bg-orange-700 text-white font-bold text-sm shadow-md transition-all disabled:opacity-50 cursor-pointer"
+                  disabled={loading || contactValidation.emailCheck.duplicate || contactValidation.mobileCheck.duplicate || contactValidation.emailCheck.checking || contactValidation.mobileCheck.checking}
+                  className="form-submit-button w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-orange-600 hover:bg-orange-700 text-white font-bold text-sm shadow-md transition-all disabled:opacity-50 cursor-pointer"
                 >
                   {loading ? (
-                    <span>Submitting Request...</span>
+                    <>
+                      <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                      <span role="status" aria-live="polite">Submitting Request...</span>
+                    </>
                   ) : (
                     <>
                       <Send className="w-4 h-4" />

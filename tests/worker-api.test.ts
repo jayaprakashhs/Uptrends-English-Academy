@@ -182,6 +182,113 @@ async function deleteMediaWithStoredKey(
   }
 }
 
+const contactAcknowledgement = {
+  success: true,
+  message: 'We received your request. If it can be processed, the academy will contact you.',
+};
+
+const publicContactSubmissions: Array<{
+  path: string;
+  table: string;
+  body: Record<string, unknown>;
+}> = [
+  {
+    path: '/api/apply',
+    table: 'applications',
+    body: {
+      student_name: 'Test Student',
+      mobile: '+91 (98765) 43210',
+      email: '  STUDENT@EXAMPLE.COM ',
+      qualification: 'Graduate',
+      program_name: 'English',
+      privacy_consent: true,
+      photo_base64: 'data:image/jpeg;base64,/9j/2Q==',
+    },
+  },
+  {
+    path: '/api/callback-request',
+    table: 'callback_requests',
+    body: {
+      full_name: 'Test Student',
+      mobile: '09876543210',
+      email: '  STUDENT@EXAMPLE.COM ',
+      preferred_contact_time: 'Morning',
+      consent: true,
+    },
+  },
+  {
+    path: '/api/demo-class-requests',
+    table: 'demo_class_requests',
+    body: {
+      full_name: 'Test Student',
+      mobile: '0091 98765 43210',
+      email: '  STUDENT@EXAMPLE.COM ',
+      qualification_category: 'Student',
+      parent_name: 'Parent Name',
+      school_or_college_name: 'Test College',
+      educational_qualification: 'B.Com',
+      date_of_birth: '2000-01-01',
+      address: '1 Test Street',
+      city: 'Davangere',
+    },
+  },
+];
+
+async function submitPublicContact(
+  path: string,
+  body: Record<string, unknown>,
+  duplicateCheck: () => Response | Promise<Response> = () => Response.json(false),
+  options: { insertDuplicate?: boolean; cleanupFailure?: boolean } = {},
+) {
+  const originalFetch = globalThis.fetch;
+  const applicationMedia = mockR2Bucket({ deleteError: options.cleanupFailure });
+  const duplicateCheckPayloads: Array<Record<string, unknown>> = [];
+  const insertedRecords: Array<{ path: string; body: Record<string, unknown> }> = [];
+
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') {
+      duplicateCheckPayloads.push(await request.json() as Record<string, unknown>);
+      return duplicateCheck();
+    }
+    if (url.pathname === '/rest/v1/application_notifications') {
+      return new Response(null, { status: 201 });
+    }
+    if (url.pathname.startsWith('/rest/v1/') && request.method === 'POST') {
+      if (options.insertDuplicate && url.pathname === '/rest/v1/applications') {
+        return Response.json({ code: '23505', message: 'duplicate_contact' }, { status: 409 });
+      }
+      const record = { path: url.pathname, body: await request.json() as Record<string, unknown> };
+      insertedRecords.push(record);
+      if (url.pathname === '/rest/v1/demo_class_requests') {
+        return Response.json({ id: '550e8400-e29b-41d4-a716-446655440000' }, { status: 201 });
+      }
+      return new Response(null, { status: 201 });
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const response = await handleApiRequest(
+      new Request(`https://academy.example${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+      {
+        SUPABASE_URL: 'https://project.example',
+        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+        APPLICATION_MEDIA: applicationMedia.binding,
+      },
+    );
+    return { response, duplicateCheckPayloads, insertedRecords, applicationMedia };
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 test('Worker routes public API paths to the API handler', async () => {
   await withCapturedLogs(async () => {
     const response = await worker.fetch(requestFor('/api/programs'), {});
@@ -518,6 +625,7 @@ test('application and gallery uploads use separate native buckets and content me
         is_active: true,
       }]);
     }
+    if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') return Response.json(false);
     if (url.pathname === '/rest/v1/applications' && request.method === 'POST') {
       insertedApplications.push(await request.json() as Record<string, unknown>);
       return new Response(null, { status: 201 });
@@ -543,7 +651,7 @@ test('application and gallery uploads use separate native buckets and content me
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           student_name: 'Test Student',
-          mobile: '+12345678901',
+          mobile: '9876543210',
           email: 'student@example.com',
           qualification: 'Test',
           program_name: 'English',
@@ -557,14 +665,17 @@ test('application and gallery uploads use separate native buckets and content me
         APPLICATION_MEDIA: applicationMedia.binding,
       },
     );
-    assert.equal(applicationResponse.status, 201);
+    assert.equal(applicationResponse.status, 202);
+    assert.deepEqual(await applicationResponse.json(), {
+      success: true,
+      message: 'We received your request. If it can be processed, the academy will contact you.',
+    });
     assert.equal(applicationMedia.puts.length, 1);
     assert.match(applicationMedia.puts[0].key, /^applications\/[0-9a-f-]+\.jpg$/);
     assert.equal(applicationMedia.puts[0].options?.httpMetadata?.contentType, 'image/jpeg');
     assert.equal(publicMedia.puts.length, 0);
     assert.equal(insertedApplications.length, 1);
     assert.equal(insertedApplications[0].photo_object_key, applicationMedia.puts[0].key);
-    assert.ok(!JSON.stringify(await applicationResponse.json()).includes('media.example'));
 
     const mediaResponse = await handleApiRequest(
       new Request('https://academy.example/api/admin/media', {
@@ -618,6 +729,7 @@ test('native R2 upload failures return errors without persisting application or 
         is_active: true,
       }]);
     }
+    if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') return Response.json(false);
     if (request.method === 'POST') {
       databaseWriteCount += 1;
       return new Response(null, { status: 201 });
@@ -633,7 +745,7 @@ test('native R2 upload failures return errors without persisting application or 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           student_name: 'Test Student',
-          mobile: '+12345678901',
+          mobile: '9876543210',
           email: 'student@example.com',
           qualification: 'Test',
           program_name: 'English',
@@ -683,6 +795,7 @@ test('database write failures clean up uploads from the matching native bucket',
         is_active: true,
       }]);
     }
+    if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') return Response.json(false);
     if (url.pathname === '/rest/v1/applications' && request.method === 'POST') {
       return Response.json({ message: 'mock application insert failure' }, { status: 500 });
     }
@@ -700,7 +813,7 @@ test('database write failures clean up uploads from the matching native bucket',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           student_name: 'Test Student',
-          mobile: '+12345678901',
+          mobile: '9876543210',
           email: 'student@example.com',
           qualification: 'Test',
           program_name: 'English',
@@ -827,4 +940,109 @@ test('payment routes reject malformed application and payment IDs', async () => 
     const response = await handleApiRequest(request, {});
     assert.equal(response.status, 400, new URL(request.url).pathname);
   }
+});
+
+test('all public contact submissions normalize contacts, run the duplicate check, and acknowledge accepted requests generically', async () => {
+  for (const submission of publicContactSubmissions) {
+    const result = await submitPublicContact(submission.path, submission.body);
+    assert.equal(result.response.status, 202, submission.path);
+    assert.deepEqual(await result.response.json(), contactAcknowledgement, submission.path);
+    assert.equal(result.duplicateCheckPayloads.length, 1, submission.path);
+    assert.deepEqual(result.duplicateCheckPayloads[0], {
+      p_email: 'student@example.com',
+      p_mobile: '9876543210',
+    }, submission.path);
+    assert.equal(result.insertedRecords.length, 1, submission.path);
+    assert.equal(result.insertedRecords[0].path, `/rest/v1/${submission.table}`, submission.path);
+    assert.equal(result.insertedRecords[0].body.email, 'student@example.com', submission.path);
+    assert.equal(result.insertedRecords[0].body.mobile, '9876543210', submission.path);
+  }
+});
+
+test('all public contact submissions return the same generic acknowledgement for duplicates without inserting', async () => {
+  for (const submission of publicContactSubmissions) {
+    const result = await submitPublicContact(
+      submission.path,
+      submission.body,
+      () => Response.json(true),
+    );
+    assert.equal(result.response.status, 202, submission.path);
+    assert.deepEqual(await result.response.json(), contactAcknowledgement, submission.path);
+    assert.equal(result.duplicateCheckPayloads.length, 1, submission.path);
+    assert.equal(result.insertedRecords.length, 0, submission.path);
+    assert.equal(result.applicationMedia.puts.length, 0, submission.path);
+  }
+});
+
+test('application duplicate race keeps the generic acknowledgement if R2 cleanup fails', async () => {
+  const submission = publicContactSubmissions.find(({ path }) => path === '/api/apply');
+  assert.ok(submission);
+  const result = await submitPublicContact(
+    submission.path,
+    submission.body,
+    () => Response.json(false),
+    { insertDuplicate: true, cleanupFailure: true },
+  );
+  assert.equal(result.response.status, 202);
+  assert.deepEqual(await result.response.json(), contactAcknowledgement);
+  assert.equal(result.insertedRecords.length, 0);
+  assert.equal(result.applicationMedia.deletes.length, 1);
+});
+
+test('all public contact submissions fail closed when duplicate verification errors or is unavailable', async () => {
+  const rpcFailures = [
+    () => Response.json({ code: 'P0001', message: 'validation unavailable' }, { status: 503 }),
+    () => Response.json(null),
+    () => { throw new Error('mock network failure'); },
+  ];
+
+  for (const submission of publicContactSubmissions) {
+    for (const rpcFailure of rpcFailures) {
+      const result = await submitPublicContact(submission.path, submission.body, rpcFailure);
+      assert.equal(result.response.status, 503, `${submission.path} RPC failure`);
+      assert.match((await result.response.json() as { error: string }).error, /verification is temporarily unavailable/i);
+      assert.equal(result.duplicateCheckPayloads.length, 1, submission.path);
+      assert.equal(result.insertedRecords.length, 0, submission.path);
+      assert.equal(result.applicationMedia.puts.length, 0, submission.path);
+    }
+  }
+});
+
+test('all public contact submissions reject invalid email or mobile before duplicate verification', async () => {
+  const invalidSubmissions = publicContactSubmissions.flatMap((submission) => [
+    {
+      ...submission,
+      body: { ...submission.body, email: 'not-an-email' },
+    },
+    {
+      ...submission,
+      body: { ...submission.body, mobile: '12345' },
+    },
+  ]);
+
+  for (const submission of invalidSubmissions) {
+    const result = await submitPublicContact(submission.path, submission.body);
+    assert.equal(result.response.status, 400, submission.path);
+    assert.equal(result.duplicateCheckPayloads.length, 0, submission.path);
+    assert.equal(result.insertedRecords.length, 0, submission.path);
+    assert.equal(result.applicationMedia.puts.length, 0, submission.path);
+  }
+});
+
+test('demo-class route allows POST and preserves the same-origin-only API policy', async () => {
+  const wrongMethod = await handleApiRequest(
+    new Request('https://academy.example/api/demo-class-requests', { method: 'PUT' }),
+    {},
+  );
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get('Allow'), 'POST');
+
+  const crossOrigin = await handleApiRequest(
+    new Request('https://academy.example/api/demo-class-requests', {
+      method: 'POST',
+      headers: { Origin: 'https://other.example' },
+    }),
+    {},
+  );
+  assert.equal(crossOrigin.status, 403);
 });

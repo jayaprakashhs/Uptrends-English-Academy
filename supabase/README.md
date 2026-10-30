@@ -51,6 +51,29 @@ It creates:
    - Seed data is loaded.
    - Super Admin profile is provisioned for UID `59bbb687-4e0d-47f7-b458-5a91955f915d`.
 
+## 2.2. Cross-Table Duplicate Contact Validation
+
+The migration
+`supabase/migrations/20261030000006_prevent_duplicate_application_contacts.sql`
+adds a private contact registry and database triggers for `applications`,
+`callback_requests`, and `demo_class_requests`. Normalized email and Indian
+mobile values have unique constraints in the registry, so simultaneous
+submissions are serialized by PostgreSQL. The protected
+`check_application_contact_duplicate` RPC is available only to `service_role`;
+it is called only by trusted server-side submission handlers. There is no
+public contact-preflight endpoint. Public forms receive the same generic
+acknowledgement for accepted and duplicate contacts, while duplicate records
+are rejected by the server and database constraints. This avoids direct
+duplicate-status disclosure; response timing is not guaranteed to be
+indistinguishable.
+
+The migration locks the three submission tables and stops without changing
+source records if existing duplicate contacts are found. Review the migration
+and resolve any reported pre-existing duplicates through the academy's approved
+data-maintenance process before applying it. Do not remove student records to
+make the migration succeed. No new environment variables are required; the
+existing server-side Supabase service-role key is used for validation.
+
 ---
 
 ## 3. Provisioning the Super Admin (Target UID: `59bbb687-4e0d-47f7-b458-5a91955f915d`)

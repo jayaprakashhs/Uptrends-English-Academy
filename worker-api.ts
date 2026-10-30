@@ -2,6 +2,12 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { generateOfficialPdf } from './official-document';
 import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
 import type { R2BucketBinding } from './worker-r2';
+import { validateDemoClassRequest } from './demo-class-request';
+import {
+  isValidContactEmail,
+  normalizeContactEmail,
+  normalizeIndianMobileNumber,
+} from './contact-validation';
 
 interface Env {
   SUPABASE_URL?: string;
@@ -314,6 +320,40 @@ const optionalString = (value: unknown, field: string, maxLength = 5000): string
 const isResponse = (value: unknown): value is Response => value instanceof Response;
 const validEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 320;
 const validId = (value: string) => UUID_PATTERN.test(value);
+
+const contactAcknowledgement = () => json({
+  success: true,
+  message: 'We received your request. If it can be processed, the academy will contact you.',
+}, 202);
+
+const duplicateContactResponse = contactAcknowledgement;
+
+const isDuplicateContactError = (error: { code?: string; message?: string }): boolean =>
+  error.code === '23505' && error.message === 'duplicate_contact';
+
+const checkContactDuplicates = async (
+  supabase: SupabaseClient,
+  email: string | null,
+  mobile: string | null,
+): Promise<boolean | Response> => {
+  try {
+    const { data, error } = await supabase.rpc('check_application_contact_duplicate', {
+      p_email: email,
+      p_mobile: mobile,
+    });
+    if (!error && typeof data === 'boolean') return data;
+    console.error('Unable to verify submitted contact information.', {
+      operation: 'application_contact_duplicate_check',
+      error_code: error?.code || 'invalid_response',
+    });
+  } catch {
+    console.error('Unable to verify submitted contact information.', {
+      operation: 'application_contact_duplicate_check',
+      error_code: 'request_failed',
+    });
+  }
+  return errorResponse('Contact verification is temporarily unavailable. Please try again.', 503);
+};
 
 const decodeImage = (value: unknown, maxBytes: number): ImagePayload | Response => {
   if (typeof value !== 'string') return errorResponse('An image data URL is required.', 400);
@@ -1207,9 +1247,16 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
     if (isResponse(value)) return value;
     fields[field] = value;
   }
-  if (!validEmail(fields.email)) return errorResponse('A valid email address is required.', 400);
-  if (fields.mobile.replace(/[\s()+-]/g, '').length < 8 || fields.mobile.length > 30) return errorResponse('Please provide a valid mobile number.', 400);
+  fields.email = normalizeContactEmail(fields.email);
+  if (!isValidContactEmail(fields.email)) return errorResponse('A valid email address is required.', 400);
+  const normalizedMobile = normalizeIndianMobileNumber(fields.mobile);
+  if (!normalizedMobile || fields.mobile.length > 30) return errorResponse('Please provide a valid Indian mobile number.', 400);
+  fields.mobile = normalizedMobile;
   if (body.privacy_consent !== true) return errorResponse('Privacy consent is required to process your application.', 400);
+
+  const duplicate = await checkContactDuplicates(supabase, fields.email, fields.mobile);
+  if (isResponse(duplicate)) return duplicate;
+  if (duplicate) return duplicateContactResponse();
 
   const programId = body.program_id === undefined || body.program_id === null || body.program_id === '' ? null : body.program_id;
   if (programId !== null && (typeof programId !== 'string' || !validId(programId))) {
@@ -1254,14 +1301,26 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
     created_at: now,
     updated_at: now,
   };
+
   const { error: insertError } = await supabase.from('applications').insert(application);
   if (insertError) {
+    if (isDuplicateContactError(insertError)) {
+      try {
+        await deleteFromR2(env, upload.key, 'applications');
+      } catch (cleanupError) {
+        console.error('Unable to clean up application photo after duplicate submission.', {
+          operation: 'applications.submit.photo_cleanup',
+          error: messageOf(cleanupError),
+        });
+      }
+      return duplicateContactResponse();
+    }
     try {
       await deleteFromR2(env, upload.key, 'applications');
     } catch (cleanupError) {
       return json({ error: `Failed to record application in database: ${insertError.message}`, cleanup_error: messageOf(cleanupError), orphaned_object_key: upload.key }, 502);
     }
-    return errorResponse(`Failed to record application in database: ${insertError.message}`, 500);
+    return errorResponse('Failed to record application in database. Please try again.', 500);
   }
 
   const safeName = escapeHtml(fields.student_name);
@@ -1293,13 +1352,75 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
   });
   if (logError) return logError;
 
-  return json({
-    success: true,
-    application_reference: applicationReference,
-    status: 'Pending',
-    email_status: studentEmail.success ? 'Sent' : 'Recorded (Resend API key required for live delivery)',
-    message: 'Your application has been submitted successfully and is waiting for approval from academy staff.',
-  }, 201);
+  return contactAcknowledgement();
+};
+
+const submitDemoClassRequest = async (request: Request, env: Env): Promise<Response> => {
+  const body = await parseJson(request);
+  if (isResponse(body)) return body;
+
+  const validation = validateDemoClassRequest(body);
+  if (!validation.valid) return errorResponse(validation.error, 400);
+
+  const supabase = getSupabaseClient(env, true, 'demo_class_requests.submit');
+  if (!supabase) return errorResponse('Demo class requests are unavailable because Supabase is not configured.', 503);
+
+  const requestRecord = {
+    ...validation.value,
+    email: normalizeContactEmail(validation.value.email),
+    mobile: normalizeIndianMobileNumber(validation.value.mobile),
+  };
+  if (!requestRecord.mobile || !isValidContactEmail(requestRecord.email)) {
+    return errorResponse('Enter a valid email address and Indian mobile number.', 400);
+  }
+  const duplicate = await checkContactDuplicates(supabase, requestRecord.email, requestRecord.mobile);
+  if (isResponse(duplicate)) return duplicate;
+  if (duplicate) return duplicateContactResponse();
+
+  const { data: saved, error: insertError } = await supabase
+    .from('demo_class_requests')
+    .insert({
+      ...requestRecord,
+      status: 'Pending',
+    })
+    .select('id')
+    .single();
+
+  if (insertError || !saved) {
+    if (insertError && isDuplicateContactError(insertError)) return duplicateContactResponse();
+    return errorResponse('Unable to save the demo class request. Please try again.', 500);
+  }
+
+  const { full_name, email, mobile, qualification_category, educational_qualification, city } = requestRecord;
+  const name = escapeHtml(full_name);
+  const emailAddress = escapeHtml(email);
+  const escapedMobile = escapeHtml(mobile);
+  const escapedCategory = escapeHtml(qualification_category);
+  const escapedCourse = escapeHtml(educational_qualification);
+  const escapedCity = escapeHtml(city);
+  const internalEmail = env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com';
+  const [applicantEmail, academyEmail] = await Promise.all([
+    sendEmail(env, {
+      to: email,
+      subject: "Demo Class Request Received — Uptrend's English Academy",
+      html: `<p>Dear ${name},</p><p>Thank you for requesting a free demo class at Uptrend's English Academy. Our team will contact you soon to discuss arrangements.</p><p>Regards,<br>Uptrend's English Academy</p>`,
+      text: `Dear ${full_name}, thank you for requesting a free demo class at Uptrend's English Academy. Our team will contact you soon to discuss arrangements.`,
+    }),
+    sendEmail(env, {
+      to: internalEmail,
+      subject: `New Demo Class Request — ${full_name}`,
+      html: `<h2>New Free Demo Class Request</h2><ul><li>Name: ${name}</li><li>Mobile: ${escapedMobile}</li><li>Email: ${emailAddress}</li><li>Category: ${escapedCategory}</li><li>Qualification / Course: ${escapedCourse}</li><li>City: ${escapedCity}</li></ul><p>Status: Pending</p>`,
+      text: `New free demo class request from ${full_name}; mobile ${mobile}; email ${email}; category ${qualification_category}; course ${educational_qualification}; city ${city}.`,
+    }),
+  ]);
+  if (!applicantEmail.success || !academyEmail.success) {
+    console.error('Demo class request email delivery was incomplete.', {
+      applicant_email_sent: applicantEmail.success,
+      academy_notification_sent: academyEmail.success,
+    });
+  }
+
+  return contactAcknowledgement();
 };
 
 const submitCallback = async (request: Request, env: Env): Promise<Response> => {
@@ -1316,34 +1437,42 @@ const submitCallback = async (request: Request, env: Env): Promise<Response> => 
   if (isResponse(mobile)) return mobile;
   if (isResponse(preferredTime)) return preferredTime;
   if (!['Morning', 'Afternoon', 'Evening'].includes(preferredTime)) return errorResponse('Preferred contact time must be Morning, Afternoon, or Evening.', 400);
-  if (mobile.replace(/[\s()+-]/g, '').length < 8) return errorResponse('Please provide a valid mobile number.', 400);
+  const normalizedMobile = normalizeIndianMobileNumber(mobile);
+  if (!normalizedMobile) return errorResponse('Please provide a valid Indian mobile number.', 400);
   const email = optionalString(body.email, 'email', 320);
   const programName = optionalString(body.program_name, 'program name', 300);
   const message = optionalString(body.message, 'message', 5000);
   if (isResponse(email)) return email;
   if (isResponse(programName)) return programName;
   if (isResponse(message)) return message;
-  if (email && !validEmail(email)) return errorResponse('Please provide a valid email address.', 400);
+  if (email && !isValidContactEmail(email)) return errorResponse('Please provide a valid email address.', 400);
+  const normalizedEmail = email ? normalizeContactEmail(email) : null;
 
   const record = {
     full_name: fullName,
-    mobile,
-    email,
+    mobile: normalizedMobile,
+    email: normalizedEmail,
     program_name: programName || 'General Inquiry',
     preferred_contact_time: preferredTime,
     message,
     consent: true,
     status: 'New',
   };
+  const duplicate = await checkContactDuplicates(supabase, record.email, record.mobile);
+  if (isResponse(duplicate)) return duplicate;
+  if (duplicate) return duplicateContactResponse();
   const { error } = await supabase.from('callback_requests').insert(record);
-  if (error) return errorResponse(`Failed to record callback request: ${error.message}`, 500);
+  if (error) {
+    if (isDuplicateContactError(error)) return duplicateContactResponse();
+    return errorResponse('Failed to record callback request. Please try again.', 500);
+  }
 
   await sendEmail(env, {
     to: env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com',
     subject: `New Callback Request — ${fullName} (${preferredTime})`,
-    html: `<p>New callback request received:</p><p><strong>Name:</strong> ${escapeHtml(fullName)}<br><strong>Mobile:</strong> ${escapeHtml(mobile)}<br><strong>Program:</strong> ${escapeHtml(programName || 'General Inquiry')}<br><strong>Preferred Time:</strong> ${escapeHtml(preferredTime)}<br><strong>Message:</strong> ${escapeHtml(message || 'None')}</p>`,
+    html: `<p>New callback request received:</p><p><strong>Name:</strong> ${escapeHtml(fullName)}<br><strong>Mobile:</strong> ${escapeHtml(normalizedMobile)}<br><strong>Program:</strong> ${escapeHtml(programName || 'General Inquiry')}<br><strong>Preferred Time:</strong> ${escapeHtml(preferredTime)}<br><strong>Message:</strong> ${escapeHtml(message || 'None')}</p>`,
   });
-  return json({ success: true, message: 'Your callback request has been received. Our team will contact you during your preferred time.' }, 201);
+  return contactAcknowledgement();
 };
 
 const submitContact = async (request: Request, env: Env): Promise<Response> => {
@@ -2269,6 +2398,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     if (pathname === '/api/apply' && method === 'POST') return submitApplication(request, env);
+    if (pathname === '/api/demo-class-requests' && method === 'POST') return submitDemoClassRequest(request, env);
     if (pathname === '/api/callback-request' && method === 'POST') return submitCallback(request, env);
     if (pathname === '/api/contact' && method === 'POST') return submitContact(request, env);
     if (pathname === '/api/approve-application' && method === 'POST') return approveApplication(request, env);
@@ -2413,6 +2543,7 @@ if (pathname === '/api/admin/official-document' && method === 'PUT') {
         '/api/faqs': ['GET'],
         '/api/branding': ['GET'],
         '/api/apply': ['POST'],
+        '/api/demo-class-requests': ['POST'],
         '/api/callback-request': ['POST'],
         '/api/contact': ['POST'],
         '/api/approve-application': ['POST'],
