@@ -337,8 +337,9 @@ const contactAcknowledgement = () => json({
 
 const duplicateContactResponse = contactAcknowledgement;
 
-const isDuplicateContactError = (error: { code?: string; message?: string }): boolean =>
-  error.code === '23505' && error.message === 'duplicate_contact';
+const isDuplicateContactError = (
+  error: { code?: string; message?: string } | null | undefined,
+): boolean => error?.code === '23505' && error.message === 'duplicate_contact';
 
 const checkContactDuplicates = async (
   supabase: SupabaseClient,
