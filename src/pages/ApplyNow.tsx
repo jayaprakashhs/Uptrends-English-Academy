@@ -38,6 +38,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
   const [photoSizeKB, setPhotoSizeKB] = useState<number | null>(null);
   const [photoSizeBytes, setPhotoSizeBytes] = useState<number | null>(null);
   const [photoMimeType, setPhotoMimeType] = useState<string>('image/jpeg');
+  const [photoCompressionMessage, setPhotoCompressionMessage] = useState<string | null>(null);
   const [compressing, setCompressing] = useState(false);
 
   // Submission states
@@ -48,31 +49,32 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
 
   // Handle Photo Selection & Compression (Strict <= 300 KB)
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
     setErrorMessage(null);
-    if (!e.target.files || e.target.files.length === 0) return;
-
-    const file = e.target.files[0];
+    if (!file || compressing || submitting) return;
     const allowed = ['image/jpeg', 'image/png', 'image/webp'];
     if (!allowed.includes(file.type)) {
-      setErrorMessage('Please upload a valid image (JPEG, PNG, or WebP).');
+      setErrorMessage(`Please upload a valid image (JPEG, PNG, or WebP).${photoPreview ? ' Your previously selected photo is still selected.' : ''}`);
       return;
     }
 
     try {
       setCompressing(true);
       // Run browser canvas compression with 300 KB limit
-      const compressed = await compressPassportPhoto(file, 300);
+      const compressed = await compressPassportPhoto(file, MAX_APPLICATION_PHOTO_BYTES);
       setPhotoFile(file);
       setPhotoPreview(compressed.base64);
       setPhotoSizeKB(compressed.sizeKB);
       setPhotoSizeBytes(compressed.sizeBytes);
       setPhotoMimeType(compressed.mimeType);
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Error compressing passport photo.');
-      setPhotoFile(null);
-      setPhotoPreview(null);
-      setPhotoSizeKB(null);
-      setPhotoSizeBytes(null);
+      setPhotoCompressionMessage(file.size > MAX_APPLICATION_PHOTO_BYTES
+        ? `Photo automatically compressed from ${Math.ceil(file.size / 1024)} KB to ${Math.ceil(compressed.sizeBytes / 1024)} KB.`
+        : null);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Error processing the selected photo.';
+      setErrorMessage(`${message}${photoPreview ? ' Your previously selected photo is still selected.' : ''}`);
     } finally {
       setCompressing(false);
     }
@@ -99,7 +101,11 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
       setErrorMessage('Student qualification is required.');
       return;
     }
-    if (!photoPreview) {
+    if (compressing) {
+      setErrorMessage('Please wait for photo processing to finish.');
+      return;
+    }
+    if (!photoPreview || photoSizeBytes === null) {
       setErrorMessage('A passport-size photograph (300 KB or less) is required.');
       return;
     }
@@ -188,6 +194,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                 setPhotoPreview(null);
                 setPhotoSizeKB(null);
                 setPhotoSizeBytes(null);
+                setPhotoCompressionMessage(null);
               }}
               className="px-6 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer"
             >
@@ -399,13 +406,14 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                       type="file"
                       accept="image/jpeg,image/png,image/webp"
                       onChange={handlePhotoChange}
+                      disabled={compressing || submitting}
                       className="hidden"
                     />
                   </label>
                   {compressing && (
                     <div className="flex items-center gap-2 mt-2 text-xs text-orange-600">
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Optimizing and compressing photograph to ≤ 300 KB...</span>
+                      <span>Processing photo and checking the 300 KB limit...</span>
                     </div>
                   )}
                 </div>
@@ -424,6 +432,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                         <FileCheck className="w-3 h-3" />
                         <span>Ready: {photoSizeKB} KB (≤ 300 KB)</span>
                       </div>
+                      {photoCompressionMessage && <p role="status" className="text-[11px] font-semibold text-blue-700">{photoCompressionMessage}</p>}
                     </div>
                   ) : (
                     <div className="w-28 h-36 rounded-xl border border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 text-center p-2 bg-slate-50">

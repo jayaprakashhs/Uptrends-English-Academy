@@ -15,65 +15,96 @@ export async function compressPassportPhoto(
   if (!allowedMimeTypes.includes(file.type)) {
     throw new Error('Unsupported image format. Please upload JPEG, PNG, or WebP.');
   }
+  if (file.size === 0) throw new Error('The selected photo is empty. Please choose another image.');
 
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error('Failed to read image file.'));
+    reader.onerror = () => reject(new Error('Failed to read the selected photo. Please choose it again.'));
     reader.onload = () => {
-      const img = new Image();
-      img.onerror = () => reject(new Error('Failed to parse image data.'));
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        let width = img.width;
-        let height = img.height;
-
-        // Max dimensions for passport photo (e.g., max 1000px on largest side)
-        const MAX_DIMENSION = 1000;
-        if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-          if (width > height) {
-            height = Math.round((height * MAX_DIMENSION) / width);
-            width = MAX_DIMENSION;
-          } else {
-            width = Math.round((width * MAX_DIMENSION) / height);
-            height = MAX_DIMENSION;
+      if (typeof reader.result !== 'string') {
+        reject(new Error('Failed to read the selected photo. Please choose it again.'));
+        return;
+      }
+      const originalSizeBytes = base64DataUrlByteLength(reader.result);
+      if (originalSizeBytes === null) {
+        reject(new Error('The selected photo could not be decoded. Please choose another image.'));
+        return;
+      }
+      if (originalSizeBytes <= maxSizeBytes) {
+        const image = new Image();
+        image.onerror = () => reject(new Error('The selected photo is not a valid image. Please choose another file.'));
+        image.onload = () => {
+          if (!image.naturalWidth || !image.naturalHeight) {
+            reject(new Error('The selected photo has invalid dimensions. Please choose another image.'));
+            return;
           }
-        }
+          resolve({
+            base64: reader.result as string,
+            sizeBytes: originalSizeBytes,
+            sizeKB: Math.ceil(originalSizeBytes / 1024 * 10) / 10,
+            mimeType: file.type,
+          });
+        };
+        image.src = reader.result;
+        return;
+      }
 
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          return reject(new Error('Canvas 2D context is not available.'));
-        }
+      const img = new Image();
+      img.onerror = () => reject(new Error('The selected photo is not a valid image. Please choose another file.'));
+      img.onload = () => {
+        try {
+          if (!img.naturalWidth || !img.naturalHeight) {
+            reject(new Error('The selected photo has invalid dimensions. Please choose another image.'));
+            return;
+          }
 
-        const qualities = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3];
-        while (width > 0 && height > 0) {
+          const MAX_DIMENSION = 1000;
+          const initialScale = Math.min(1, MAX_DIMENSION / Math.max(img.naturalWidth, img.naturalHeight));
+          let width = Math.max(1, Math.round(img.naturalWidth * initialScale));
+          let height = Math.max(1, Math.round(img.naturalHeight * initialScale));
+          const canvas = document.createElement('canvas');
           canvas.width = width;
           canvas.height = height;
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, width, height);
-          ctx.drawImage(img, 0, 0, width, height);
-
-          for (const quality of qualities) {
-            const base64 = canvas.toDataURL('image/jpeg', quality);
-            const sizeBytes = base64DataUrlByteLength(base64);
-            if (sizeBytes !== null && sizeBytes <= maxSizeBytes) {
-              resolve({
-                base64,
-                sizeBytes,
-                sizeKB: Math.ceil(sizeBytes / 1024 * 10) / 10,
-                mimeType: 'image/jpeg',
-              });
-              return;
-            }
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('Photo processing is unavailable in this browser.'));
+            return;
           }
 
-          if (width === 1 && height === 1) break;
-          width = Math.max(1, Math.floor(width * 0.7));
-          height = Math.max(1, Math.floor(height * 0.7));
-        }
+          const qualities = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3];
+          while (true) {
+            canvas.width = width;
+            canvas.height = height;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
 
-        reject(new Error(`Unable to compress image below ${maxSizeBytes} bytes. Please select a smaller photo.`));
+            for (const quality of qualities) {
+              const base64 = canvas.toDataURL('image/jpeg', quality);
+              if (!base64.startsWith('data:image/jpeg;base64,')) continue;
+              const sizeBytes = base64DataUrlByteLength(base64);
+              if (sizeBytes !== null && sizeBytes <= maxSizeBytes) {
+                resolve({
+                  base64,
+                  sizeBytes,
+                  sizeKB: Math.ceil(sizeBytes / 1024 * 10) / 10,
+                  mimeType: 'image/jpeg',
+                });
+                return;
+              }
+            }
+
+            if (width === 1 && height === 1) break;
+            width = Math.max(1, Math.floor(width * 0.7));
+            height = Math.max(1, Math.floor(height * 0.7));
+          }
+
+          reject(new Error(`Unable to compress this photo below ${Math.floor(maxSizeBytes / 1024)} KB. Please choose a simpler image.`));
+        } catch {
+          reject(new Error('The selected photo could not be processed. Please choose another image.'));
+        }
       };
-      img.src = reader.result as string;
+      img.src = reader.result;
     };
     reader.readAsDataURL(file);
   });
