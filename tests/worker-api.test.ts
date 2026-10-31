@@ -67,7 +67,15 @@ const publicContactSubmissions: Array<{
       student_name: 'Test Student',
       mobile: '+91 (98765) 43210',
       email: '  STUDENT@EXAMPLE.COM ',
+      qualification_category: 'Graduate',
       qualification: 'Graduate',
+      college_name: 'Example College',
+      parent_phone: 'ignored hidden value',
+      parent_email: 'ignored@example.com',
+      school_name: 'ignored school',
+      occupation: 'ignored occupation',
+      place: 'Vijayanagar',
+      city: 'Davangere',
       program_name: 'English',
       privacy_consent: true,
       photo_base64: 'data:image/jpeg;base64,/9j/2Q==',
@@ -1402,7 +1410,11 @@ test('application and gallery uploads use separate native buckets and content me
           student_name: 'Test Student',
           mobile: '9876543210',
           email: 'student@example.com',
+          qualification_category: 'Graduate',
           qualification: 'Test',
+          college_name: 'Test College',
+          place: 'Vijayanagar',
+          city: 'Davangere',
           program_name: 'English',
           privacy_consent: true,
           photo_base64: 'data:image/jpeg;base64,/9j/2Q==',
@@ -1576,7 +1588,11 @@ test('native R2 upload failures return errors without persisting application or 
           student_name: 'Test Student',
           mobile: '9876543210',
           email: 'student@example.com',
+          qualification_category: 'Graduate',
           qualification: 'Test',
+          college_name: 'Test College',
+          place: 'Vijayanagar',
+          city: 'Davangere',
           program_name: 'English',
           privacy_consent: true,
           photo_base64: image,
@@ -1645,7 +1661,11 @@ test('database write failures clean up uploads from the matching native bucket',
           student_name: 'Test Student',
           mobile: '9876543210',
           email: 'student@example.com',
+          qualification_category: 'Graduate',
           qualification: 'Test',
+          college_name: 'Test College',
+          place: 'Vijayanagar',
+          city: 'Davangere',
           program_name: 'English',
           privacy_consent: true,
           photo_base64: image,
@@ -1803,6 +1823,129 @@ test('all public contact submissions normalize contacts and check duplicates wit
       assert.equal('archived_at' in result.insertedRecords[0].body, false);
       assert.equal('archived_by' in result.insertedRecords[0].body, false);
     }
+  }
+});
+
+test('application Worker stores category-specific fields and removes hidden category values', async () => {
+  const application = publicContactSubmissions.find(({ path }) => path === '/api/apply');
+  assert.ok(application);
+  const categoryCases = [
+    {
+      qualification_category: 'Student',
+      qualification: '10th Standard',
+      parent_phone: '+91 98765 43210',
+      parent_email: ' PARENT@EXAMPLE.COM ',
+      school_name: 'Example School',
+      college_name: 'hidden college',
+      occupation: 'hidden occupation',
+    },
+    {
+      qualification_category: 'Graduate',
+      qualification: 'B.Com',
+      college_name: 'Example College',
+      parent_phone: 'hidden parent phone',
+      parent_email: 'hidden@example.com',
+      school_name: 'hidden school',
+      occupation: 'hidden occupation',
+    },
+    {
+      qualification_category: 'Working',
+      qualification: 'Diploma',
+      occupation: 'Teacher',
+      parent_phone: 'hidden parent phone',
+      parent_email: 'hidden@example.com',
+      school_name: 'hidden school',
+      college_name: 'hidden college',
+    },
+  ];
+
+  for (const fields of categoryCases) {
+    const result = await submitPublicContact(application.path, {
+      ...application.body,
+      ...fields,
+      place: 'Vijayanagar',
+      city: 'Davangere',
+    });
+    assert.equal(result.response.status, 202, fields.qualification_category);
+    const saved = result.insertedRecords.find(({ path }) => path === '/rest/v1/applications')?.body;
+    assert.ok(saved, fields.qualification_category);
+    assert.equal(saved.qualification_category, fields.qualification_category);
+    assert.equal(saved.qualification, fields.qualification);
+    assert.equal(saved.place, 'Vijayanagar');
+    assert.equal(saved.city, 'Davangere');
+    if (fields.qualification_category === 'Student') {
+      assert.equal(saved.parent_phone, '9876543210');
+      assert.equal(saved.parent_email, 'parent@example.com');
+      assert.equal(saved.school_name, 'Example School');
+      assert.equal(saved.college_name, null);
+      assert.equal(saved.occupation, null);
+    } else if (fields.qualification_category === 'Graduate') {
+      assert.equal(saved.college_name, 'Example College');
+      assert.equal(saved.parent_phone, null);
+      assert.equal(saved.parent_email, null);
+      assert.equal(saved.school_name, null);
+      assert.equal(saved.occupation, null);
+    } else {
+      assert.equal(saved.occupation, 'Teacher');
+      assert.equal(saved.parent_phone, null);
+      assert.equal(saved.parent_email, null);
+      assert.equal(saved.school_name, null);
+      assert.equal(saved.college_name, null);
+    }
+  }
+});
+
+test('application Worker rejects invalid category data before database inserts or photo uploads', async () => {
+  const application = publicContactSubmissions.find(({ path }) => path === '/api/apply');
+  assert.ok(application);
+  const invalidCategoryCases = [
+    {
+      ...application.body,
+      qualification_category: 'Other',
+    },
+    {
+      ...application.body,
+      qualification_category: 'Student',
+      qualification: '',
+      parent_phone: '9876543210',
+      parent_email: 'parent@example.com',
+      school_name: 'Example School',
+    },
+    {
+      ...application.body,
+      qualification_category: 'Graduate',
+      qualification: '',
+      college_name: 'Example College',
+    },
+    {
+      ...application.body,
+      qualification_category: 'Working',
+      qualification: '',
+      occupation: 'Teacher',
+    },
+    {
+      ...application.body,
+      qualification_category: 'Student',
+      parent_phone: 'invalid',
+      parent_email: 'parent@example.com',
+      school_name: 'Example School',
+    },
+    {
+      ...application.body,
+      qualification_category: 'Student',
+      parent_phone: '9876543210',
+      parent_email: 'not-an-email',
+      school_name: 'Example School',
+    },
+  ];
+
+  for (const body of invalidCategoryCases) {
+    const result = await submitPublicContact(application.path, body);
+    assert.equal(result.response.status, 400, String(body.qualification_category));
+    const responseBody = await result.response.json() as { error: string };
+    assert.match(responseBody.error, /category|qualification|class|parent phone|parent email/i);
+    assert.equal(result.insertedRecords.filter(({ path }) => path === '/rest/v1/applications').length, 0);
+    assert.equal(result.applicationMedia.puts.length, 0);
   }
 });
 

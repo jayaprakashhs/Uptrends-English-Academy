@@ -1,3 +1,5 @@
+import type { ApplicationQualificationCategory } from '../../application-request';
+
 export type AdminRole = 'staff' | 'admin' | 'super_admin';
 
 export interface AdminProfile {
@@ -37,6 +39,14 @@ export interface StudentApplication {
   mobile: string;
   email: string;
   qualification: string;
+  qualification_category?: ApplicationQualificationCategory | null;
+  parent_phone?: string | null;
+  parent_email?: string | null;
+  school_name?: string | null;
+  college_name?: string | null;
+  occupation?: string | null;
+  place?: string | null;
+  city?: string | null;
   program_id?: string | null;
   program_name: string;
   date_of_birth?: string | null;

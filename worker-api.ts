@@ -14,6 +14,7 @@ import {
 } from './application-photo-storage';
 import type { R2BucketBinding } from './worker-r2';
 import { validateDemoClassRequest } from './demo-class-request';
+import { validateApplicationCategoryFields } from './application-request';
 import {
   isValidContactEmail,
   normalizeContactEmail,
@@ -1013,7 +1014,7 @@ const READ_COLUMNS = {
   reviews: 'id,author_name,rating,review_text,source,is_published,created_at,updated_at',
   media: 'id,media_type,title,caption,r2_object_key,media_url,youtube_url,youtube_video_id,cover_image_url,alt_text,is_published,display_order,created_at,updated_at',
   faqs: 'id,question,answer,is_published,display_order,created_at,updated_at',
-  applications: 'id,application_reference,student_id,student_name,mobile,email,qualification,program_name,date_of_birth,address,photo_object_key,photo_data_url,message,status,approved_by_name,approved_at,archived_at,archived_by,created_at',
+  applications: 'id,application_reference,student_id,student_name,mobile,email,qualification,qualification_category,parent_phone,parent_email,school_name,college_name,occupation,place,city,program_id,program_name,date_of_birth,address,photo_object_key,photo_data_url,message,status,approved_by_name,approved_at,archived_at,archived_by,created_at',
   demoClassRequests: 'id,full_name,mobile,email,qualification_category,parent_name,school_or_college_name,college_name,profession,educational_qualification,date_of_birth,address,city,additional_information,status,created_at',
   notifications: 'id,application_id,notification_type,recipient_email,status,attempt_count,provider_message_id,error_message,pdf_attached,sent_at,created_at,updated_at',
   callbacks: 'id,full_name,mobile,email,program_name,preferred_contact_time,message,consent,status,created_at,updated_at',
@@ -1774,7 +1775,7 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
   const supabase = getSupabaseClient(env, true, 'applications.submit');
   if (!supabase) return errorResponse('Application submission is unavailable because Supabase is not configured.', 503);
 
-  const requiredFields = ['student_name', 'mobile', 'email', 'qualification', 'program_name'] as const;
+  const requiredFields = ['student_name', 'mobile', 'email', 'program_name'] as const;
   const fields: Record<string, string> = {};
   for (const field of requiredFields) {
     const value = requiredString(body[field], field.replaceAll('_', ' '), field === 'program_name' ? 300 : 500);
@@ -1787,6 +1788,10 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
   if (!normalizedMobile || fields.mobile.length > 30) return errorResponse('Please provide a valid Indian mobile number.', 400);
   fields.mobile = normalizedMobile;
   if (body.privacy_consent !== true) return errorResponse('Privacy consent is required to process your application.', 400);
+
+  const categoryFields = validateApplicationCategoryFields(body);
+  if (!categoryFields.valid) return errorResponse(categoryFields.error, 400);
+  fields.qualification = categoryFields.value.qualification;
 
   const duplicate = await checkContactDuplicates(supabase, 'applications', fields.email, fields.mobile);
   if (isResponse(duplicate)) return duplicate;
@@ -1822,6 +1827,7 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
   const application = {
     id: applicationId,
     ...fields,
+    ...categoryFields.value,
     program_id: programId,
     date_of_birth: dateOfBirth,
     address,

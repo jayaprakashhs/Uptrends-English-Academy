@@ -4623,10 +4623,56 @@ const res = await fetchAdmin(url, {
                 <span className="text-slate-500 block">Email</span>
                 <span className="font-bold text-slate-900">{selectedApp.email}</span>
               </div>
+              {selectedApp.qualification_category && (
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-slate-500 block">Qualification Category</span>
+                  <span className="font-bold text-slate-900">{selectedApp.qualification_category}</span>
+                </div>
+              )}
               <div className="p-3 bg-slate-50 rounded-xl">
-                <span className="text-slate-500 block">Qualification</span>
+                <span className="text-slate-500 block">{selectedApp.qualification_category === 'Student' ? 'Class Studying' : 'Qualification'}</span>
                 <span className="font-bold text-slate-900">{selectedApp.qualification}</span>
               </div>
+              {selectedApp.qualification_category === 'Student' && (
+                <>
+                  <div className="p-3 bg-slate-50 rounded-xl">
+                    <span className="text-slate-500 block">Parent Phone Number</span>
+                    <span className="font-bold text-slate-900">{selectedApp.parent_phone || '—'}</span>
+                  </div>
+                  <div className="p-3 bg-slate-50 rounded-xl">
+                    <span className="text-slate-500 block">Parent Email ID</span>
+                    <span className="break-all font-bold text-slate-900">{selectedApp.parent_email || '—'}</span>
+                  </div>
+                  <div className="p-3 bg-slate-50 rounded-xl">
+                    <span className="text-slate-500 block">School Name</span>
+                    <span className="font-bold text-slate-900">{selectedApp.school_name || '—'}</span>
+                  </div>
+                </>
+              )}
+              {selectedApp.qualification_category === 'Graduate' && (
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-slate-500 block">College Name</span>
+                  <span className="font-bold text-slate-900">{selectedApp.college_name || '—'}</span>
+                </div>
+              )}
+              {selectedApp.qualification_category === 'Working' && (
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-slate-500 block">Occupation</span>
+                  <span className="font-bold text-slate-900">{selectedApp.occupation || '—'}</span>
+                </div>
+              )}
+              {selectedApp.place && (
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-slate-500 block">Place</span>
+                  <span className="font-bold text-slate-900">{selectedApp.place}</span>
+                </div>
+              )}
+              {selectedApp.city && (
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-slate-500 block">City</span>
+                  <span className="font-bold text-slate-900">{selectedApp.city}</span>
+                </div>
+              )}
               {selectedApp.date_of_birth && (
                 <div className="p-3 bg-slate-50 rounded-xl">
                   <span className="text-slate-500 block">Date of Birth</span>

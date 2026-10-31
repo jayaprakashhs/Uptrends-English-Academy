@@ -2,6 +2,12 @@ import React, { useState } from 'react';
 import { Program } from '../types';
 import { compressPassportPhoto } from '../lib/imageCompressor';
 import { MAX_APPLICATION_PHOTO_BYTES } from '../../application-photo-storage';
+import {
+  validateApplicationCategoryFields,
+  type ApplicationCategoryField,
+  type ApplicationCategoryFieldErrors,
+  type ApplicationQualificationCategory,
+} from '../../application-request';
 import { CheckCircle2, AlertCircle, Upload, ArrowRight, ShieldCheck, FileCheck, RefreshCw } from 'lucide-react';
 import { isValidContactEmail, normalizeIndianMobileNumber } from '../../contact-validation';
 import { ContactValidationMessage, useContactDuplicateValidation } from '../hooks/useContactDuplicateValidation';
@@ -21,14 +27,22 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
 
   // Form states
   const [studentName, setStudentName] = useState('');
+  const [qualificationCategory, setQualificationCategory] = useState<ApplicationQualificationCategory | ''>('');
   const [mobile, setMobile] = useState('');
   const [email, setEmail] = useState('');
   const [qualification, setQualification] = useState('');
+  const [parentPhone, setParentPhone] = useState('');
+  const [parentEmail, setParentEmail] = useState('');
+  const [schoolName, setSchoolName] = useState('');
+  const [collegeName, setCollegeName] = useState('');
+  const [occupation, setOccupation] = useState('');
   const [programId, setProgramId] = useState(
     selectedProgram ? selectedProgram.id : (publishedPrograms[0]?.id || '')
   );
   const [dateOfBirth, setDateOfBirth] = useState('');
   const [address, setAddress] = useState('');
+  const [place, setPlace] = useState('');
+  const [city, setCity] = useState('');
   const [message, setMessage] = useState('');
   const [privacyConsent, setPrivacyConsent] = useState(true);
 
@@ -45,7 +59,66 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [submissionSuccess, setSubmissionSuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [categoryErrors, setCategoryErrors] = useState<ApplicationCategoryFieldErrors>({});
+  const [categoryValidationAttempted, setCategoryValidationAttempted] = useState(false);
   const contactValidation = useContactDuplicateValidation(email, mobile);
+
+  const validateCategoryFields = (overrides: Partial<Record<ApplicationCategoryField, string>> = {}) => (
+    validateApplicationCategoryFields({
+      qualification_category: qualificationCategory,
+      qualification,
+      parent_phone: parentPhone,
+      parent_email: parentEmail,
+      school_name: schoolName,
+      college_name: collegeName,
+      occupation,
+      place,
+      city,
+      ...overrides,
+    })
+  );
+
+  const updateCategoryField = (
+    field: ApplicationCategoryField,
+    value: string,
+    updateValue: (value: string) => void,
+  ) => {
+    updateValue(value);
+    if (categoryValidationAttempted) {
+      const validation = validateCategoryFields({ [field]: value });
+      setCategoryErrors(validation.valid ? {} : validation.errors);
+      return;
+    }
+
+    setCategoryErrors((current) => {
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+  };
+
+  const categoryErrorId = (field: ApplicationCategoryField) => (
+    `application-${field.replace(/_/g, '-')}-error`
+  );
+
+  const renderCategoryError = (field: ApplicationCategoryField) => (
+    categoryErrors[field]
+      ? <p id={categoryErrorId(field)} role="alert" className="mt-1 text-[11px] font-medium normal-case text-rose-700">{categoryErrors[field]}</p>
+      : null
+  );
+
+  const handleQualificationCategoryChange = (category: ApplicationQualificationCategory | '') => {
+    setQualificationCategory(category);
+    setQualification('');
+    setParentPhone('');
+    setParentEmail('');
+    setSchoolName('');
+    setCollegeName('');
+    setOccupation('');
+    setCategoryErrors((current) => ({ place: current.place, city: current.city }));
+    setCategoryValidationAttempted(false);
+    setErrorMessage(null);
+  };
 
   // Handle Photo Selection & Compression (Strict <= 300 KB)
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -83,6 +156,9 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+    setCategoryValidationAttempted(true);
+    const categoryFields = validateCategoryFields();
+    setCategoryErrors(categoryFields.valid ? {} : categoryFields.errors);
 
     // Client-side validations
     if (!studentName.trim()) {
@@ -97,8 +173,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
       setErrorMessage('A valid email address is mandatory to receive confirmation and admission decisions.');
       return;
     }
-    if (!qualification.trim()) {
-      setErrorMessage('Student qualification is required.');
+    if (!categoryFields.valid) {
       return;
     }
     if (compressing) {
@@ -140,7 +215,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
           student_name: studentName,
           mobile,
           email,
-          qualification,
+          ...categoryFields.value,
           program_id: programId,
           program_name: progTitle,
           date_of_birth: dateOfBirth || null,
@@ -195,6 +270,17 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                 setPhotoSizeKB(null);
                 setPhotoSizeBytes(null);
                 setPhotoCompressionMessage(null);
+                setQualificationCategory('');
+                setQualification('');
+                setParentPhone('');
+                setParentEmail('');
+                setSchoolName('');
+                setCollegeName('');
+                setOccupation('');
+                setPlace('');
+                setCity('');
+                setCategoryErrors({});
+                setCategoryValidationAttempted(false);
               }}
               className="px-6 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer"
             >
@@ -225,7 +311,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
           </div>
 
           {/* Form */}
-          <form onSubmit={handleSubmit} className="p-8 sm:p-10 space-y-8">
+          <form noValidate onSubmit={handleSubmit} className="p-8 sm:p-10 space-y-8">
             {errorMessage && (
               <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl flex items-start gap-3 text-rose-800 text-xs">
                 <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
@@ -261,8 +347,31 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                 </div>
 
                 <div>
+                  <label htmlFor="application-qualification-category" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Qualification Category *
+                  </label>
+                  <select
+                    id="application-qualification-category"
+                    required
+                    value={qualificationCategory}
+                    onChange={(event) => handleQualificationCategoryChange(event.target.value as ApplicationQualificationCategory | '')}
+                    aria-invalid={Boolean(categoryErrors.qualification_category)}
+                    aria-describedby={categoryErrors.qualification_category ? categoryErrorId('qualification_category') : undefined}
+                    className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 bg-white ${categoryErrors.qualification_category ? 'border-rose-600' : 'border-slate-300'}`}
+                  >
+                    <option value="">Select category</option>
+                    <option value="Student">Student</option>
+                    <option value="Graduate">Graduate</option>
+                    <option value="Working">Working</option>
+                  </select>
+                  {renderCategoryError('qualification_category')}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Mobile Number *
+                    {qualificationCategory === 'Student' ? 'Student Mobile Number *' : 'Phone Number *'}
                   </label>
                   <input
                     type="tel"
@@ -282,7 +391,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Email Address (Mandatory for updates) *
+                    {qualificationCategory === 'Student' ? 'Student Email ID *' : 'Email ID *'}
                   </label>
                   <input
                     type="email"
@@ -296,25 +405,155 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                     className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${contactValidation.emailCheck.duplicate || contactValidation.emailCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
                   />
                   <ContactValidationMessage id="application-email-validation" state={contactValidation.emailCheck} />
-                  <p className="text-[11px] text-slate-400 mt-1">
-                    Confirmation & approval notifications will be delivered to this address.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Student Qualification *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={qualification}
-                    onChange={(e) => setQualification(e.target.value)}
-                    placeholder="e.g. SSLC / PUC / Graduate / Working"
-                    className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500"
-                  />
+                  <p className="text-[11px] text-slate-400 mt-1">Confirmation and application updates will be delivered to this address.</p>
                 </div>
               </div>
+
+              {qualificationCategory === 'Student' && (
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">Parent / Guardian Details</h3>
+                  <div className="mt-3 grid grid-cols-1 gap-5 sm:grid-cols-2">
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      Parent Phone Number *
+                      <input
+                        id="application-parent-phone"
+                        type="tel"
+                        required
+                        maxLength={30}
+                        autoComplete="tel"
+                        value={parentPhone}
+                        onChange={(event) => updateCategoryField('parent_phone', event.target.value, setParentPhone)}
+                        aria-invalid={Boolean(categoryErrors.parent_phone)}
+                        aria-describedby={categoryErrors.parent_phone ? categoryErrorId('parent_phone') : undefined}
+                        placeholder="+91 98765 43210"
+                        className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.parent_phone ? 'border-rose-600' : 'border-slate-300'}`}
+                      />
+                      {renderCategoryError('parent_phone')}
+                    </label>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      Parent Email ID *
+                      <input
+                        id="application-parent-email"
+                        type="email"
+                        required
+                        maxLength={320}
+                        autoComplete="email"
+                        value={parentEmail}
+                        onChange={(event) => updateCategoryField('parent_email', event.target.value, setParentEmail)}
+                        aria-invalid={Boolean(categoryErrors.parent_email)}
+                        aria-describedby={categoryErrors.parent_email ? categoryErrorId('parent_email') : undefined}
+                        placeholder="parent@example.com"
+                        className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.parent_email ? 'border-rose-600' : 'border-slate-300'}`}
+                      />
+                      {renderCategoryError('parent_email')}
+                    </label>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      School Name *
+                      <input
+                        id="application-school-name"
+                        type="text"
+                        required
+                        maxLength={200}
+                        value={schoolName}
+                        onChange={(event) => updateCategoryField('school_name', event.target.value, setSchoolName)}
+                        aria-invalid={Boolean(categoryErrors.school_name)}
+                        aria-describedby={categoryErrors.school_name ? categoryErrorId('school_name') : undefined}
+                        className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.school_name ? 'border-rose-600' : 'border-slate-300'}`}
+                      />
+                      {renderCategoryError('school_name')}
+                    </label>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      Which Class Are You Studying? *
+                      <input
+                        id="application-qualification"
+                        type="text"
+                        required
+                        maxLength={500}
+                        value={qualification}
+                        onChange={(event) => updateCategoryField('qualification', event.target.value, setQualification)}
+                        aria-invalid={Boolean(categoryErrors.qualification)}
+                        aria-describedby={categoryErrors.qualification ? categoryErrorId('qualification') : undefined}
+                        placeholder="e.g. 10th Standard / PUC 1st Year"
+                        className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.qualification ? 'border-rose-600' : 'border-slate-300'}`}
+                      />
+                      {renderCategoryError('qualification')}
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {qualificationCategory === 'Graduate' && (
+                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    College Name *
+                    <input
+                      id="application-college-name"
+                      type="text"
+                      required
+                      maxLength={200}
+                      value={collegeName}
+                      onChange={(event) => updateCategoryField('college_name', event.target.value, setCollegeName)}
+                      aria-invalid={Boolean(categoryErrors.college_name)}
+                      aria-describedby={categoryErrors.college_name ? categoryErrorId('college_name') : undefined}
+                      className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.college_name ? 'border-rose-600' : 'border-slate-300'}`}
+                    />
+                    {renderCategoryError('college_name')}
+                  </label>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Qualification *
+                    <input
+                      id="application-qualification"
+                      type="text"
+                      required
+                      maxLength={500}
+                      value={qualification}
+                      onChange={(event) => updateCategoryField('qualification', event.target.value, setQualification)}
+                      aria-invalid={Boolean(categoryErrors.qualification)}
+                      aria-describedby={categoryErrors.qualification ? categoryErrorId('qualification') : undefined}
+                      placeholder="e.g. B.Com, B.Sc, MBA"
+                      className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.qualification ? 'border-rose-600' : 'border-slate-300'}`}
+                    />
+                    {renderCategoryError('qualification')}
+                  </label>
+                </div>
+              )}
+
+              {qualificationCategory === 'Working' && (
+                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Occupation *
+                    <input
+                      id="application-occupation"
+                      type="text"
+                      required
+                      maxLength={200}
+                      value={occupation}
+                      onChange={(event) => updateCategoryField('occupation', event.target.value, setOccupation)}
+                      aria-invalid={Boolean(categoryErrors.occupation)}
+                      aria-describedby={categoryErrors.occupation ? categoryErrorId('occupation') : undefined}
+                      placeholder="e.g. Teacher, Engineer"
+                      className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.occupation ? 'border-rose-600' : 'border-slate-300'}`}
+                    />
+                    {renderCategoryError('occupation')}
+                  </label>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Qualification *
+                    <input
+                      id="application-qualification"
+                      type="text"
+                      required
+                      maxLength={500}
+                      value={qualification}
+                      onChange={(event) => updateCategoryField('qualification', event.target.value, setQualification)}
+                      aria-invalid={Boolean(categoryErrors.qualification)}
+                      aria-describedby={categoryErrors.qualification ? categoryErrorId('qualification') : undefined}
+                      placeholder="e.g. B.Com, Diploma"
+                      className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.qualification ? 'border-rose-600' : 'border-slate-300'}`}
+                    />
+                    {renderCategoryError('qualification')}
+                  </label>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                 <div>
@@ -347,17 +586,46 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Place *
+                  <input
+                    id="application-place"
+                    type="text"
+                    required
+                    maxLength={200}
+                    value={place}
+                    onChange={(event) => updateCategoryField('place', event.target.value, setPlace)}
+                    aria-invalid={Boolean(categoryErrors.place)}
+                    aria-describedby={categoryErrors.place ? categoryErrorId('place') : undefined}
+                    placeholder="Area / locality"
+                    className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.place ? 'border-rose-600' : 'border-slate-300'}`}
+                  />
+                  {renderCategoryError('place')}
+                </label>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  City *
+                  <input
+                    id="application-city"
+                    type="text"
+                    required
+                    maxLength={120}
+                    autoComplete="address-level2"
+                    value={city}
+                    onChange={(event) => updateCategoryField('city', event.target.value, setCity)}
+                    aria-invalid={Boolean(categoryErrors.city)}
+                    aria-describedby={categoryErrors.city ? categoryErrorId('city') : undefined}
+                    className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.city ? 'border-rose-600' : 'border-slate-300'}`}
+                  />
+                  {renderCategoryError('city')}
+                </label>
+              </div>
+
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Residential Address (Optional)
                 </label>
-                <input
-                  type="text"
-                  value={address}
-                  onChange={(e) => setAddress(e.target.value)}
-                  placeholder="Area / Locality in Davangere or outside"
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500"
-                />
+                <input type="text" value={address} onChange={(event) => setAddress(event.target.value)} placeholder="Building / street address" className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500" />
               </div>
 
               <div>
