@@ -6,6 +6,7 @@ import { PDFDocument } from 'pdf-lib';
 import {
   DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
   generateOfficialPdf,
+  summarizeOfficialPayments,
   type OfficialCourse,
   type OfficialStudent,
 } from '../official-document';
@@ -130,19 +131,88 @@ test('official PDF contains the approved student and only the selected course', 
     settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
     student,
     course: selectedCourse,
-    assets: { studentPhoto: { bytes: pngBytes, mime: 'image/png' } },
   });
   const pdf = await PDFDocument.load(bytes);
-  assert.ok(pdf.getPageCount() >= 1);
+  assert.equal(pdf.getPageCount(), 1);
   assert.equal(pdf.getPages()[0].getWidth(), 595.28);
   const text = decodePdfText(bytes);
+  assert.match(text, /ADMISSION CONFIRMATION/);
   assert.match(text, /IELTS Preparation/);
   assert.match(text, /UEA-STU-2026-0001/);
   assert.match(text, /UEA-APP-2026-0001/);
+  assert.match(text, /PAYMENT PENDING/);
+  assert.match(text, /INR 0\.00/);
   assert.doesNotMatch(text, /Spoken English|Business English|Other Course/);
 });
 
-test('official preview reads the selected approved student photo from private R2', async () => {
+test('graduate and working PDFs use applicant contacts and never parent contacts', async () => {
+  for (const qualificationCategory of ['Graduate', 'Working'] as const) {
+    const bytes = await generateOfficialPdf({
+      settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+      student: {
+        ...student,
+        qualificationCategory,
+        email: `${qualificationCategory.toLowerCase()}@example.com`,
+        mobile: '+919876500001',
+        parentEmail: 'hidden-parent@example.com',
+        parentPhone: 'HIDDEN-PARENT-PHONE',
+      },
+      course: selectedCourse,
+    });
+    const text = decodePdfText(bytes);
+    assert.match(text, /Mobile Number/);
+    assert.match(text, /Email ID/);
+    assert.match(text, /\+919876500001/);
+    assert.match(text, new RegExp(`${qualificationCategory.toLowerCase()}@example\\.com`));
+    assert.doesNotMatch(text, /Parent Phone Number|Parent Email ID|hidden-parent|HIDDEN-PARENT/);
+  }
+});
+
+test('missing photo and long document content produce a readable multipage PDF', async () => {
+  const longTerm = `Attendance terms ${'with detailed conditions '.repeat(28)}`;
+  const longStudent = `${'Long Applicant Name '.repeat(10)}End`;
+  const bytes = await generateOfficialPdf({
+    settings: {
+      ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+      joiningInstructions: [`${'Joining instruction '.repeat(25)}Last instruction detail`],
+      terms: [longTerm],
+    },
+    student: { ...student, fullName: longStudent },
+    course: selectedCourse,
+  });
+  const pdf = await PDFDocument.load(bytes);
+  const text = decodePdfText(bytes);
+  assert.ok(pdf.getPageCount() > 1);
+  assert.match(text, /End/);
+  assert.match(text, /Last instruction/);
+  assert.match(text, /Attendance terms/);
+});
+
+test('payment summary handles pending, partial, fully paid, and multiple records', () => {
+  assert.deepEqual(summarizeOfficialPayments(1500, []), {
+    totalPayable: 1500,
+    totalPaid: 0,
+    outstandingBalance: 1500,
+    status: 'pending',
+    payments: [],
+  });
+
+  const payments = [
+    { id: 'payment-1', amount: 400, paymentMethod: 'upi', paymentStage: 'first_fee', recordedAt: '2026-10-30T10:00:00Z', referenceNumber: 'REF-1' },
+    { id: 'payment-2', amount: 300, paymentMethod: 'cash', paymentStage: 'installment', recordedAt: '2026-10-31T10:00:00Z', referenceNumber: null },
+  ];
+  assert.deepEqual(summarizeOfficialPayments(1500, payments), {
+    totalPayable: 1500,
+    totalPaid: 700,
+    outstandingBalance: 800,
+    status: 'partially_paid',
+    payments,
+  });
+  assert.equal(summarizeOfficialPayments(700, payments).status, 'fully_paid');
+  assert.equal(summarizeOfficialPayments(650, payments).outstandingBalance, 0);
+});
+
+test('official preview uses marked placeholder data without reading student records or photos', async () => {
   const photoReads: string[] = [];
   const application = {
     id: applicationId,
@@ -181,27 +251,10 @@ test('official preview reads the selected approved student photo from private R2
 
   await withAdminFetch('admin', async (_request, url) => {
     if (url.pathname.endsWith('/official_document_settings')) return Response.json([]);
-    if (url.pathname.endsWith('/applications')) return Response.json([application]);
-    if (url.pathname.endsWith('/programs')) {
-      return Response.json([{ id: programId, title: selectedCourse.name, duration: selectedCourse.duration, level: selectedCourse.level }]);
-    }
-    if (url.pathname.endsWith('/program_fee_configurations')) {
-      return Response.json([{
-        program_id: programId,
-        tuition_fee: selectedCourse.tuitionFee,
-        registration_fee: selectedCourse.registrationFee,
-        study_material_fee: selectedCourse.studyMaterialFee,
-        other_charges: selectedCourse.otherCharges,
-        discount_type: selectedCourse.discountType,
-        discount_value: selectedCourse.discountValue,
-        final_payable: selectedCourse.finalPayable,
-      }]);
-    }
-    if (url.pathname.endsWith('/application_fee_agreements')) return Response.json([]);
     throw new Error(`Unexpected Supabase request: ${url.pathname}`);
   }, async () => {
     const response = await handleApiRequest(
-      authorizedRequest('/api/admin/official-document/preview', 'POST', { application_id: applicationId }),
+      authorizedRequest('/api/admin/official-document/preview', 'POST', {}),
       env,
     );
     assert.equal(response.status, 200);
@@ -209,11 +262,14 @@ test('official preview reads the selected approved student photo from private R2
     assert.equal(response.headers.get('Cache-Control'), 'private, no-store');
     const bytes = new Uint8Array(await response.arrayBuffer());
     assert.equal(new TextDecoder().decode(bytes.slice(0, 5)), '%PDF-');
+    assert.equal((await PDFDocument.load(bytes)).getPageCount(), 1);
     const text = decodePdfText(bytes);
-    assert.match(text, /IELTS Preparation/);
-    assert.doesNotMatch(text, /Other Course|Spoken English|Business English/);
+    assert.match(text, /PREVIEW ONLY - NOT AN OFFICIAL STUDENT DOCUMENT/);
+    assert.match(text, /PREVIEW APPLICANT/);
+    assert.match(text, /Selected program \(preview\)/);
+    assert.doesNotMatch(text, /Test Learner|IELTS Preparation|UEA-STU-2026-0001/);
   });
-  assert.deepEqual(photoReads, [photoKey]);
+  assert.deepEqual(photoReads, []);
 });
 
 test('approval attaches and stores the PDF generated from the immutable issuance snapshot', async () => {
@@ -351,7 +407,7 @@ test('approval attaches and stores the PDF generated from the immutable issuance
   });
 
   assert.equal(uploaded.length, 1);
-  assert.equal(uploaded[0].key, `official-documents/${applicationId}.pdf`);
+  assert.equal(uploaded[0].key, `official-documents/${applicationId}/v1-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.pdf`);
   assert.equal(uploaded[0].contentType, 'application/pdf');
   assert.equal(new TextDecoder().decode(uploaded[0].bytes.slice(0, 5)), '%PDF-');
   assert.equal(completedDeliveries.length, 1);
@@ -365,6 +421,8 @@ test('approval attaches and stores the PDF generated from the immutable issuance
   const attachedText = decodePdfText(attachedPdf);
   assert.match(attachedText, /IELTS Preparation/);
   assert.match(attachedText, /UEA-STU-2026-0001/);
+  assert.match(attachedText, /PAYMENT PENDING/);
+  assert.match(attachedText, /INR 0\.00/);
   assert.doesNotMatch(attachedText, /Other Course|Spoken English|Business English/);
 });
 
@@ -438,7 +496,8 @@ test('approval retries failed delivery once and reuses the saved issuance on rep
   const env = makeWorkerEnv({
     APPLICATION_MEDIA: {
       get: async (key: string) => {
-        const bytes = key === photoKey ? pngBytes : key === `official-documents/${applicationId}.pdf` ? storedPdf : null;
+        const versionedPdfKey = `official-documents/${applicationId}/v1-${issuance.id}.pdf`;
+        const bytes = key === photoKey ? pngBytes : key === versionedPdfKey ? storedPdf : null;
         if (!bytes) return null;
         return {
           body: new ReadableStream<Uint8Array>({
@@ -566,13 +625,543 @@ test('approval retries failed delivery once and reuses the saved issuance on rep
   assert.doesNotMatch(String(resendPayloads[0].html), /Editable Current Name|Current Editable Course|stale-notification/);
   assert.equal(notificationCount, 1);
   assert.equal(attemptCount, 2);
-  assert.deepEqual(uploadedPdfs, [`official-documents/${applicationId}.pdf`]);
+  assert.deepEqual(uploadedPdfs, [`official-documents/${applicationId}/v1-${issuance.id}.pdf`]);
   assert.equal(deliveryStatus, 'Sent');
   assert.ok(storedPdf);
   const savedPdfText = decodePdfText(storedPdf);
   assert.match(savedPdfText, /IELTS Preparation/);
   assert.match(savedPdfText, /UEA-STU-2026-0001/);
   assert.doesNotMatch(savedPdfText, /Current Editable Course|Other Course/);
+});
+
+test('recorded payment creates and emails an immutable PDF version using snapshot data', async () => {
+  const issuanceId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const paymentId = '99999999-9999-4999-8999-999999999999';
+  const idempotencyKey = '88888888-8888-4888-8888-888888888888';
+  const versionKey = `official-documents/${applicationId}/v2-${issuanceId}.pdf`;
+  const logoKey = 'official-document-assets/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png';
+  const storedObjects = new Map<string, Uint8Array>();
+  const uploads: string[] = [];
+  const assetReads: string[] = [];
+  const paymentEmails: Record<string, unknown>[] = [];
+  let paymentCreateCalls = 0;
+  const snapshot = {
+    application: {
+      id: applicationId,
+      application_reference: student.applicationNumber,
+      student_id: student.studentId,
+      student_name: 'Student Category Learner',
+      qualification_category: 'Student',
+      qualification: '10th Standard',
+      program_name: 'Spoken English',
+      email: 'parent@example.com',
+      mobile: 'HIDDEN-APPLICANT-MOBILE',
+      parent_phone: '+919876500001',
+      parent_email: 'parent@example.com',
+      photo_object_key: photoKey,
+    },
+    program: { id: programId, name: 'Spoken English', duration: '3 months', mode: 'Regular classroom' },
+    fee: {
+      tuition_fee: 12000,
+      registration_fee: 500,
+      study_material_fee: 0,
+      other_charges: 0,
+      discount_type: 'amount',
+      discount_value: 500,
+      discount_amount: 500,
+      final_payable: 12000,
+      agreed_total: 10000,
+    },
+    payments: [
+      { id: 'payment-earlier', amount: 1500, payment_method: 'upi', payment_stage: 'first_fee', recorded_at: '2026-10-29T10:00:00Z', reference_number: 'UPI-7788' },
+      { id: paymentId, amount: 2500, payment_method: 'bank_transfer', payment_stage: 'installment', recorded_at: '2026-10-31T10:00:00Z', reference_number: 'BANK-REF-22' },
+    ],
+    document_settings: {
+      ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+      logoObjectKey: logoKey,
+      joiningInstructions: ['Bring the admission confirmation slip.'],
+      terms: ['Saved attendance terms.'],
+    },
+    joining_information: {
+      joiningDate: '2026-11-02',
+      classSchedule: 'Monday to Saturday',
+      classTimings: '10:00 AM',
+      venue: 'Davangere',
+    },
+    payment_summary: { total_payable: 10000, total_paid: 4000, outstanding_balance: 6000, status: 'partially_paid' },
+  };
+  const issuance: Record<string, any> = {
+    id: issuanceId,
+    application_id: applicationId,
+    application_reference: student.applicationNumber,
+    student_id: student.studentId,
+    version_number: 2,
+    issuance_type: 'payment_update',
+    snapshot,
+    pdf_object_key: null,
+    status: 'pending',
+  };
+  const notification = {
+    id: '77777777-7777-4777-8777-777777777777',
+    recipient_email: 'parent@example.com',
+    status: 'Pending',
+  };
+  const env = makeWorkerEnv({
+    APPLICATION_MEDIA: {
+      get: async (key: string) => {
+        assetReads.push(key);
+        const bytes = key === photoKey || key === logoKey ? pngBytes : storedObjects.get(key);
+        if (!bytes) return null;
+        return {
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(bytes);
+              controller.close();
+            },
+          }),
+          httpMetadata: { contentType: key === photoKey || key === logoKey ? 'image/png' : 'application/pdf' },
+        };
+      },
+      put: async (key: string, value: ArrayBuffer | ArrayBufferView) => {
+        const bytes = value instanceof ArrayBuffer
+          ? new Uint8Array(value)
+          : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+        storedObjects.set(key, bytes.slice());
+        uploads.push(key);
+      },
+      delete: async () => undefined,
+      list: async () => ({ objects: [] }),
+    },
+  });
+
+  await withAdminFetch('admin', async (request, url) => {
+    if (url.hostname === 'api.resend.com' && url.pathname === '/emails') {
+      assert.equal(request.headers.get('Idempotency-Key'), `student-payment-update-${issuanceId}`);
+      paymentEmails.push(await request.json() as Record<string, unknown>);
+      return Response.json({ id: 'payment-update-message-id' });
+    }
+    if (url.pathname.endsWith('/rpc/create_application_payment_idempotent')) {
+      paymentCreateCalls += 1;
+      const body = await request.json() as Record<string, unknown>;
+      assert.equal(body.p_application_id, applicationId);
+      assert.equal(body.p_idempotency_key, idempotencyKey);
+      return Response.json({ ...body, id: paymentId, application_id: applicationId, recorded_at: '2026-10-31T10:00:00Z' });
+    }
+    if (url.pathname.endsWith('/rpc/enqueue_official_document_payment_version')) {
+      const body = await request.json() as Record<string, unknown>;
+      assert.equal(body.p_application_id, applicationId);
+      assert.match(String(body.p_event_key), /^payment:/);
+      return Response.json(issuanceId);
+    }
+    if (url.pathname.endsWith('/official_document_issuances')) {
+      if (url.searchParams.has('id')) return Response.json([issuance]);
+      return Response.json(issuance.status === 'ready' ? [] : [{ id: issuanceId, version_number: 2, status: 'pending' }]);
+    }
+    if (url.pathname.endsWith('/rpc/claim_official_document_issuance')) {
+      return Response.json([{ claimed: true, status: 'processing' }]);
+    }
+    if (url.pathname.endsWith('/rpc/complete_official_document_issuance')) {
+      const body = await request.json() as Record<string, unknown>;
+      assert.equal(body.p_success, true);
+      issuance.pdf_object_key = String(body.p_pdf_object_key);
+      issuance.status = 'ready';
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname.endsWith('/application_notifications')) return Response.json([notification]);
+    if (url.pathname.endsWith('/rpc/claim_official_document_notification')) {
+      return Response.json([{ claimed: true, status: 'Pending', attempt_count: 1 }]);
+    }
+    if (url.pathname.endsWith('/rpc/complete_official_document_notification')) {
+      const body = await request.json() as Record<string, unknown>;
+      assert.equal(body.p_success, true);
+      notification.status = 'Sent';
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected Supabase request: ${url.pathname}`);
+  }, async () => {
+    const makePaymentRequest = () => new Request(`https://academy.example/api/admin/applications/${applicationId}/payments`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({
+          amount: 2500,
+          payment_method: 'bank_transfer',
+          payment_stage: 'installment',
+          reference_number: 'BANK-REF-22',
+        }),
+      });
+    const response = await handleApiRequest(makePaymentRequest(), env);
+    assert.equal(response.status, 201);
+    const body = await response.json() as { document_update: { success: boolean; versions: Array<{ status: string; version_number?: number }> } };
+    assert.equal(body.document_update.success, true);
+    assert.equal(body.document_update.versions[0]?.status, 'Sent');
+    assert.equal(body.document_update.versions[0]?.version_number, 2);
+
+    const duplicateResponse = await handleApiRequest(makePaymentRequest(), env);
+    assert.equal(duplicateResponse.status, 201);
+    const duplicateBody = await duplicateResponse.json() as { document_update: { success: boolean; versions: unknown[] } };
+    assert.equal(duplicateBody.document_update.success, true);
+    assert.equal(duplicateBody.document_update.versions.length, 0);
+  });
+
+  assert.equal(paymentCreateCalls, 2);
+  assert.deepEqual(uploads, [versionKey]);
+  assert.ok(assetReads.includes(photoKey));
+  assert.ok(assetReads.includes(logoKey));
+  assert.equal(paymentEmails.length, 1);
+  assert.equal(paymentEmails[0]?.to, 'parent@example.com');
+  assert.match(String(paymentEmails[0]?.subject), /Payment update/);
+  assert.doesNotMatch(String(paymentEmails[0]?.subject), /Congratulations|approved/i);
+  const attachments = paymentEmails[0]?.attachments as Array<{ content: string }>;
+  assert.equal(attachments.length, 1);
+  const pdfText = decodePdfText(new Uint8Array(Buffer.from(attachments[0].content, 'base64')));
+  assert.match(pdfText, /Version 2/);
+  assert.match(pdfText, /Parent Phone Number/);
+  assert.match(pdfText, /\+919876500001/);
+  assert.match(pdfText, /parent@example.com/);
+  assert.doesNotMatch(pdfText, /HIDDEN-APPLICANT-MOBILE/);
+  assert.match(pdfText, /Regular classroom/);
+  assert.match(pdfText, /UPI-7788/);
+  assert.match(pdfText, /BANK-REF-22/);
+  assert.match(pdfText, /PARTIALLY PAID/);
+  assert.match(pdfText, /INR 6,000.00/);
+  assert.match(pdfText, /Bring the admission confirmation slip/);
+  assert.match(pdfText, /Saved attendance terms/);
+});
+
+test('failed payment email retry reuses the saved PDF version without uploading another copy', async () => {
+  const issuanceId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const notificationId = '77777777-7777-4777-8777-777777777777';
+  const paymentId = '99999999-9999-4999-8999-999999999999';
+  const idempotencyKey = '88888888-8888-4888-8888-888888888888';
+  const versionKey = `official-documents/${applicationId}/v2-${issuanceId}.pdf`;
+  const storedObjects = new Map<string, Uint8Array>();
+  const uploads: string[] = [];
+  const resendPayloads: Record<string, unknown>[] = [];
+  let emailStatus = 'Pending';
+  let emailAttempts = 0;
+  const issuance: Record<string, any> = {
+    id: issuanceId,
+    application_id: applicationId,
+    application_reference: student.applicationNumber,
+    student_id: student.studentId,
+    version_number: 2,
+    issuance_type: 'payment_update',
+    snapshot: {
+      application: {
+        id: applicationId,
+        application_reference: student.applicationNumber,
+        student_id: student.studentId,
+        student_name: student.fullName,
+        qualification_category: 'Graduate',
+        qualification: student.qualification,
+        program_name: student.programName,
+        email: student.email,
+        mobile: student.mobile,
+      },
+      program: { name: student.programName, duration: '12 weeks' },
+      fee: { tuition_fee: 12000, final_payable: 12000, agreed_total: 12000 },
+      payments: [],
+      payment_summary: { total_payable: 12000, total_paid: 1000, outstanding_balance: 11000, status: 'partially_paid' },
+      document_settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+      joining_information: {},
+    },
+    pdf_object_key: null,
+    status: 'pending',
+  };
+  const notification: Record<string, unknown> = {
+    id: notificationId,
+    application_id: applicationId,
+    official_document_issuance_id: issuanceId,
+    notification_type: 'student_payment_update',
+    recipient_email: student.email,
+    status: 'Pending',
+    attempt_count: 0,
+  };
+  const env = makeWorkerEnv({
+    APPLICATION_MEDIA: {
+      get: async (key: string) => {
+        const bytes = storedObjects.get(key);
+        if (!bytes) return null;
+        return {
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(bytes);
+              controller.close();
+            },
+          }),
+          httpMetadata: { contentType: 'application/pdf' },
+        };
+      },
+      put: async (key: string, value: ArrayBuffer | ArrayBufferView) => {
+        const bytes = value instanceof ArrayBuffer
+          ? new Uint8Array(value)
+          : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+        storedObjects.set(key, bytes.slice());
+        uploads.push(key);
+      },
+      delete: async () => undefined,
+      list: async () => ({ objects: [] }),
+    },
+  });
+
+  await withAdminFetch('super_admin', async (request, url) => {
+    if (url.hostname === 'api.resend.com' && url.pathname === '/emails') {
+      emailAttempts += 1;
+      assert.equal(request.headers.get('Idempotency-Key'), `student-payment-update-${issuanceId}`);
+      resendPayloads.push(await request.json() as Record<string, unknown>);
+      return emailAttempts === 1
+        ? Response.json({ message: 'Temporary provider failure.' }, { status: 503 })
+        : Response.json({ id: 'payment-update-message-id' });
+    }
+    if (url.pathname.endsWith('/rpc/create_application_payment_idempotent')) {
+      const body = await request.json() as Record<string, unknown>;
+      assert.equal(body.p_idempotency_key, idempotencyKey);
+      return Response.json({ id: paymentId, application_id: applicationId });
+    }
+    if (url.pathname.endsWith('/rpc/enqueue_official_document_payment_version')) {
+      const body = await request.json() as Record<string, unknown>;
+      assert.equal(body.p_application_id, applicationId);
+      assert.match(String(body.p_event_key), /^payment:/);
+      return Response.json(issuanceId);
+    }
+    if (url.pathname.endsWith('/official_document_issuances')) {
+      if (url.searchParams.has('id')) return Response.json([issuance]);
+      return Response.json(issuance.status === 'ready' ? [] : [{ id: issuanceId, version_number: 2, status: issuance.status }]);
+    }
+    if (url.pathname.endsWith('/application_notifications')) return Response.json([notification]);
+    if (url.pathname.endsWith('/applications')) {
+      return Response.json([{ application_reference: student.applicationNumber, student_id: student.studentId }]);
+    }
+    if (url.pathname.endsWith('/rpc/claim_official_document_issuance')) {
+      return Response.json([{ claimed: true, status: 'processing' }]);
+    }
+    if (url.pathname.endsWith('/rpc/complete_official_document_issuance')) {
+      const body = await request.json() as Record<string, unknown>;
+      issuance.status = body.p_success ? 'ready' : 'failed';
+      issuance.pdf_object_key = body.p_pdf_object_key;
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname.endsWith('/rpc/claim_official_document_notification')) {
+      emailStatus = 'Pending';
+      return Response.json([{ claimed: true, status: emailStatus, attempt_count: emailAttempts + 1 }]);
+    }
+    if (url.pathname.endsWith('/rpc/complete_official_document_notification')) {
+      const body = await request.json() as Record<string, unknown>;
+      emailStatus = body.p_success ? 'Sent' : 'Failed';
+      notification.status = emailStatus;
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected Supabase request: ${url.pathname}`);
+  }, async () => {
+    const paymentRequest = () => new Request(`https://academy.example/api/admin/applications/${applicationId}/payments`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-admin-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+      },
+      body: JSON.stringify({ amount: 1000, payment_method: 'upi', payment_stage: 'first_fee' }),
+    });
+    const savedPayment = await handleApiRequest(paymentRequest(), env);
+    assert.equal(savedPayment.status, 201);
+    const savedBody = await savedPayment.json() as { document_update: { success: boolean } };
+    assert.equal(savedBody.document_update.success, false);
+    assert.equal(issuance.status, 'ready');
+    assert.equal(emailStatus, 'Failed');
+
+    const retry = await handleApiRequest(
+      authorizedRequest('/api/retry-notification', 'POST', { notification_id: notificationId }),
+      env,
+    );
+    assert.equal(retry.status, 200);
+    const retryBody = await retry.json() as { success: boolean; status: string };
+    assert.equal(retryBody.success, true);
+    assert.equal(retryBody.status, 'Sent');
+  });
+
+  assert.deepEqual(uploads, [versionKey]);
+  assert.equal(emailAttempts, 2);
+  assert.equal(emailStatus, 'Sent');
+  assert.equal(resendPayloads[0]?.to, resendPayloads[1]?.to);
+  assert.deepEqual(resendPayloads[0]?.attachments, resendPayloads[1]?.attachments);
+});
+
+test('a PDF generation failure leaves the recorded payment saved and its version retryable', async () => {
+  const issuanceId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const paymentId = '99999999-9999-4999-8999-999999999999';
+  const idempotencyKey = '88888888-8888-4888-8888-888888888888';
+  let paymentSaved = false;
+  let generationFailureRecorded = false;
+  const issuance = {
+    id: issuanceId,
+    application_id: applicationId,
+    application_reference: student.applicationNumber,
+    student_id: student.studentId,
+    version_number: 2,
+    issuance_type: 'payment_update',
+    snapshot: {
+      application: {
+        id: applicationId,
+        application_reference: student.applicationNumber,
+        student_id: student.studentId,
+        student_name: student.fullName,
+        email: student.email,
+        qualification: student.qualification,
+        qualification_category: 'Graduate',
+        program_name: student.programName,
+        photo_object_key: photoKey,
+      },
+      program: { name: student.programName, duration: '12 weeks' },
+      fee: { tuition_fee: 12000, final_payable: 12000, agreed_total: 12000 },
+      payments: [],
+      document_settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+      joining_information: {},
+    },
+    pdf_object_key: null,
+    status: 'pending',
+  };
+  const env = makeWorkerEnv({
+    APPLICATION_MEDIA: {
+      get: async () => null,
+      put: async () => { throw new Error('PDF generation should fail before upload.'); },
+      delete: async () => undefined,
+      list: async () => ({ objects: [] }),
+    },
+  });
+
+  await withAdminFetch('admin', async (request, url) => {
+    if (url.pathname.endsWith('/rpc/create_application_payment_idempotent')) {
+      paymentSaved = true;
+      return Response.json({ id: paymentId, application_id: applicationId });
+    }
+    if (url.pathname.endsWith('/rpc/enqueue_official_document_payment_version')) {
+      const body = await request.json() as Record<string, unknown>;
+      assert.equal(body.p_application_id, applicationId);
+      assert.match(String(body.p_event_key), /^payment:/);
+      return Response.json(issuanceId);
+    }
+    if (url.pathname.endsWith('/official_document_issuances')) {
+      return Response.json(url.searchParams.has('id') ? [issuance] : [{ id: issuanceId, version_number: 2, status: 'pending' }]);
+    }
+    if (url.pathname.endsWith('/rpc/claim_official_document_issuance')) {
+      return Response.json([{ claimed: true, status: 'processing' }]);
+    }
+    if (url.pathname.endsWith('/rpc/complete_official_document_issuance')) {
+      const body = await request.json() as Record<string, unknown>;
+      assert.equal(body.p_success, false);
+      generationFailureRecorded = true;
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected Supabase request: ${url.pathname}`);
+  }, async () => {
+    const response = await handleApiRequest(
+      new Request(`https://academy.example/api/admin/applications/${applicationId}/payments`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({ amount: 1000, payment_method: 'upi', payment_stage: 'first_fee' }),
+      }),
+      env,
+    );
+    assert.equal(response.status, 201);
+    const body = await response.json() as { payment: { id: string }; document_update: { success: boolean } };
+    assert.equal(body.payment.id, paymentId);
+    assert.equal(body.document_update.success, false);
+  });
+
+  assert.equal(paymentSaved, true);
+  assert.equal(generationFailureRecorded, true);
+});
+
+test('authorized admins can list sanitized history and download an older PDF version', async () => {
+  const firstVersionKey = `official-documents/${applicationId}/v1-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.pdf`;
+  const secondVersionKey = `official-documents/${applicationId}/v2-ffffffff-ffff-4fff-8fff-ffffffffffff.pdf`;
+  const pdfBytes = await generateOfficialPdf({ settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS, student, course: selectedCourse });
+  const versions = [
+    {
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      application_id: applicationId,
+      application_reference: student.applicationNumber,
+      student_id: student.studentId,
+      version_number: 1,
+      issuance_type: 'approval',
+      status: 'ready',
+      email_status: 'Sent',
+      generated_at: '2026-10-30T10:00:00Z',
+      created_at: '2026-10-30T09:00:00Z',
+      pdf_object_key: firstVersionKey,
+      snapshot: { payment_summary: { status: 'pending', total_paid: 0, outstanding_balance: 13000 } },
+    },
+    {
+      id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      application_id: applicationId,
+      application_reference: student.applicationNumber,
+      student_id: student.studentId,
+      version_number: 2,
+      issuance_type: 'payment_update',
+      status: 'ready',
+      email_status: 'Sent',
+      generated_at: '2026-10-31T10:00:00Z',
+      created_at: '2026-10-31T09:00:00Z',
+      pdf_object_key: secondVersionKey,
+      snapshot: { payment_summary: { status: 'partially_paid', total_paid: 4000, outstanding_balance: 9000 } },
+    },
+  ];
+  let retrievedKey = '';
+  const env = makeWorkerEnv({
+    APPLICATION_MEDIA: {
+      get: async (key: string) => {
+        retrievedKey = key;
+        return {
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(pdfBytes);
+              controller.close();
+            },
+          }),
+          httpMetadata: { contentType: 'application/pdf' },
+        };
+      },
+      put: async () => undefined,
+      delete: async () => undefined,
+      list: async () => ({ objects: [] }),
+    },
+  });
+
+  await withAdminFetch('admin', async (_request, url) => {
+    if (!url.pathname.endsWith('/official_document_issuances')) throw new Error(`Unexpected request: ${url.pathname}`);
+    if (url.searchParams.has('version_number')) return Response.json([versions[0]]);
+    return Response.json(versions);
+  }, async () => {
+    const historyResponse = await handleApiRequest(
+      authorizedRequest(`/api/admin/official-document/versions?application_id=${applicationId}`),
+      env,
+    );
+    assert.equal(historyResponse.status, 200);
+    const history = await historyResponse.json() as Array<Record<string, unknown>>;
+    assert.equal(history.length, 2);
+    assert.equal(history[0]?.version_number, 1);
+    assert.equal(history[1]?.version_number, 2);
+    assert.equal('pdf_object_key' in history[0]!, false);
+
+    const downloadResponse = await handleApiRequest(
+      authorizedRequest(`/api/admin/official-document/issued?application_id=${applicationId}&version=1`),
+      env,
+    );
+    assert.equal(downloadResponse.status, 200);
+    assert.match(downloadResponse.headers.get('Content-Disposition') || '', /Issued_V1_/);
+    assert.deepEqual(new Uint8Array(await downloadResponse.arrayBuffer()), pdfBytes);
+  });
+
+  assert.equal(retrievedKey, firstVersionKey);
+  assert.notEqual(firstVersionKey, secondVersionKey);
 });
 
 test('official PDF settings require super-admin and store uploaded assets privately', async () => {
@@ -589,6 +1178,7 @@ test('official PDF settings require super-admin and store uploaded assets privat
     settings: {
       ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
       heading: 'Updated Admission Confirmation',
+      joiningInstructions: ['Bring the admission confirmation slip.'],
       terms: ['Attendance is required.'],
     },
     logo_file_base64: `data:image/png;base64,${Buffer.from(pngBytes).toString('base64')}`,
@@ -619,10 +1209,12 @@ test('official PDF settings require super-admin and store uploaded assets privat
     assert.equal(response.status, 200);
     const body = await response.json() as { settings: Record<string, unknown> };
     assert.equal(body.settings.heading, 'Updated Admission Confirmation');
+    assert.deepEqual(body.settings.joiningInstructions, ['Bring the admission confirmation slip.']);
     assert.deepEqual(body.settings.terms, ['Attendance is required.']);
     assert.match(String(body.settings.logoObjectKey), /^official-document-assets\/[0-9a-f-]+\.png$/i);
   });
   assert.equal(savedSettings[0]?.heading, 'Updated Admission Confirmation');
+  assert.deepEqual(savedSettings[0]?.joiningInstructions, ['Bring the admission confirmation slip.']);
   assert.equal(uploadedKeys.length, 1);
   assert.match(uploadedKeys[0], /^official-document-assets\/[0-9a-f-]+\.png$/i);
 });
@@ -670,6 +1262,29 @@ test('enrollment PDF loads the configured private logo through the authenticated
   const adminPortal = await readFile(new URL('../src/pages/AdminPortal.tsx', import.meta.url), 'utf8');
   assert.match(adminPortal, /fetchAdmin\('\/api\/admin\/official-document\/assets\?type=logo'/);
   assert.doesNotMatch(adminPortal, /const logoUrl = "https:\/\/gpnfznwqwaokfzmozpxo\.supabase\.co/);
+});
+
+test('program course mode is saved as a nullable admin-editable program field', async () => {
+  let savedCourseMode: unknown = null;
+  await withAdminFetch('admin', async (request, url) => {
+    if (!url.pathname.endsWith('/programs')) throw new Error(`Unexpected request: ${url.pathname}`);
+    if (request.method === 'GET') {
+      return Response.json([{ id: programId, image_url: null, image_object_key: null }]);
+    }
+    assert.equal(request.method, 'PATCH');
+    const body = await request.json() as Record<string, unknown>;
+    savedCourseMode = body.course_mode;
+    return Response.json({ id: programId, ...body });
+  }, async () => {
+    const response = await handleApiRequest(
+      authorizedRequest(`/api/admin/programs/${programId}`, 'PUT', { course_mode: 'Regular classroom' }),
+      makeWorkerEnv(),
+    );
+    assert.equal(response.status, 200);
+    const body = await response.json() as { course_mode: string };
+    assert.equal(body.course_mode, 'Regular classroom');
+  });
+  assert.equal(savedCourseMode, 'Regular classroom');
 });
 
 test('course fee endpoint persists editable fee components for an admin', async () => {
@@ -746,4 +1361,36 @@ test('database migration uses independent yearly sequences and atomic immutable 
   assert.match(migration, /FROM public\.application_notifications\s+WHERE notification_type = 'student_approval'/);
   assert.match(migration, /GRANT EXECUTE ON FUNCTION public\.claim_student_approval_notification[\s\S]+TO service_role/);
   assert.match(migration, /ALTER TABLE public\.official_document_issuances ENABLE ROW LEVEL SECURITY/);
+});
+
+test('payment PDF version migration reuses existing ledgers, issuance, and notification tables', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261031000004_official_document_payment_versions.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS course_mode text/);
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS idempotency_key uuid/);
+  assert.match(migration, /idx_application_payments_idempotency/);
+  assert.match(migration, /DROP CONSTRAINT IF EXISTS official_document_issuances_application_id_key/);
+  assert.match(migration, /WHEN application_id IS NULL THEN 'historical:' \|\| id::text/);
+  assert.match(migration, /idx_official_document_issuances_application_version/);
+  assert.match(migration, /build_official_document_snapshot/);
+  assert.match(migration, /'qualification_category', v_application\.qualification_category/);
+  assert.match(migration, /'parent_phone', v_application\.parent_phone/);
+  assert.match(migration, /'parent_email', v_application\.parent_email/);
+  assert.match(migration, /'mode', v_program\.course_mode/);
+  assert.match(migration, /'payment_summary'/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.enqueue_official_document_payment_version/);
+  assert.match(migration, /RETURNS uuid/);
+  assert.doesNotMatch(migration, /CREATE TRIGGER trg_application_payments_official_document_version/);
+  assert.match(migration, /FOR UPDATE/);
+  assert.match(migration, /'student_payment_update'/);
+  assert.match(migration, /claim_official_document_issuance/);
+  assert.match(migration, /complete_official_document_issuance/);
+  assert.match(migration, /claim_official_document_notification/);
+  assert.match(migration, /complete_official_document_notification/);
+  assert.match(migration, /earlier\.email_status <> 'Sent'/);
+  assert.match(migration, /REVOKE ALL ON TABLE public\.application_notifications[\s\S]+TO service_role/);
+  assert.doesNotMatch(migration, /CREATE TABLE IF NOT EXISTS public\.(application_payments|application_fee_agreements|official_document_issuances)/);
+  assert.doesNotMatch(migration, /DELETE FROM public\.(application_payments|application_fee_agreements|official_document_issuances)/);
 });

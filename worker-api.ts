@@ -4,8 +4,10 @@ import {
   generateOfficialPdf,
   isValidOfficialDocumentSettings,
   mergeOfficialDocumentSettings,
+  summarizeOfficialPayments,
   type OfficialCourse,
   type OfficialDocumentSettings,
+  type OfficialPaymentRecord,
 } from './official-document';
 import {
   legacyUploadFilenameFromMetadata,
@@ -582,6 +584,47 @@ const buildApprovalEmail = (
   };
 };
 
+const buildPaymentUpdateEmail = (
+  snapshotValue: unknown,
+  pdfBytes: Uint8Array,
+  versionNumber: number,
+): ApprovalEmail | Response => {
+  if (!snapshotValue || typeof snapshotValue !== 'object' || Array.isArray(snapshotValue)) {
+    return errorResponse('The saved payment document snapshot is invalid.', 500);
+  }
+  const snapshot = snapshotValue as Record<string, any>;
+  const student = snapshot.application;
+  const summary = snapshot.payment_summary;
+  if (!student || typeof student !== 'object' ||
+    typeof student.email !== 'string' || !student.email.trim() ||
+    typeof student.student_name !== 'string' ||
+    typeof student.application_reference !== 'string') {
+    return errorResponse('The saved payment snapshot is missing the applicant email or reference.', 500);
+  }
+  if (!summary || typeof summary !== 'object') {
+    return errorResponse('The saved payment snapshot is missing its payment summary.', 500);
+  }
+  const status = summary.status === 'fully_paid'
+    ? 'FULLY PAID'
+    : summary.status === 'partially_paid' ? 'PARTIALLY PAID' : 'PAYMENT PENDING';
+  const formatEmailAmount = (value: unknown) => {
+    const amount = Number(value);
+    return Number.isFinite(amount)
+      ? `INR ${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : 'Not configured';
+  };
+  const reference = student.application_reference.replace(/[^A-Za-z0-9_-]/g, '_');
+  return {
+    to: student.email,
+    subject: `Payment update: ${status} — Uptrend's English Academy`,
+    html: `<div><h2>Payment update</h2><p>Dear <strong>${escapeHtml(student.student_name)}</strong>,</p><p>Your payment record for application <strong>${escapeHtml(student.application_reference)}</strong> has been updated.</p><p><strong>Status:</strong> ${status}<br><strong>Total paid:</strong> ${formatEmailAmount(summary.total_paid)}<br><strong>Outstanding balance:</strong> ${formatEmailAmount(summary.outstanding_balance)}</p><p>The latest official document, Version ${versionNumber}, is attached.</p></div>`,
+    attachments: [{
+      filename: `Official_Document_V${versionNumber}_${reference}.pdf`,
+      content: toBase64(pdfBytes),
+    }],
+  };
+};
+
 const toBase64 = (bytes: Uint8Array): string => {
   let binary = '';
   const chunkSize = 0x8000;
@@ -793,7 +836,7 @@ const readPrivateR2Object = async (
     ? /^applications\/[0-9a-f-]+\.(?:jpg|png|webp)$/i.test(key)
     : expectedPrefix === 'official-document-assets'
       ? /^official-document-assets\/[0-9a-f-]+\.(?:jpg|png|webp)$/i.test(key)
-      : /^official-documents\/[0-9a-f-]+\.pdf$/i.test(key);
+      : /^official-documents\/(?:[0-9a-f-]+\.pdf|[0-9a-f-]+\/v[0-9]+-[0-9a-f-]+\.pdf)$/i.test(key);
   if (!validKey) return errorResponse('Private document storage metadata is invalid.', 500);
   const bucket = env.APPLICATION_MEDIA;
   if (!bucket?.get) return errorResponse('Private document storage is not configured.', 503);
@@ -856,6 +899,7 @@ const courseFromSnapshot = (snapshot: Record<string, any>): OfficialCourse | nul
   return {
     name: String(program.name),
     duration: typeof program.duration === 'string' ? program.duration : null,
+    mode: typeof program.mode === 'string' ? program.mode : null,
     level: typeof program.level === 'string' ? program.level : null,
     tuitionFee: numeric(fee.tuition_fee, null),
     registrationFee: numeric(fee.registration_fee, 0) || 0,
@@ -872,6 +916,7 @@ const courseFromSnapshot = (snapshot: Record<string, any>): OfficialCourse | nul
 const generatePdfFromSnapshot = async (
   env: Env,
   snapshotValue: unknown,
+  versionNumberOverride?: number,
 ): Promise<Uint8Array | Response> => {
   if (!snapshotValue || typeof snapshotValue !== 'object' || Array.isArray(snapshotValue)) {
     return errorResponse('The saved official document snapshot is invalid.', 500);
@@ -881,22 +926,21 @@ const generatePdfFromSnapshot = async (
   if (!application || typeof application !== 'object' ||
     typeof application.student_name !== 'string' ||
     typeof application.application_reference !== 'string' ||
-    typeof application.student_id !== 'string' ||
-    typeof application.photo_object_key !== 'string') {
+    typeof application.student_id !== 'string') {
     return errorResponse('The approved application is missing required official document details.', 500);
   }
   const settings = mergeOfficialDocumentSettings(snapshot.document_settings ?? DEFAULT_OFFICIAL_DOCUMENT_SETTINGS);
   if (!settings) return errorResponse('The saved document settings in the official snapshot are invalid.', 500);
 
-  const photo = await readPrivateR2Object(env, application.photo_object_key, 'applications');
-  if (isResponse(photo)) return photo;
-  if (photo.mime === 'image/webp') {
-    return errorResponse('This applicant photo must be converted to JPEG or PNG before an official PDF can be generated.', 422);
+  const assets: Parameters<typeof generateOfficialPdf>[0]['assets'] = {};
+  if (typeof application.photo_object_key === 'string' && application.photo_object_key) {
+    const photo = await readPrivateR2Object(env, application.photo_object_key, 'applications');
+    if (isResponse(photo)) return photo;
+    if (photo.mime === 'image/webp') {
+      return errorResponse('This applicant photo must be converted to JPEG or PNG before an official PDF can be generated.', 422);
+    }
+    assets.studentPhoto = { bytes: photo.bytes, mime: photo.mime as 'image/jpeg' | 'image/png' };
   }
-
-  const assets: Parameters<typeof generateOfficialPdf>[0]['assets'] = {
-    studentPhoto: { bytes: photo.bytes, mime: photo.mime as 'image/jpeg' | 'image/png' },
-  };
   if (settings.logoObjectKey) {
     const logo = await readPrivateR2Object(env, settings.logoObjectKey, 'official-document-assets');
     if (isResponse(logo)) return logo;
@@ -921,6 +965,26 @@ const generatePdfFromSnapshot = async (
       venue: string;
     }
     : undefined;
+  const course = courseFromSnapshot(snapshot);
+  const savedPayments = snapshot.payment_summary?.payments ?? snapshot.payments;
+  const payments: OfficialPaymentRecord[] = Array.isArray(savedPayments)
+    ? savedPayments.flatMap((payment: Record<string, unknown>) => {
+      const amount = Number(payment.amount);
+      if (!Number.isFinite(amount) || amount < 0) return [];
+      return [{
+        id: typeof payment.id === 'string' ? payment.id : '',
+        amount,
+        paymentMethod: typeof payment.payment_method === 'string' ? payment.payment_method : '',
+        paymentStage: typeof payment.payment_stage === 'string' ? payment.payment_stage : '',
+        recordedAt: typeof payment.recorded_at === 'string' ? payment.recorded_at : '',
+        referenceNumber: typeof payment.reference_number === 'string' ? payment.reference_number : null,
+      }];
+    })
+    : [];
+  const paymentSummary = summarizeOfficialPayments(
+    course?.agreedTotal ?? course?.finalPayable ?? null,
+    payments,
+  );
   try {
     const bytes = await generateOfficialPdf({
       settings,
@@ -928,16 +992,24 @@ const generatePdfFromSnapshot = async (
         fullName: application.student_name,
         studentId: application.student_id,
         applicationNumber: application.application_reference,
+        qualificationCategory: ['Student', 'Graduate', 'Working'].includes(application.qualification_category)
+          ? application.qualification_category
+          : null,
         qualification: application.qualification || '',
         programName: application.program_name || '',
         email: application.email || '',
         mobile: application.mobile || '',
+        parentEmail: application.parent_email || null,
+        parentPhone: application.parent_phone || null,
         dateOfBirth: application.date_of_birth || null,
         address: application.address || null,
       },
-      course: courseFromSnapshot(snapshot),
+      course,
       joiningInformation,
+      paymentSummary,
       assets,
+      versionNumber: versionNumberOverride ?? (Number.isInteger(snapshot.version_number) ? snapshot.version_number : undefined),
+      previewOnly: snapshot.preview_only === true,
     });
     if (!bytes.length || bytes.length > 10 * 1024 * 1024 ||
       new TextDecoder().decode(bytes.slice(0, 5)) !== '%PDF-') {
@@ -966,11 +1038,12 @@ const ensureIssuedOfficialPdf = async (
     if (storedPdf.status !== 404) return storedPdf;
   }
 
-  const bytes = await generatePdfFromSnapshot(env, snapshot);
+  const versionNumber = Number.isInteger(issuance.version_number) ? issuance.version_number : 1;
+  const bytes = await generatePdfFromSnapshot(env, snapshot, versionNumber);
   if (isResponse(bytes)) return bytes;
   const bucket = env.APPLICATION_MEDIA;
   if (!bucket) return errorResponse('Private official document storage is not configured.', 503);
-  const key = `official-documents/${applicationId}.pdf`;
+  const key = `official-documents/${applicationId}/v${versionNumber}-${issuance.id}.pdf`;
   try {
     await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } });
   } catch (error) {
@@ -983,7 +1056,7 @@ const ensureIssuedOfficialPdf = async (
 
   const { error } = await supabase
     .from('official_document_issuances')
-    .update({ pdf_object_key: key, status: 'ready' })
+    .update({ pdf_object_key: key, status: 'ready', generated_at: new Date().toISOString() })
     .eq('id', issuance.id);
   if (error) {
     console.error('Unable to record generated official PDF storage key.', {
@@ -993,6 +1066,260 @@ const ensureIssuedOfficialPdf = async (
     return errorResponse('The official PDF was stored but its issuance record could not be updated.', 502);
   }
   return bytes;
+};
+
+type PaymentDocumentDeliveryResult = {
+  success: boolean;
+  status: string;
+  version_number?: number;
+  pdf_ready?: boolean;
+  error?: string;
+};
+
+const processPaymentDocumentIssuance = async (
+  supabase: SupabaseClient,
+  env: Env,
+  issuanceId: string,
+): Promise<PaymentDocumentDeliveryResult> => {
+  const { data: loaded, error: loadError } = await supabase
+    .from('official_document_issuances')
+    .select('id,application_id,application_reference,student_id,version_number,issuance_type,snapshot,pdf_object_key,status')
+    .eq('id', issuanceId)
+    .maybeSingle();
+  if (loadError || !loaded || !loaded.application_id) {
+    return { success: false, status: 'failed', error: 'Unable to load the queued payment document.' };
+  }
+  if (loaded.issuance_type !== 'payment_update') {
+    return { success: false, status: 'failed', error: 'The queued issuance is not a payment update.' };
+  }
+
+  let issuance: Record<string, any> = loaded;
+  if (issuance.status !== 'ready') {
+    const claimToken = crypto.randomUUID();
+    const { data: claimData, error: claimError } = await supabase.rpc('claim_official_document_issuance', {
+      p_issuance_id: issuance.id,
+      p_claim_token: claimToken,
+    });
+    const claim = Array.isArray(claimData) ? claimData[0] : claimData;
+    if (claimError || !claim || typeof claim.claimed !== 'boolean') {
+      return { success: false, status: 'failed', version_number: issuance.version_number, error: 'Unable to claim the queued PDF version.' };
+    }
+    if (!claim.claimed) {
+      return { success: false, status: claim.status || 'processing', version_number: issuance.version_number };
+    }
+
+    const bytes = await generatePdfFromSnapshot(env, issuance.snapshot, issuance.version_number);
+    if (isResponse(bytes)) {
+      const errorMessage = await bytes.text();
+      const { error } = await supabase.rpc('complete_official_document_issuance', {
+        p_issuance_id: issuance.id,
+        p_claim_token: claimToken,
+        p_success: false,
+        p_pdf_object_key: null,
+        p_error_message: errorMessage.slice(0, 1000),
+      });
+      return { success: false, status: 'failed', version_number: issuance.version_number, error: error ? 'PDF generation failed and could not be recorded.' : 'PDF generation failed; the saved payment remains queued for retry.' };
+    }
+
+    const objectKey = `official-documents/${issuance.application_id}/v${issuance.version_number}-${issuance.id}.pdf`;
+    const mediaBucket = env.APPLICATION_MEDIA;
+    if (!mediaBucket?.put) {
+      await supabase.rpc('complete_official_document_issuance', {
+        p_issuance_id: issuance.id,
+        p_claim_token: claimToken,
+        p_success: false,
+        p_pdf_object_key: null,
+        p_error_message: 'Private official document storage is not configured.',
+      });
+      return { success: false, status: 'failed', version_number: issuance.version_number, error: 'Payment saved; private PDF storage is not configured.' };
+    }
+    try {
+      await mediaBucket.put(objectKey, bytes, { httpMetadata: { contentType: 'application/pdf' } });
+    } catch (error) {
+      const errorMessage = messageOf(error);
+      const { error: completionError } = await supabase.rpc('complete_official_document_issuance', {
+        p_issuance_id: issuance.id,
+        p_claim_token: claimToken,
+        p_success: false,
+        p_pdf_object_key: null,
+        p_error_message: errorMessage.slice(0, 1000),
+      });
+      console.error('Payment PDF storage failed after the payment was saved.', {
+        operation: 'official_document.payment_version.store',
+        error: errorMessage,
+        completion_error_code: completionError?.code || null,
+      });
+      return { success: false, status: 'failed', version_number: issuance.version_number, error: 'Payment saved; PDF storage failed and can be retried.' };
+    }
+
+    const { error: completeError } = await supabase.rpc('complete_official_document_issuance', {
+      p_issuance_id: issuance.id,
+      p_claim_token: claimToken,
+      p_success: true,
+      p_pdf_object_key: objectKey,
+      p_error_message: null,
+    });
+    if (completeError) {
+      console.error('Generated payment PDF could not be marked ready.', {
+        operation: 'official_document.payment_version.complete',
+        error_code: completeError.code || 'database_query_failed',
+      });
+      return { success: false, status: 'processing', version_number: issuance.version_number, error: 'Payment saved; generated PDF is awaiting issuance recovery.' };
+    }
+    issuance = { ...issuance, status: 'ready', pdf_object_key: objectKey };
+  }
+
+  const pdfBytes = await ensureIssuedOfficialPdf(
+    supabase,
+    env,
+    issuance,
+    issuance.snapshot,
+    issuance.application_id,
+  );
+  if (isResponse(pdfBytes)) {
+    return { success: false, status: 'failed', version_number: issuance.version_number, pdf_ready: true, error: 'The saved payment PDF could not be read for email delivery.' };
+  }
+
+  const { data: notification, error: notificationError } = await supabase
+    .from('application_notifications')
+    .select('id,recipient_email,status')
+    .eq('official_document_issuance_id', issuance.id)
+    .eq('notification_type', 'student_payment_update')
+    .maybeSingle();
+  if (notificationError || !notification) {
+    return { success: false, status: 'failed', version_number: issuance.version_number, pdf_ready: true, error: 'The payment email outbox record is unavailable.' };
+  }
+
+  const claimToken = crypto.randomUUID();
+  const { data: emailClaimData, error: emailClaimError } = await supabase.rpc('claim_official_document_notification', {
+    p_notification_id: notification.id,
+    p_claim_token: claimToken,
+  });
+  const emailClaim = Array.isArray(emailClaimData) ? emailClaimData[0] : emailClaimData;
+  if (emailClaimError || !emailClaim || typeof emailClaim.claimed !== 'boolean') {
+    return { success: false, status: 'failed', version_number: issuance.version_number, pdf_ready: true, error: 'Unable to claim the payment update email.' };
+  }
+  if (!emailClaim.claimed) {
+    return {
+      success: emailClaim.status === 'Sent',
+      status: emailClaim.status || 'Pending',
+      version_number: issuance.version_number,
+    };
+  }
+
+  const paymentEmail = buildPaymentUpdateEmail(issuance.snapshot, pdfBytes, issuance.version_number);
+  if (isResponse(paymentEmail)) {
+    const errorMessage = await paymentEmail.text();
+    await supabase.rpc('complete_official_document_notification', {
+      p_notification_id: notification.id,
+      p_claim_token: claimToken,
+      p_success: false,
+      p_provider_message_id: null,
+      p_error_message: errorMessage.slice(0, 1000),
+    });
+    return { success: false, status: 'Failed', version_number: issuance.version_number, pdf_ready: true, error: 'Payment email could not be built; it can be retried.' };
+  }
+
+  const emailResult = await sendEmail(env, {
+    ...paymentEmail,
+    idempotencyKey: `student-payment-update-${issuance.id}`,
+  });
+  const { error: completionError } = await supabase.rpc('complete_official_document_notification', {
+    p_notification_id: notification.id,
+    p_claim_token: claimToken,
+    p_success: emailResult.success,
+    p_provider_message_id: emailResult.provider_message_id,
+    p_error_message: emailResult.error || null,
+  });
+  if (completionError) {
+    return { success: false, status: 'Pending', version_number: issuance.version_number, pdf_ready: true, error: 'Email processed; its delivery state could not be recorded.' };
+  }
+  return {
+    success: emailResult.success,
+    status: emailResult.success ? 'Sent' : 'Failed',
+    version_number: issuance.version_number,
+    ...(emailResult.error ? { error: emailResult.error } : {}),
+  };
+};
+
+const enqueuePaymentDocumentVersion = async (
+  supabase: SupabaseClient,
+  applicationId: string,
+  eventKey: string,
+): Promise<string | null> => {
+  try {
+    const { data, error } = await supabase.rpc('enqueue_official_document_payment_version', {
+      p_application_id: applicationId,
+      p_event_key: eventKey,
+    });
+    const issuanceId = typeof data === 'string'
+      ? data
+      : Array.isArray(data) && typeof data[0] === 'string'
+        ? data[0]
+        : null;
+    if (!error && issuanceId && validId(issuanceId)) return null;
+
+    console.error('Payment was saved, but its official PDF version could not be confirmed in the queue.', {
+      operation: 'official_document.payment_version.enqueue',
+      error_code: error?.code || (issuanceId ? 'invalid_response' : 'not_eligible_or_not_queued'),
+    });
+    return 'Payment was saved, but no PDF version was confirmed in the queue. Verify that the application is accepted and retry document queue recovery.';
+  } catch (error) {
+    console.error('Payment was saved, but its official PDF version could not be queued.', {
+      operation: 'official_document.payment_version.enqueue',
+      error_code: 'request_failed',
+    });
+    return 'Payment was saved, but its PDF version could not be queued; retry document processing after resolving the queue error.';
+  }
+};
+
+const paymentUpdateEventKey = async (payment: Record<string, unknown>): Promise<string> => {
+  const stableFields = JSON.stringify([
+    payment.id,
+    payment.amount,
+    payment.payment_method,
+    payment.payment_stage,
+    payment.reference_number ?? null,
+    payment.notes ?? null,
+  ]);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableFields));
+  const fingerprint = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `payment:${String(payment.id)}:updated:${fingerprint}`;
+};
+
+const processPendingPaymentDocumentVersions = async (
+  supabase: SupabaseClient,
+  env: Env,
+  applicationId: string,
+): Promise<{ success: boolean; versions: PaymentDocumentDeliveryResult[]; error?: string }> => {
+  try {
+    const versions: PaymentDocumentDeliveryResult[] = [];
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      const { data, error } = await supabase
+        .from('official_document_issuances')
+        .select('id,version_number,status')
+        .eq('application_id', applicationId)
+        .in('status', ['pending', 'processing', 'failed'])
+        .order('version_number', { ascending: true });
+      if (error) {
+        return { success: false, versions, error: 'Payment saved; pending PDF versions could not be loaded for processing.' };
+      }
+      const issuance = data?.[0];
+      if (!issuance) return { success: true, versions };
+      const result = await processPaymentDocumentIssuance(supabase, env, issuance.id);
+      versions.push(result);
+      if (!result.success && !result.pdf_ready) {
+        return { success: false, versions, error: result.error };
+      }
+    }
+    return { success: false, versions, error: 'Payment saved; additional PDF versions remain queued for retry.' };
+  } catch (error) {
+    console.error('Payment was saved but queued official document processing could not run.', {
+      operation: 'official_document.payment_version.process',
+      error: messageOf(error),
+    });
+    return { success: false, versions: [], error: 'Payment saved; PDF/email processing is queued for retry.' };
+  }
 };
 
 const readTable = async (
@@ -1009,14 +1336,14 @@ const readTable = async (
 };
 
 const READ_COLUMNS = {
-  programs: 'id,title,slug,short_description,description,duration,level,target_audience,age_range,image_url,image_object_key,is_published,display_order,created_at,updated_at',
+  programs: 'id,title,slug,short_description,description,duration,course_mode,level,target_audience,age_range,image_url,image_object_key,is_published,display_order,created_at,updated_at',
   announcements: 'id,content,is_active,display_order,button_action,created_at,updated_at',
   reviews: 'id,author_name,rating,review_text,source,is_published,created_at,updated_at',
   media: 'id,media_type,title,caption,r2_object_key,media_url,youtube_url,youtube_video_id,cover_image_url,alt_text,is_published,display_order,created_at,updated_at',
   faqs: 'id,question,answer,is_published,display_order,created_at,updated_at',
   applications: 'id,application_reference,student_id,student_name,mobile,email,qualification,qualification_category,parent_phone,parent_email,school_name,college_name,occupation,place,city,program_id,program_name,date_of_birth,address,photo_object_key,photo_data_url,message,status,approved_by_name,approved_at,archived_at,archived_by,created_at',
   demoClassRequests: 'id,full_name,mobile,email,qualification_category,parent_name,school_or_college_name,college_name,profession,educational_qualification,date_of_birth,address,city,additional_information,status,created_at',
-  notifications: 'id,application_id,notification_type,recipient_email,status,attempt_count,provider_message_id,error_message,pdf_attached,sent_at,created_at,updated_at',
+  notifications: 'id,application_id,notification_type,recipient_email,status,attempt_count,provider_message_id,error_message,pdf_attached,sent_at,created_at,updated_at,official_document_issuance_id',
   callbacks: 'id,full_name,mobile,email,program_name,preferred_contact_time,message,consent,status,created_at,updated_at',
   profiles: 'id,email,full_name,role,is_active,created_at,updated_at',
 } as const;
@@ -1083,10 +1410,12 @@ const createProgram = async (request: Request, env: Env): Promise<Response> => {
   }
 
   const duration = optionalString(body.duration, 'duration', 200);
+  const courseMode = optionalString(body.course_mode, 'course mode', 200);
   const level = optionalString(body.level, 'level', 200);
   const ageRange = optionalString(body.age_range, 'age range', 200);
   const suppliedImageUrl = optionalString(body.image_url, 'image URL', 2048);
   if (isResponse(duration)) return duration;
+  if (isResponse(courseMode)) return courseMode;
   if (isResponse(level)) return level;
   if (isResponse(ageRange)) return ageRange;
   if (isResponse(suppliedImageUrl)) return suppliedImageUrl;
@@ -1112,6 +1441,7 @@ const createProgram = async (request: Request, env: Env): Promise<Response> => {
     description: validated.description,
     target_audience: validated.target_audience,
     duration,
+    course_mode: courseMode,
     level,
     age_range: ageRange,
     image_url: imageUrl,
@@ -1145,9 +1475,9 @@ const updateProgram = async (request: Request, env: Env, id: string): Promise<Re
   if (!current) return errorResponse('Program not found.', 404);
 
   const updates: Record<string, unknown> = {};
-  for (const field of ['title', 'slug', 'short_description', 'description', 'target_audience', 'duration', 'level', 'age_range', 'image_url'] as const) {
+  for (const field of ['title', 'slug', 'short_description', 'description', 'target_audience', 'duration', 'course_mode', 'level', 'age_range', 'image_url'] as const) {
     if (body[field] === undefined) continue;
-    const value = field === 'duration' || field === 'level' || field === 'age_range' || field === 'image_url'
+    const value = field === 'duration' || field === 'course_mode' || field === 'level' || field === 'age_range' || field === 'image_url'
       ? optionalString(body[field], field.replaceAll('_', ' '), field === 'image_url' ? 2048 : 200)
       : requiredString(body[field], field.replaceAll('_', ' '), field === 'description' ? 10000 : 500);
     if (isResponse(value)) return value;
@@ -2187,6 +2517,9 @@ const approveApplication = async (request: Request, env: Env): Promise<Response>
     emailResult,
   );
   if (completeError) return completeError;
+  if (emailResult.success) {
+    await processPendingPaymentDocumentVersions(auth.supabase, env, applicationId);
+  }
 
   return json({
     success: true,
@@ -2210,7 +2543,7 @@ const retryNotification = async (request: Request, env: Env): Promise<Response> 
   if (!validId(notificationId)) return errorResponse('Notification ID must be a valid UUID.', 400);
 
   const { data: notification, error: loadError } = await auth.supabase.from('application_notifications')
-    .select('id,application_id,notification_type,recipient_email,attempt_count,status').eq('id', notificationId).maybeSingle();
+    .select('id,application_id,notification_type,recipient_email,attempt_count,status,official_document_issuance_id').eq('id', notificationId).maybeSingle();
   if (loadError) return errorResponse(`Unable to load notification: ${loadError.message}`, 500);
   if (!notification) return errorResponse('Notification record not found.', 404);
   const { data: application, error: appError } = await auth.supabase
@@ -2220,12 +2553,35 @@ const retryNotification = async (request: Request, env: Env): Promise<Response> 
     .maybeSingle();
   if (appError) return errorResponse(`Unable to load application notification context: ${appError.message}`, 500);
 
+  if (notification.notification_type === 'student_payment_update') {
+    if (typeof notification.official_document_issuance_id !== 'string') {
+      return errorResponse('The payment update is missing its official PDF version.', 409);
+    }
+    const result = await processPaymentDocumentIssuance(
+      auth.supabase,
+      env,
+      notification.official_document_issuance_id,
+    );
+    if (result.success) {
+      await processPendingPaymentDocumentVersions(auth.supabase, env, notification.application_id);
+    }
+    return json({
+      success: result.success,
+      status: result.status,
+      version_number: result.version_number,
+      message: result.success
+        ? `Payment update for Version ${result.version_number} sent successfully.`
+        : result.error || 'Payment update remains queued for retry.',
+    });
+  }
+
   let approvalEmail: ApprovalEmail | null = null;
   if (notification.notification_type === 'student_approval') {
     const { data: issuance, error: issuanceError } = await auth.supabase
       .from('official_document_issuances')
       .select('id,application_id,application_reference,snapshot,pdf_object_key,status')
       .eq('application_id', notification.application_id)
+      .eq('version_number', 1)
       .maybeSingle();
     if (issuanceError) return errorResponse('Unable to load the issued official document for this notification.', 500);
     if (!issuance) return errorResponse('The official document snapshot is unavailable for this notification.', 409);
@@ -2272,6 +2628,9 @@ const retryNotification = async (request: Request, env: Env): Promise<Response> 
       emailResult,
     );
     if (completeError) return completeError;
+    if (emailResult.success) {
+      await processPendingPaymentDocumentVersions(auth.supabase, env, notification.application_id);
+    }
     return json({
       success: emailResult.success,
       status: emailResult.success ? 'Sent' : 'Failed',
@@ -2826,6 +3185,10 @@ const validateOfficialDocumentSettings = (
   if (settings.terms.length > 100 || settings.terms.some((term) => !term.trim() || term.length > 1000)) {
     return errorResponse('Provide up to 100 non-empty terms, each no longer than 1,000 characters.', 400);
   }
+  if ((settings.joiningInstructions || []).length > 30 ||
+    (settings.joiningInstructions || []).some((instruction) => !instruction.trim() || instruction.length > 500)) {
+    return errorResponse('Provide up to 30 non-empty joining instructions, each no longer than 500 characters.', 400);
+  }
   if (settings.paymentMethods.length > 12 ||
     settings.paymentMethods.some((method) => !method.trim() || method.length > 100)) {
     return errorResponse('Provide up to 12 payment methods, each no longer than 100 characters.', 400);
@@ -3002,85 +3365,6 @@ const responseWithPdf = (bytes: Uint8Array, filename: string, disposition: 'inli
   });
 };
 
-const getCurrentApplicationDocumentSnapshot = async (
-  supabase: SupabaseClient,
-  applicationId: string,
-  settings: OfficialDocumentSettings,
-): Promise<Record<string, unknown> | Response> => {
-  const { data: application, error: applicationError } = await supabase
-    .from('applications')
-    .select('id,application_reference,student_id,student_name,email,mobile,qualification,program_id,program_name,date_of_birth,address,photo_object_key,approved_at,status')
-    .eq('id', applicationId)
-    .maybeSingle();
-  if (applicationError) return errorResponse('Unable to load the approved application.', 500);
-  if (!application) return errorResponse('Application record not found.', 404);
-  if (application.status !== 'Accepted' || !application.student_id) {
-    return errorResponse('A student ID is assigned only after application approval.', 409);
-  }
-  if (typeof application.photo_object_key !== 'string') {
-    return errorResponse('The approved application does not have a private passport photograph.', 409);
-  }
-
-  let program: Record<string, unknown> = {
-    id: application.program_id,
-    name: application.program_name,
-    duration: null,
-    level: null,
-  };
-  let fee: Record<string, unknown> = {
-    tuition_fee: null,
-    registration_fee: 0,
-    study_material_fee: 0,
-    other_charges: 0,
-    discount_type: 'amount',
-    discount_value: 0,
-    discount_amount: 0,
-    final_payable: null,
-    agreed_total: null,
-  };
-  if (application.program_id) {
-    const [{ data: programRow, error: programError }, { data: feeRow, error: feeError }] = await Promise.all([
-      supabase.from('programs').select('id,title,duration,level').eq('id', application.program_id).maybeSingle(),
-      supabase.from('program_fee_configurations').select('*').eq('program_id', application.program_id).maybeSingle(),
-    ]);
-    if (programError || feeError) return errorResponse('Unable to load the selected course and fee information.', 500);
-    if (programRow) program = { id: programRow.id, name: programRow.title, duration: programRow.duration, level: programRow.level };
-    if (feeRow) {
-      fee = {
-        tuition_fee: feeRow.tuition_fee,
-        registration_fee: feeRow.registration_fee,
-        study_material_fee: feeRow.study_material_fee,
-        other_charges: feeRow.other_charges,
-        discount_type: feeRow.discount_type,
-        discount_value: feeRow.discount_value,
-        discount_amount: feeRow.tuition_fee === null
-          ? 0
-          : feeRow.discount_type === 'percent'
-            ? Number(((Number(feeRow.tuition_fee) + Number(feeRow.registration_fee) +
-              Number(feeRow.study_material_fee) + Number(feeRow.other_charges)) *
-              Number(feeRow.discount_value) / 100).toFixed(2))
-            : Number(feeRow.discount_value),
-        final_payable: feeRow.final_payable,
-        agreed_total: null,
-      };
-    }
-    const { data: agreement, error: agreementError } = await supabase
-      .from('application_fee_agreements')
-      .select('agreed_total')
-      .eq('application_id', applicationId)
-      .maybeSingle();
-    if (agreementError) return errorResponse('Unable to load the agreed application fee.', 500);
-    fee.agreed_total = agreement?.agreed_total ?? null;
-  }
-
-  return {
-    application,
-    program,
-    fee,
-    document_settings: settings,
-  };
-};
-
 const previewOfficialDocument = async (
   request: Request,
   env: Env,
@@ -3089,9 +3373,6 @@ const previewOfficialDocument = async (
   if (isResponse(auth)) return auth;
   const body = await parseJson(request);
   if (isResponse(body)) return body;
-  const applicationId = requiredString(body.application_id, 'Application ID', 64);
-  if (isResponse(applicationId)) return applicationId;
-  if (!validId(applicationId)) return errorResponse('Application ID must be a valid UUID.', 400);
 
   const { data: saved, error: settingsError } = await auth.supabase
     .from('official_document_settings')
@@ -3127,13 +3408,85 @@ const previewOfficialDocument = async (
     });
   if (isResponse(settings)) return settings;
 
-  const snapshot = await getCurrentApplicationDocumentSnapshot(auth.supabase, applicationId, settings);
-  if (isResponse(snapshot)) return snapshot;
+  const snapshot = {
+    application: {
+      id: 'preview-only',
+      application_reference: 'PREVIEW-ONLY',
+      student_id: 'PREVIEW-ONLY',
+      student_name: 'PREVIEW APPLICANT',
+      qualification_category: 'Student',
+      qualification: 'Qualification preview',
+      program_name: 'Selected program (preview)',
+      email: 'parent@example.invalid',
+      mobile: 'Preview contact only',
+      parent_phone: 'Parent phone (preview)',
+      parent_email: 'Parent email (preview)',
+      photo_object_key: null,
+    },
+    program: {
+      name: 'Selected program (preview)',
+      duration: 'Duration preview',
+      mode: 'Course mode preview',
+    },
+    fee: {
+      tuition_fee: 12000,
+      registration_fee: 500,
+      study_material_fee: 500,
+      other_charges: 0,
+      discount_type: 'amount',
+      discount_value: 500,
+      discount_amount: 500,
+      final_payable: 12500,
+      agreed_total: 12500,
+    },
+    payments: [],
+    payment_summary: {
+      total_payable: 12500,
+      total_paid: 0,
+      outstanding_balance: 12500,
+      status: 'pending',
+      payments: [],
+    },
+    document_settings: settings,
+    joining_information: {
+      joiningDate: 'Joining date preview',
+      classSchedule: 'Class schedule preview',
+      classTimings: 'Class timings preview',
+      venue: 'Venue preview',
+    },
+    preview_only: true,
+  };
   const bytes = await generatePdfFromSnapshot(env, snapshot);
   if (isResponse(bytes)) return bytes;
-  const application = snapshot.application as { application_reference: string };
-  const filename = `Official_Document_${application.application_reference.replace(/[^A-Za-z0-9_-]/g, '_')}.pdf`;
-  return responseWithPdf(bytes, filename, body.download === true ? 'attachment' : 'inline');
+  return responseWithPdf(bytes, 'Official_Document_PREVIEW.pdf', body.download === true ? 'attachment' : 'inline');
+};
+
+const getOfficialDocumentVersions = async (
+  request: Request,
+  env: Env,
+): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'admin');
+  if (isResponse(auth)) return auth;
+  const applicationId = new URL(request.url).searchParams.get('application_id') || '';
+  if (!validId(applicationId)) return errorResponse('A valid application_id is required.', 400);
+  const { data, error } = await auth.supabase
+    .from('official_document_issuances')
+    .select('version_number,issuance_type,status,email_status,generated_at,created_at,snapshot')
+    .eq('application_id', applicationId)
+    .order('version_number', { ascending: false });
+  if (error) return errorResponse('Unable to load official document version history.', 500);
+  const versions = (data || []).map((issuance: Record<string, any>) => ({
+    version_number: issuance.version_number,
+    issuance_type: issuance.issuance_type,
+    status: issuance.status,
+    email_status: issuance.email_status,
+    generated_at: issuance.generated_at,
+    created_at: issuance.created_at,
+    payment_status: issuance.snapshot?.payment_summary?.status || 'pending',
+    total_paid: issuance.snapshot?.payment_summary?.total_paid ?? 0,
+    outstanding_balance: issuance.snapshot?.payment_summary?.outstanding_balance ?? null,
+  }));
+  return json(versions);
 };
 
 const getIssuedOfficialDocument = async (
@@ -3142,15 +3495,26 @@ const getIssuedOfficialDocument = async (
 ): Promise<Response> => {
   const auth = await requireAdmin(request, env, 'admin');
   if (isResponse(auth)) return auth;
-  const applicationId = new URL(request.url).searchParams.get('application_id') || '';
+  const url = new URL(request.url);
+  const applicationId = url.searchParams.get('application_id') || '';
   if (!validId(applicationId)) return errorResponse('A valid application_id is required.', 400);
-  const { data: issuance, error } = await auth.supabase
+  const requestedVersion = url.searchParams.get('version');
+  if (requestedVersion !== null && (!/^\d+$/.test(requestedVersion) || Number(requestedVersion) < 1)) {
+    return errorResponse('version must be a positive integer.', 400);
+  }
+  let issuanceQuery = auth.supabase
     .from('official_document_issuances')
-    .select('id,application_id,application_reference,snapshot,pdf_object_key,status')
-    .eq('application_id', applicationId)
-    .maybeSingle();
+    .select('id,application_id,application_reference,version_number,snapshot,pdf_object_key,status')
+    .eq('application_id', applicationId);
+  if (requestedVersion !== null) {
+    issuanceQuery = issuanceQuery.eq('version_number', Number(requestedVersion));
+  } else {
+    issuanceQuery = issuanceQuery.eq('status', 'ready').order('version_number', { ascending: false }).limit(1);
+  }
+  const { data: issuance, error } = await issuanceQuery.maybeSingle();
   if (error) return errorResponse('Unable to load the issued official document.', 500);
   if (!issuance) return errorResponse('No official document has been issued for this application.', 404);
+  if (issuance.status !== 'ready') return errorResponse('This document version is not ready for download.', 409);
   const bytes = await ensureIssuedOfficialPdf(
     auth.supabase,
     env,
@@ -3161,7 +3525,7 @@ const getIssuedOfficialDocument = async (
   if (isResponse(bytes)) return bytes;
   return responseWithPdf(
     bytes,
-    `Issued_${issuance.application_reference.replace(/[^A-Za-z0-9_-]/g, '_')}.pdf`,
+    `Issued_V${issuance.version_number}_${issuance.application_reference.replace(/[^A-Za-z0-9_-]/g, '_')}.pdf`,
     'attachment',
   );
 };
@@ -3541,6 +3905,11 @@ const createApplicationPayment = async (
   const auth = await requireAdmin(request, env, 'admin');
   if (isResponse(auth)) return auth;
 
+  const idempotencyKey = request.headers.get('Idempotency-Key');
+  if (!idempotencyKey || !validId(idempotencyKey)) {
+    return errorResponse('A valid Idempotency-Key header is required to record a payment.', 400);
+  }
+
   const body = await parseJson(request);
   if (isResponse(body)) return body;
 
@@ -3572,7 +3941,7 @@ const createApplicationPayment = async (
   }
 
   const { data, error } = await auth.supabase.rpc(
-    'create_application_payment',
+    'create_application_payment_idempotent',
     {
       p_application_id: applicationId,
       p_actor: auth.profile.id,
@@ -3581,6 +3950,7 @@ const createApplicationPayment = async (
       p_stage: stage,
       p_reference: reference,
       p_notes: notes,
+      p_idempotency_key: idempotencyKey,
     },
   );
 
@@ -3591,7 +3961,15 @@ const createApplicationPayment = async (
     );
   }
 
-  return json({ payment: data }, 201);
+  const savedPayment = data as Record<string, unknown> | null;
+  const paymentId = typeof savedPayment?.id === 'string' ? savedPayment.id : '';
+  const enqueueError = paymentId
+    ? await enqueuePaymentDocumentVersion(auth.supabase, applicationId, `payment:${paymentId}:created`)
+    : 'Payment was saved, but its ID could not be resolved for PDF versioning.';
+  const documentUpdate = enqueueError
+    ? { success: false, versions: [], error: enqueueError }
+    : await processPendingPaymentDocumentVersions(auth.supabase, env, applicationId);
+  return json({ payment: data, document_update: documentUpdate }, 201);
 };
 
 const updateApplicationPayment = async (
@@ -3656,7 +4034,15 @@ const updateApplicationPayment = async (
     );
   }
 
-  return json({ payment: data });
+  const updatedPayment = data as Record<string, unknown> | null;
+  const applicationId = typeof updatedPayment?.application_id === 'string' ? updatedPayment.application_id : '';
+  const enqueueError = applicationId && updatedPayment?.id
+    ? await enqueuePaymentDocumentVersion(auth.supabase, applicationId, await paymentUpdateEventKey(updatedPayment))
+    : 'Payment saved; its application or payment ID could not be resolved for document processing.';
+  const documentUpdate = enqueueError
+    ? { success: false, versions: [], error: enqueueError }
+    : await processPendingPaymentDocumentVersions(auth.supabase, env, applicationId);
+  return json({ payment: data, document_update: documentUpdate });
 };
 
 const deleteApplicationPayment = async (
@@ -3683,7 +4069,16 @@ const deleteApplicationPayment = async (
     return errorResponse('Unable to delete payment.', 400);
   }
 
-  return json({ result: data });
+  const deletedPayment = data as Record<string, unknown> | null;
+  const applicationId = typeof deletedPayment?.application_id === 'string' ? deletedPayment.application_id : '';
+  const deletedPaymentId = typeof deletedPayment?.payment_id === 'string' ? deletedPayment.payment_id : paymentId;
+  const enqueueError = applicationId
+    ? await enqueuePaymentDocumentVersion(auth.supabase, applicationId, `payment:${deletedPaymentId}:deleted`)
+    : 'Payment deleted; its application could not be resolved for document processing.';
+  const documentUpdate = enqueueError
+    ? { success: false, versions: [], error: enqueueError }
+    : await processPendingPaymentDocumentVersions(auth.supabase, env, applicationId);
+  return json({ result: data, document_update: documentUpdate });
 };
 
 
@@ -3960,6 +4355,10 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     if (pathname === '/api/admin/official-document/preview') {
       if (method === 'POST') return previewOfficialDocument(request, env);
       return methodNotAllowed(['POST']);
+    }
+    if (pathname === '/api/admin/official-document/versions') {
+      if (method === 'GET') return getOfficialDocumentVersions(request, env);
+      return methodNotAllowed(['GET']);
     }
     if (pathname === '/api/admin/official-document/issued') {
       if (method === 'GET') return getIssuedOfficialDocument(request, env);

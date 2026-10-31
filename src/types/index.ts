@@ -64,7 +64,7 @@ export interface StudentApplication {
   created_at: string;
 }
 
-export type NotificationType = 'student_confirmation' | 'staff_notification' | 'student_approval';
+export type NotificationType = 'student_confirmation' | 'staff_notification' | 'student_approval' | 'student_payment_update';
 export type NotificationStatus = 'Pending' | 'Sent' | 'Failed';
 
 export interface ApplicationNotification {
@@ -77,6 +77,7 @@ export interface ApplicationNotification {
   provider_message_id?: string | null;
   error_message?: string | null;
   pdf_attached?: boolean;
+  official_document_issuance_id?: string | null;
   sent_at?: string | null;
   created_at: string;
 }
