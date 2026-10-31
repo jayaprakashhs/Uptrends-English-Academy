@@ -655,7 +655,11 @@ useEffect(() => {
       resetPaymentForm();
       await loadApplicationPaymentData(paymentApp);
       if (result?.document_update?.success === false) {
-        setPaymentError('Payment was saved. Its official PDF or email update is queued for retry from Notifications.');
+        setPaymentError(
+          typeof result.document_update.error === 'string' && result.document_update.error
+            ? result.document_update.error
+            : 'Payment was saved. Its official PDF or email update is queued for retry from Notifications.',
+        );
       }
     } catch (error) {
       setPaymentError(error instanceof Error ? error.message : 'Unable to save payment.');
