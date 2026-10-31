@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { validateApplicationCategoryFields } from '../application-request';
+import { getApplicationPrimaryContact, validateApplicationCategoryFields } from '../application-request';
 
 const shared = {
   place: 'Vijayanagar',
@@ -31,6 +31,22 @@ test('validates Student category and normalizes parent contacts', () => {
     place: 'Vijayanagar',
     city: 'Davangere',
   });
+});
+
+test('uses validated parent contacts as the Student application primary contact', () => {
+  const result = validateApplicationCategoryFields({
+    ...shared,
+    qualification_category: 'Student',
+    parent_phone: '+91 98765 43210',
+    parent_email: ' Parent@Example.com ',
+    school_name: 'Example School',
+  });
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.deepEqual(
+    getApplicationPrimaryContact(result.value, { mobile: '', email: '' }),
+    { mobile: '9876543210', email: 'parent@example.com' },
+  );
 });
 
 test('validates Graduate category and clears student/working-only values', () => {

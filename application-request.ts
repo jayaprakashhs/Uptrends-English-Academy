@@ -18,6 +18,11 @@ export interface ApplicationCategoryFields {
   city: string;
 }
 
+export interface ApplicationPrimaryContact {
+  mobile: string;
+  email: string;
+}
+
 export type ApplicationCategoryField =
   | 'qualification_category'
   | 'qualification'
@@ -30,6 +35,18 @@ export type ApplicationCategoryField =
   | 'city';
 
 export type ApplicationCategoryFieldErrors = Partial<Record<ApplicationCategoryField, string>>;
+
+export const getApplicationPrimaryContact = (
+  categoryFields: ApplicationCategoryFields,
+  fallback: ApplicationPrimaryContact,
+): ApplicationPrimaryContact | null => {
+  if (categoryFields.qualification_category !== 'Student') return fallback;
+  if (!categoryFields.parent_phone || !categoryFields.parent_email) return null;
+  return {
+    mobile: categoryFields.parent_phone,
+    email: categoryFields.parent_email,
+  };
+};
 
 type ApplicationCategoryValidation =
   | { valid: true; value: ApplicationCategoryFields }

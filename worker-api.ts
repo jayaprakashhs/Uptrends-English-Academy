@@ -14,7 +14,7 @@ import {
 } from './application-photo-storage';
 import type { R2BucketBinding } from './worker-r2';
 import { validateDemoClassRequest } from './demo-class-request';
-import { validateApplicationCategoryFields } from './application-request';
+import { getApplicationPrimaryContact, validateApplicationCategoryFields } from './application-request';
 import {
   isValidContactEmail,
   normalizeContactEmail,
@@ -1775,23 +1775,39 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
   const supabase = getSupabaseClient(env, true, 'applications.submit');
   if (!supabase) return errorResponse('Application submission is unavailable because Supabase is not configured.', 503);
 
-  const requiredFields = ['student_name', 'mobile', 'email', 'program_name'] as const;
+  const requiredFields = ['student_name', 'program_name'] as const;
   const fields: Record<string, string> = {};
   for (const field of requiredFields) {
     const value = requiredString(body[field], field.replaceAll('_', ' '), field === 'program_name' ? 300 : 500);
     if (isResponse(value)) return value;
     fields[field] = value;
   }
-  fields.email = normalizeContactEmail(fields.email);
-  if (!isValidContactEmail(fields.email)) return errorResponse('A valid email address is required.', 400);
-  const normalizedMobile = normalizeIndianMobileNumber(fields.mobile);
-  if (!normalizedMobile || fields.mobile.length > 30) return errorResponse('Please provide a valid Indian mobile number.', 400);
-  fields.mobile = normalizedMobile;
   if (body.privacy_consent !== true) return errorResponse('Privacy consent is required to process your application.', 400);
 
   const categoryFields = validateApplicationCategoryFields(body);
   if (!categoryFields.valid) return errorResponse(categoryFields.error, 400);
   fields.qualification = categoryFields.value.qualification;
+
+  let applicationEmail: string;
+  let applicationMobile: string;
+  if (categoryFields.value.qualification_category === 'Student') {
+    const contact = getApplicationPrimaryContact(categoryFields.value, { mobile: '', email: '' });
+    if (!contact) return errorResponse('Valid parent contact details are required for Student applications.', 400);
+    applicationEmail = contact.email;
+    applicationMobile = contact.mobile;
+  } else {
+    const email = requiredString(body.email, 'email', 500);
+    if (isResponse(email)) return email;
+    const mobile = requiredString(body.mobile, 'mobile', 500);
+    if (isResponse(mobile)) return mobile;
+    applicationEmail = email;
+    applicationMobile = mobile;
+  }
+  fields.email = normalizeContactEmail(applicationEmail);
+  if (!isValidContactEmail(fields.email)) return errorResponse('A valid email address is required.', 400);
+  const normalizedMobile = normalizeIndianMobileNumber(applicationMobile);
+  if (!normalizedMobile || applicationMobile.length > 30) return errorResponse('Please provide a valid Indian mobile number.', 400);
+  fields.mobile = normalizedMobile;
 
   const duplicate = await checkContactDuplicates(supabase, 'applications', fields.email, fields.mobile);
   if (isResponse(duplicate)) return duplicate;
