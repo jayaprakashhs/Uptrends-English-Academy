@@ -8,6 +8,11 @@
     "directory": "./dist",
     "binding": "ASSETS"
   },
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  },
   "r2_buckets": [
     {
       "binding": "APPLICATION_MEDIA",

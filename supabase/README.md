@@ -93,11 +93,12 @@ existing server-side Supabase service-role key is used for validation.
 After applying `20261031000003_application_qualification_category.sql`, apply
 `supabase/migrations/20261031000004_official_document_payment_versions.sql`.
 It adds nullable `programs.course_mode`, payment-create idempotency metadata, and
-version/status fields to the existing `official_document_issuances` table. A
-transactional trigger uses the existing `application_payments` ledger to create
-immutable PDF-version snapshots and `student_payment_update` outbox rows after
-authorized payment changes. It does not create duplicate payment, issuance, or
-notification tables and does not delete historical records.
+version/status fields to the existing `official_document_issuances` table.
+The authorized payment RPCs write audit rows in the same transaction as the
+payment mutation; the Worker and service-role reconciliation RPC create
+immutable PDF-version snapshots and `student_payment_update` outbox rows. It
+does not create duplicate payment, issuance, or notification tables and does
+not delete historical records.
 
 The existing private `APPLICATION_MEDIA` R2 binding stores PDFs under
 version-specific keys. The Worker generates each PDF and sends a separate
@@ -105,6 +106,24 @@ payment-update email; failed generation or delivery remains retryable from the
 admin notification workflow. Joining instructions remain in the existing
 `official_document_settings.document_data` JSON configuration. No additional
 environment variables are required.
+
+### Historical Version 1 recovery
+
+After the payment-version and payment-audit recovery migrations have been
+verified, `20261031000006_historical_official_document_recovery.sql` provides
+the service-role-only `create_historical_official_document_version_one(uuid)`
+function. The Worker exposes it only to `super_admin` users at
+`POST /api/admin/official-document/historical-recovery`.
+
+This path is separate from approval: it operates only on an existing Accepted
+application, never updates the application, payment, fee-agreement, or
+notification tables, and never sends an approval email. It reconstructs
+pre-approval payment state from ordered audit records, refuses incomplete or
+ambiguous evidence, and uses an application/version uniqueness constraint for
+idempotency. The generated recovery snapshot records that joining information
+and document settings are not historically verified. The recovery PDF loads the
+current configured `site_branding.logo_url` dynamically and fails visibly if
+that logo is missing or invalid.
 
 ---
 

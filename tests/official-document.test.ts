@@ -485,7 +485,7 @@ test('approval retries failed delivery once and reuses the saved issuance on rep
     qualification: student.qualification,
     program_name: 'Current Editable Course',
   };
-  const issuance = {
+  const issuance: Record<string, any> = {
     id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
     application_id: applicationId,
     application_reference: student.applicationNumber,
@@ -996,7 +996,7 @@ test('a PDF generation failure leaves the recorded payment saved and its version
   const idempotencyKey = '88888888-8888-4888-8888-888888888888';
   let paymentSaved = false;
   let generationFailureRecorded = false;
-  const issuance = {
+  const issuance: Record<string, any> = {
     id: issuanceId,
     application_id: applicationId,
     application_reference: student.applicationNumber,
@@ -1368,6 +1368,14 @@ test('payment PDF version migration reuses existing ledgers, issuance, and notif
     new URL('../supabase/migrations/20261031000004_official_document_payment_versions.sql', import.meta.url),
     'utf8',
   );
+  const recoveryMigration = await readFile(
+    new URL('../supabase/migrations/20261031000005_payment_document_audit_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  const paymentFunctionsMigration = await readFile(
+    new URL('../supabase/migrations/20261026000001_manual_payment_functions.sql', import.meta.url),
+    'utf8',
+  );
   assert.match(migration, /ADD COLUMN IF NOT EXISTS course_mode text/);
   assert.match(migration, /ADD COLUMN IF NOT EXISTS idempotency_key uuid/);
   assert.match(migration, /idx_application_payments_idempotency/);
@@ -1393,4 +1401,509 @@ test('payment PDF version migration reuses existing ledgers, issuance, and notif
   assert.match(migration, /REVOKE ALL ON TABLE public\.application_notifications[\s\S]+TO service_role/);
   assert.doesNotMatch(migration, /CREATE TABLE IF NOT EXISTS public\.(application_payments|application_fee_agreements|official_document_issuances)/);
   assert.doesNotMatch(migration, /DELETE FROM public\.(application_payments|application_fee_agreements|official_document_issuances)/);
+  assert.match(recoveryMigration, /application_payment_audit/);
+  assert.doesNotMatch(recoveryMigration, /DROP CONSTRAINT IF EXISTS application_payment_audit_payment_id_fkey/);
+  assert.match(recoveryMigration, /application_payment_audit_payment_id_fkey must reference application_payments\(id\) with ON DELETE SET NULL/);
+  assert.match(recoveryMigration, /access_method\.amname = 'btree'/);
+  assert.match(recoveryMigration, /index_info\.indisvalid/);
+  assert.match(recoveryMigration, /index_info\.indisready/);
+  assert.match(recoveryMigration, /index_info\.indnkeyatts = 1/);
+  assert.match(recoveryMigration, /index_info\.indkey\[0\] = \([\s\S]+attname = 'event_sequence'/);
+  assert.match(recoveryMigration, /pg_get_expr\(index_info\.indpred, index_info\.indrelid\) = '\(source_event_key IS NOT NULL\)'/);
+  assert.match(recoveryMigration, /application_payment_historical_baseline_meta exists with an incompatible definition/);
+  assert.match(recoveryMigration, /application_payment_historical_baseline exists with an incompatible definition/);
+  assert.match(recoveryMigration, /attribute\.atttypid <> 'int8'::regtype/);
+  assert.match(recoveryMigration, /format_type\(attribute\.atttypid, attribute\.atttypmod\) <> 'numeric\(12,2\)'/);
+  assert.match(recoveryMigration, /FOREIGN KEY \(application_id\) REFERENCES public\.applications\(id\) ON DELETE CASCADE/);
+  assert.match(recoveryMigration, /v_payload_id !~\* '\^\[0-9a-f\]\{8\}/);
+  assert.match(recoveryMigration, /v_payload_uuid <> v_audit\.payment_id/);
+  assert.match(recoveryMigration, /payment-audit:/);
+  assert.match(recoveryMigration, /p_event_key ~ '\^payment-audit:\[0-9a-f\]\{8\}/);
+  assert.match(recoveryMigration, /substring\(p_event_key from 15\)::uuid/);
+  assert.match(recoveryMigration, /SELECT count\(\*\) INTO v_candidate_count/);
+  assert.doesNotMatch(recoveryMigration, /min\(id\)/);
+  assert.match(
+    recoveryMigration,
+    /v_action = 'deleted' AND COALESCE\([\s\S]+before_data->>'created_at'\s*\)\s*=\s*v_event_timestamp\s*\)\s*;\s*IF v_candidate_count <> 1 THEN/,
+  );
+  assert.match(recoveryMigration, /IF v_candidate_count <> 1 THEN[\s\S]+SELECT id INTO v_audit_id/);
+  assert.match(recoveryMigration, /IF v_candidate_count <> 1 THEN/);
+  assert.match(recoveryMigration, /after_data->>'updated_at' = v_event_timestamp/);
+  assert.match(recoveryMigration, /after_data->>'created_at' = v_event_timestamp/);
+  assert.match(recoveryMigration, /COALESCE\(\s*payment_id,\s*CASE WHEN before_data->>'id' ~\* '\^\[0-9a-f\]\{8\}/);
+  assert.match(recoveryMigration, /v_action = 'created' AND after_data->>'created_at' = v_event_timestamp/);
+  assert.match(recoveryMigration, /v_action = 'updated' AND after_data->>'updated_at' = v_event_timestamp/);
+  assert.match(recoveryMigration, /v_action = 'deleted' AND COALESCE\(\s*before_data->>'updated_at',\s*before_data->>'created_at'/);
+  assert.match(recoveryMigration, /before_data->>'id' = v_payment_id::text/);
+  assert.match(recoveryMigration, /before_data->>'id' = v_payment_id::text[\s\S]+v_event_timestamp IS NULL[\s\S]+before_data->>'created_at'/);
+  assert.match(recoveryMigration, /action = v_action/);
+  assert.match(recoveryMigration, /reconcile_payment_document_versions/);
+  assert.match(recoveryMigration, /audit\.changed_at > application\.approved_at/);
+  assert.match(recoveryMigration, /action IN \('created', 'updated', 'deleted'\)/);
+  assert.match(recoveryMigration, /REVOKE ALL ON FUNCTION public\.reconcile_payment_document_versions/);
+  assert.match(recoveryMigration, /build_official_document_snapshot_for_payment_event/);
+  assert.match(recoveryMigration, /version_number = 1/);
+  assert.match(recoveryMigration, /issuance_type = 'approval'/);
+  assert.match(recoveryMigration, /CREATE TABLE IF NOT EXISTS public\.application_payment_historical_baseline/);
+  assert.match(recoveryMigration, /payment_id uuid PRIMARY KEY/);
+  assert.match(recoveryMigration, /payment_method text NOT NULL/);
+  assert.match(recoveryMigration, /payment_stage text NOT NULL/);
+  assert.match(recoveryMigration, /recorded_at timestamptz NOT NULL/);
+  assert.match(recoveryMigration, /LOCK TABLE public\.applications, public\.application_payments\s+IN SHARE MODE/);
+  assert.match(recoveryMigration, /LOCK TABLE public\.application_payment_audit\s+IN SHARE MODE/);
+  assert.match(recoveryMigration, /LOCK TABLE public\.applications[\s\S]+ALTER TABLE public\.application_payment_audit/);
+  assert.match(recoveryMigration, /ROW_NUMBER\(\) OVER \(ORDER BY changed_at ASC, id ASC\)/);
+  assert.match(recoveryMigration, /SET event_sequence = ordered_audit\.sequence_value/);
+  assert.match(recoveryMigration, /pg_get_serial_sequence/);
+  assert.match(recoveryMigration, /setval\(v_sequence_name::regclass, v_max_sequence, true\)/);
+  assert.match(recoveryMigration, /setval\(v_sequence_name::regclass, 1, false\)/);
+  assert.match(recoveryMigration, /IF NOT EXISTS \([\s\S]+application_payment_historical_baseline_meta[\s\S]+WHERE singleton[\s\S]+ROW_NUMBER/);
+  assert.match(recoveryMigration, /CREATE TABLE IF NOT EXISTS public\.application_payment_historical_baseline_meta/);
+  assert.match(recoveryMigration, /event_sequence_watermark bigint NOT NULL/);
+  assert.match(recoveryMigration, /COALESCE\(MAX\(event_sequence\), 0\), transaction_timestamp\(\)/);
+  assert.match(recoveryMigration, /ON CONFLICT \(singleton\) DO NOTHING/);
+  assert.doesNotMatch(recoveryMigration, /ON CONFLICT \(singleton\) DO UPDATE/);
+  assert.match(recoveryMigration, /INSERT INTO public\.application_payment_historical_baseline/);
+  assert.match(recoveryMigration, /transaction_timestamp\(\)/);
+  assert.match(recoveryMigration, /v_event_sequence <= v_baseline_watermark/);
+  assert.match(recoveryMigration, /v_event_sequence > v_baseline_watermark/);
+  assert.match(recoveryMigration, /ORDER BY COALESCE\([\s\S]+event_sequence DESC,\s*id DESC/);
+  assert.match(recoveryMigration, /latest_active_audit_payments/);
+  assert.match(recoveryMigration, /eligible_baseline_payments/);
+  assert.match(recoveryMigration, /event\.payment_id = baseline\.payment_id/);
+  assert.match(recoveryMigration, /SELECT payment_data\s+FROM eligible_baseline_payments/);
+  assert.match(recoveryMigration, /After the watermark, audited state supersedes baseline state/);
+  assert.doesNotMatch(recoveryMigration, /baseline\.created_at <= v_event_changed_at/);
+  assert.match(recoveryMigration, /NOT EXISTS \([\s\S]+application_payment_audit AS audit/);
+  assert.match(recoveryMigration, /event\.payment_id = baseline\.payment_id/);
+  assert.match(recoveryMigration, /ON CONFLICT \(payment_id\) DO NOTHING/);
+  assert.doesNotMatch(recoveryMigration, /SELECT to_jsonb\(payment\)\s+FROM public\.application_payments/);
+  assert.match(recoveryMigration, /event_sequence bigint GENERATED BY DEFAULT AS IDENTITY/);
+  assert.match(recoveryMigration, /event_sequence <= v_event_sequence/);
+  const paymentIdentityExpression =
+    /COALESCE\(\s*payment_id,\s*CASE WHEN before_data->>'id' ~\* '\^\[0-9a-f\]\{8\}/g;
+  assert.ok([...recoveryMigration.matchAll(paymentIdentityExpression)].length >= 1);
+  assert.match(recoveryMigration, /FOR UPDATE/);
+  assert.match(recoveryMigration, /DISTINCT ON \(\s*COALESCE\(\s*payment_id/);
+  assert.match(recoveryMigration, /after_data/);
+  assert.match(recoveryMigration, /Approval issuance snapshot not found/);
+  assert.match(recoveryMigration, /v_approval_snapshot/);
+  assert.match(recoveryMigration, /IF v_approval_snapshot IS NULL THEN/);
+  assert.doesNotMatch(recoveryMigration, /v_snapshot := public\.build_official_document_snapshot\(p_application_id, NULL\)/);
+  assert.match(paymentFunctionsMigration, /before_data/);
+  assert.match(paymentFunctionsMigration, /after_data/);
+
+  for (const source of [paymentFunctionsMigration, migration]) {
+    const createStart = source.indexOf('CREATE OR REPLACE FUNCTION public.create_application_payment');
+    const createEnd = source.indexOf('$$;', createStart);
+    const createBody = source.slice(createStart, createEnd);
+    assert.match(createBody, /FROM public\.applications[\s\S]+FOR UPDATE/);
+    assert.match(createBody, /INSERT INTO public\.application_payments[\s\S]+INSERT INTO public\.application_payment_audit/);
+  }
+});
+
+test('historical Version 1 recovery is isolated, idempotent, and uses strict payment evidence', async () => {
+  const recoveryMigration = await readFile(
+    new URL('../supabase/migrations/20261031000006_historical_official_document_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(recoveryMigration, /create_historical_official_document_version_one/);
+  assert.match(recoveryMigration, /v_application\.status <> 'Accepted'/);
+  assert.match(recoveryMigration, /v_application\.approved_at IS NULL/);
+  assert.match(recoveryMigration, /FOR UPDATE/);
+  assert.match(recoveryMigration, /audit\.changed_at <= v_application\.approved_at/);
+  assert.match(recoveryMigration, /audit\.event_sequence DESC, audit\.id DESC/);
+  assert.match(recoveryMigration, /access_method\.amname = 'btree'/);
+  assert.match(recoveryMigration, /index_info\.indnkeyatts = 2/);
+  assert.match(recoveryMigration, /Existing Version 1 issuance is anomalous and cannot be reused/);
+  assert.match(recoveryMigration, /v_issuance\.application_reference IS DISTINCT FROM v_application\.application_reference/);
+  assert.match(recoveryMigration, /v_issuance\.student_id IS DISTINCT FROM v_application\.student_id/);
+  assert.match(recoveryMigration, /Existing Version 1 issuance identity does not match the application/);
+  assert.match(recoveryMigration, /created_at <= v_application\.approved_at[\s\S]+updated_at <= v_application\.approved_at/);
+  assert.match(recoveryMigration, /Approval-time fee evidence is contradictory/);
+  assert.match(recoveryMigration, /ORDER BY audit\.event_sequence DESC, audit\.id DESC/);
+  assert.match(recoveryMigration, /v_payload_id !~\* '\^\[0-9a-f\]\{8\}/);
+  assert.match(recoveryMigration, /v_payload_uuid <> v_audit\.payment_id/);
+  assert.match(recoveryMigration, /action IN \('created', 'updated', 'deleted'\)/);
+  assert.match(recoveryMigration, /action = 'fee_updated'/);
+  assert.match(recoveryMigration, /Payment audit coverage is incomplete/);
+  assert.match(recoveryMigration, /A payment audit event has no recoverable payment identity/);
+  assert.match(recoveryMigration, /'historical-recovery:approval:' \|\| p_application_id::text/);
+  assert.match(recoveryMigration, /'approval_pdf_was_not_preserved', true/);
+  assert.match(recoveryMigration, /'joining_information', 'unavailable'/);
+  assert.match(recoveryMigration, /'document_settings', 'current_state_only'/);
+  assert.match(recoveryMigration, /ON CONFLICT \(application_id, version_number\) DO NOTHING/);
+  assert.doesNotMatch(recoveryMigration, /INSERT INTO public\.application_notifications/);
+  assert.doesNotMatch(recoveryMigration, /UPDATE public\.applications/);
+  assert.doesNotMatch(recoveryMigration, /INSERT INTO public\.application_payments/);
+  assert.doesNotMatch(recoveryMigration, /UPDATE public\.application_fee_agreements/);
+});
+
+test('historical recovery endpoint creates no approval email and reuses an existing issuance', async () => {
+  const issuanceId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const historicalApplicationId = '20d33902-b695-488f-bba2-414b8eaab2c1';
+  const snapshot = {
+    application: {
+      id: historicalApplicationId,
+      application_reference: 'UEA-2026-D622',
+      student_id: 'UEA-STU-2026-0001',
+      student_name: 'Historical Learner',
+      email: 'historical@example.com',
+      mobile: '+919999999999',
+      qualification: 'Graduate',
+      program_name: 'Spoken English Course - Beginner to Advanced',
+      photo_object_key: null,
+    },
+    program: { id: programId, name: 'Spoken English Course - Beginner to Advanced' },
+    fee: { agreed_total: 10000, final_payable: 10000 },
+    payment_summary: {
+      total_payable: 10000,
+      total_paid: 4000,
+      outstanding_balance: 6000,
+      status: 'partially_paid',
+      payments: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        amount: 4000,
+        payment_method: 'cash',
+        payment_stage: 'first_fee',
+        recorded_at: '2026-10-27T14:00:00Z',
+        reference_number: null,
+      }],
+    },
+    document_settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+    joining_information: {},
+    historical_recovery: {
+      is_historical_recovery: true,
+      document_settings: 'current_state_only',
+      branding: 'current_site_branding_at_pdf_generation',
+    },
+  };
+  const issuance: Record<string, any> = {
+    id: issuanceId,
+    application_id: historicalApplicationId,
+    application_reference: 'UEA-2026-D622',
+    student_id: 'UEA-STU-2026-0001',
+    version_number: 1,
+    issuance_type: 'approval',
+    snapshot,
+    pdf_object_key: null,
+    status: 'pending',
+  };
+  const uploaded: string[] = [];
+  let storedPdf: Uint8Array | null = null;
+  let rpcCalls = 0;
+  let emailCalls = 0;
+  const env = makeWorkerEnv({
+    APPLICATION_MEDIA: {
+      get: async (key: string) => storedPdf && key === `official-documents/${historicalApplicationId}/v1-${issuanceId}.pdf`
+        ? {
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(storedPdf!);
+              controller.close();
+            },
+          }),
+          httpMetadata: { contentType: 'application/pdf' },
+        }
+        : null,
+      put: async (key: string, value: ArrayBuffer | ArrayBufferView) => {
+        uploaded.push(key);
+        storedPdf = value instanceof ArrayBuffer
+          ? new Uint8Array(value)
+          : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      },
+      delete: async () => undefined,
+      list: async () => ({ objects: [] }),
+    },
+  });
+
+  await withAdminFetch('super_admin', async (request, url) => {
+    if (url.hostname === 'branding.example') {
+      return new Response(pngBytes, { headers: { 'content-type': 'image/png' } });
+    }
+    if (url.pathname.endsWith('/rpc/create_historical_official_document_version_one')) {
+      rpcCalls += 1;
+      return Response.json({ created: rpcCalls === 1, issuance });
+    }
+    if (url.pathname.endsWith('/rest/v1/site_branding')) {
+      return Response.json([{ logo_url: 'https://branding.example/logo.png' }]);
+    }
+    if (url.pathname.endsWith('/rest/v1/official_document_issuances')) {
+      assert.equal(request.method, 'PATCH');
+      issuance.pdf_object_key = `official-documents/${historicalApplicationId}/v1-${issuanceId}.pdf`;
+      issuance.status = 'ready';
+      return new Response(null, { status: 204 });
+    }
+    if (url.hostname === 'api.resend.com') {
+      emailCalls += 1;
+      throw new Error('Historical recovery must not call the email provider.');
+    }
+    throw new Error(`Unexpected request: ${url.hostname}${url.pathname}`);
+  }, async () => {
+    const first = await handleApiRequest(
+      authorizedRequest('/api/admin/official-document/historical-recovery', 'POST', {
+        application_id: historicalApplicationId,
+      }),
+      env,
+    );
+    assert.equal(first.status, 200);
+    const firstBody = await first.json() as { created: boolean; email_sent: boolean; status: string };
+    assert.equal(firstBody.created, true);
+    assert.equal(firstBody.email_sent, false);
+    assert.equal(firstBody.status, 'ready');
+
+    const second = await handleApiRequest(
+      authorizedRequest('/api/admin/official-document/historical-recovery', 'POST', {
+        application_id: historicalApplicationId,
+      }),
+      env,
+    );
+    assert.equal(second.status, 200);
+    const secondBody = await second.json() as { created: boolean; email_sent: boolean };
+    assert.equal(secondBody.created, false);
+    assert.equal(secondBody.email_sent, false);
+  });
+
+  assert.deepEqual(uploaded, [`official-documents/${historicalApplicationId}/v1-${issuanceId}.pdf`]);
+  assert.equal(emailCalls, 0);
+});
+
+test('historical recovery logo loading rejects unsafe redirects and caps response bodies', async () => {
+  const workerApi = await readFile(new URL('../worker-api.ts', import.meta.url), 'utf8');
+  assert.match(workerApi, /redirect: 'manual'/);
+  assert.match(workerApi, /isUnsafeHost/);
+  assert.match(workerApi, /parsed\.protocol !== 'https:'/);
+  assert.match(workerApi, /parsed\.username \|\| parsed\.password/);
+  assert.match(workerApi, /getReader\(\)/);
+  assert.match(workerApi, /total > 3 \* 1024 \* 1024/);
+  assert.match(workerApi, /redirect <= 3/);
+});
+
+test('ready issuances reject missing PDF object keys without regeneration or mutation', async () => {
+  const missingKeys = [
+    { name: 'null', value: null },
+    { name: 'undefined', value: undefined },
+    { name: 'empty', value: '   ' },
+  ];
+
+  for (const { name, value } of missingKeys) {
+    let r2Reads = 0;
+    let r2Writes = 0;
+    let databaseUpdates = 0;
+    const issuance = {
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      application_id: applicationId,
+      application_reference: student.applicationNumber,
+      version_number: 1,
+      status: 'ready',
+      pdf_object_key: value,
+      snapshot: { payment_summary: { status: 'pending', total_paid: 0, outstanding_balance: 13000 } },
+    };
+    const env = makeWorkerEnv({
+      APPLICATION_MEDIA: {
+        get: async () => {
+          r2Reads += 1;
+          return null;
+        },
+        put: async () => {
+          r2Writes += 1;
+        },
+        delete: async () => undefined,
+        list: async () => ({ objects: [] }),
+      },
+    });
+
+    await withAdminFetch('admin', async (request, url) => {
+      if (!url.pathname.endsWith('/official_document_issuances')) {
+        throw new Error(`Unexpected request: ${url.pathname}`);
+      }
+      if (request.method === 'PATCH') databaseUpdates += 1;
+      return Response.json([issuance]);
+    }, async () => {
+      const response = await handleApiRequest(
+        authorizedRequest(`/api/admin/official-document/issued?application_id=${applicationId}&version=1`),
+        env,
+      );
+      assert.equal(response.status, 500, name);
+      assert.match(await response.text(), /marked ready.*missing or invalid/i, name);
+    });
+
+    assert.equal(r2Reads, 0, `${name}: R2 must not be read`);
+    assert.equal(r2Writes, 0, `${name}: PDF generation must not write to R2`);
+    assert.equal(databaseUpdates, 0, `${name}: issuance must not be updated`);
+  }
+});
+
+test('ready issuance reuses an existing R2 PDF without regeneration or mutation', async () => {
+  const key = `official-documents/${applicationId}/v1-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.pdf`;
+  const storedPdf = Uint8Array.from(Buffer.from('%PDF-stored-immutable'));
+  let r2Reads = 0;
+  let r2Writes = 0;
+  let databaseUpdates = 0;
+  const env = makeWorkerEnv({
+    APPLICATION_MEDIA: {
+      get: async (requestedKey: string) => {
+        assert.equal(requestedKey, key);
+        r2Reads += 1;
+        return {
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(storedPdf);
+              controller.close();
+            },
+          }),
+          httpMetadata: { contentType: 'application/pdf' },
+        };
+      },
+      put: async () => {
+        r2Writes += 1;
+      },
+      delete: async () => undefined,
+      list: async () => ({ objects: [] }),
+    },
+  });
+
+  await withAdminFetch('admin', async (request, url) => {
+    if (!url.pathname.endsWith('/official_document_issuances')) {
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    }
+    if (request.method === 'PATCH') databaseUpdates += 1;
+    return Response.json([{
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      application_id: applicationId,
+      application_reference: student.applicationNumber,
+      version_number: 1,
+      status: 'ready',
+      pdf_object_key: key,
+      snapshot: {},
+    }]);
+  }, async () => {
+    const response = await handleApiRequest(
+      authorizedRequest(`/api/admin/official-document/issued?application_id=${applicationId}&version=1`),
+      env,
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), storedPdf);
+  });
+
+  assert.equal(r2Reads, 1);
+  assert.equal(r2Writes, 0);
+  assert.equal(databaseUpdates, 0);
+});
+
+test('historical payment fixtures preserve approval-time totals and exclude deleted FCF5 payments', () => {
+  type AuditEvent = {
+    paymentId: string;
+    action: 'created' | 'updated' | 'deleted';
+    amount?: number;
+    sequence: number;
+  };
+  const reconstruct = (events: AuditEvent[]) => {
+    const latest = new Map<string, AuditEvent>();
+    for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
+      latest.set(event.paymentId, event);
+    }
+    return [...latest.values()]
+      .filter((event) => event.action !== 'deleted')
+      .reduce((total, event) => total + (event.amount || 0), 0);
+  };
+
+  assert.equal(reconstruct([
+    { paymentId: 'd622-cash', action: 'created', amount: 4000, sequence: 1 },
+  ]), 4000);
+  assert.equal(reconstruct([
+    { paymentId: 'fcf5-upi-1', action: 'created', amount: 2000, sequence: 1 },
+    { paymentId: 'fcf5-upi-1', action: 'updated', amount: 3000, sequence: 2 },
+    { paymentId: 'fcf5-upi-1', action: 'deleted', sequence: 3 },
+    { paymentId: 'fcf5-cash', action: 'created', amount: 5000, sequence: 4 },
+  ]), 5000);
+  assert.equal(10000 - 4000, 6000);
+  assert.equal(10000 - 5000, 5000);
+});
+
+test('historical payment identity fixtures preserve null foreign keys and event semantics', async () => {
+  const recoveryMigration = await readFile(
+    new URL('../supabase/migrations/20261031000005_payment_document_audit_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  const historicalFixtures = [
+    { application: 'UEA-2026-FCF5', action: 'created', paymentId: null, beforeData: null, afterDataId: 'payment-created' },
+    { application: 'UEA-2026-FCF5', action: 'updated', paymentId: null, beforeData: null, afterDataId: 'payment-updated' },
+    { application: 'UEA-2026-FCF5', action: 'deleted', paymentId: null, beforeData: 'payment-deleted', afterDataId: null },
+    { application: 'UEA-2026-D622', action: 'created', paymentId: 'payment-one', beforeData: null, afterDataId: 'payment-one' },
+    { application: 'UEA-2026-D622', action: 'created', paymentId: 'payment-two', beforeData: null, afterDataId: 'payment-two' },
+  ];
+  assert.equal(historicalFixtures.filter((event) => event.application === 'UEA-2026-FCF5').length, 3);
+  assert.equal(historicalFixtures.filter((event) => event.application === 'UEA-2026-D622').length, 2);
+  assert.equal(historicalFixtures.filter((event) => event.action === 'deleted').length, 1);
+  assert.match(recoveryMigration, /action IN \('created', 'updated', 'deleted'\)/);
+  assert.doesNotMatch(recoveryMigration, /action IN \('created', 'updated', 'deleted', 'fee_updated'\)/);
+  assert.match(recoveryMigration, /WHERE action <> 'deleted'/);
+  assert.match(recoveryMigration, /v_event_sequence <= v_baseline_watermark/);
+  assert.match(recoveryMigration, /v_event_sequence > v_baseline_watermark/);
+  assert.match(recoveryMigration, /latest_active_audit_payments/);
+  assert.match(recoveryMigration, /eligible_baseline_payments/);
+  assert.match(recoveryMigration, /event\.payment_id = baseline\.payment_id/);
+});
+
+test('legacy payment event keys remain canonical and action-specific', async () => {
+  const recoveryMigration = await readFile(
+    new URL('../supabase/migrations/20261031000005_payment_document_audit_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  const worker = await readFile(new URL('../worker-api.ts', import.meta.url), 'utf8');
+  assert.match(worker, /payment:\$\{paymentId\}:created/);
+  assert.match(worker, /payment:\$\{String\(updatedPayment\.id\)\}:updated/);
+  assert.match(worker, /payment:\$\{deletedPaymentId\}:deleted/);
+  assert.match(recoveryMigration, /payment-audit:' \|\| v_audit_id::text/);
+  assert.match(recoveryMigration, /v_action = 'created' AND after_data->>'created_at'/);
+  assert.match(recoveryMigration, /v_action = 'updated' AND after_data->>'updated_at'/);
+  assert.match(recoveryMigration, /v_action = 'deleted' AND COALESCE/);
+  assert.match(recoveryMigration, /IF v_candidate_count <> 1 THEN/);
+});
+
+test('historical payment recovery preserves approval data and handles legacy, audited, and deleted payments', async () => {
+  const recoveryMigration = await readFile(
+    new URL('../supabase/migrations/20261031000005_payment_document_audit_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  const documentMigration = await readFile(
+    new URL('../supabase/migrations/20261031000004_official_document_payment_versions.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(recoveryMigration, /AND action IN \('created', 'updated', 'deleted'\)/);
+  assert.match(recoveryMigration, /WHERE action <> 'deleted'/);
+  assert.match(recoveryMigration, /v_total_payable_text := NULLIF\(v_snapshot->'payment_summary'->>'total_payable'/);
+  assert.match(recoveryMigration, /Approval issuance snapshot contains an invalid payable amount/);
+  assert.match(documentMigration, /v_total_payable := COALESCE\(v_agreement\.agreed_total, v_fee\.final_payable\)/);
+  assert.match(documentMigration, /'agreed_total', v_agreement\.agreed_total/);
+  assert.match(documentMigration, /'final_payable', v_fee\.final_payable/);
+});
+
+test('payment mutation RPCs lock the application before payment and audit writes', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261026000001_manual_payment_functions.sql', import.meta.url),
+    'utf8',
+  );
+  const idempotentMigration = await readFile(
+    new URL('../supabase/migrations/20261031000004_official_document_payment_versions.sql', import.meta.url),
+    'utf8',
+  );
+  for (const functionName of [
+    'update_application_payment',
+    'delete_application_payment',
+  ]) {
+    const functionBody = migration.slice(
+      migration.indexOf(`CREATE OR REPLACE FUNCTION public.${functionName}`),
+      migration.indexOf('$$;', migration.indexOf(`CREATE OR REPLACE FUNCTION public.${functionName}`)),
+    );
+    assert.match(functionBody, /FROM public\.applications[\s\S]+FOR UPDATE/);
+    assert.match(functionBody, /INSERT INTO public\.application_payment_audit/);
+  }
+  const idempotentCreateBody = idempotentMigration.slice(
+    idempotentMigration.indexOf('CREATE OR REPLACE FUNCTION public.create_application_payment_idempotent'),
+    idempotentMigration.indexOf('$$;', idempotentMigration.indexOf('CREATE OR REPLACE FUNCTION public.create_application_payment_idempotent')),
+  );
+  assert.match(idempotentCreateBody, /FROM public\.applications[\s\S]+FOR UPDATE/);
+  assert.match(idempotentCreateBody, /INSERT INTO public\.application_payment_audit/);
 });

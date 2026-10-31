@@ -913,6 +913,124 @@ const courseFromSnapshot = (snapshot: Record<string, any>): OfficialCourse | nul
   };
 };
 
+const loadCurrentBrandingLogo = async (
+  env: Env,
+): Promise<{ bytes: Uint8Array; mime: 'image/jpeg' | 'image/png' } | Response> => {
+  const supabase = getSupabaseClient(env, true, 'official_document.historical_recovery.branding');
+  if (!supabase) return errorResponse('Current academy branding is unavailable.', 503);
+  const { data, error } = await supabase
+    .from('site_branding')
+    .select('logo_url')
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    console.error('Historical recovery could not load the current academy logo.', {
+      operation: 'official_document.historical_recovery.branding',
+      error_code: error.code || 'database_query_failed',
+    });
+    return errorResponse('The current academy logo could not be loaded.', 503);
+  }
+  const logoUrl = typeof data?.logo_url === 'string' ? data.logo_url.trim() : '';
+  if (!logoUrl) return errorResponse('Configure an academy logo before generating the recovery PDF.', 422);
+
+  const isUnsafeHost = (hostname: string): boolean => {
+    const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal') ||
+      host === '0.0.0.0' ||
+      host === '::' ||
+      host === '::1' ||
+      host === '127.0.0.1' ||
+      host === '169.254.169.254'
+    ) return true;
+    const ipv4 = host.match(/^\d{1,3}(?:\.\d{1,3}){3}$/);
+    if (!ipv4) return host.includes(':') && (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb'));
+    const octets = host.split('.').map(Number);
+    return octets[0] === 10 ||
+      (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
+      (octets[0] === 127) ||
+      (octets[0] === 169 && octets[1] === 254) ||
+      (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+      (octets[0] === 192 && octets[1] === 168);
+  };
+  const validateLogoUrl = (value: string): URL | null => {
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || isUnsafeHost(parsed.hostname)) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  let parsedUrl = validateLogoUrl(logoUrl);
+  if (!parsedUrl) return errorResponse('The configured academy logo URL is invalid or unsafe.', 422);
+
+  let response: Response | null = null;
+  const signal = AbortSignal.timeout(5000);
+  for (let redirect = 0; redirect <= 3; redirect += 1) {
+    try {
+      response = await fetch(parsedUrl, { redirect: 'manual', signal });
+    } catch (error) {
+      console.error('Historical recovery could not fetch the current academy logo.', {
+        operation: 'official_document.historical_recovery.branding_fetch',
+        error: messageOf(error),
+      });
+      return errorResponse('The current academy logo could not be fetched.', 503);
+    }
+    if (response.status < 300 || response.status >= 400) break;
+    const location = response.headers.get('location');
+    let redirectedUrl: string | null = null;
+    if (location) {
+      try {
+        redirectedUrl = new URL(location, parsedUrl).toString();
+      } catch {
+        redirectedUrl = null;
+      }
+    }
+    parsedUrl = redirectedUrl ? validateLogoUrl(redirectedUrl) : null;
+    if (!parsedUrl) return errorResponse('The configured academy logo redirects to an invalid or unsafe URL.', 422);
+  }
+  if (!response || !response.ok) return errorResponse('The current academy logo could not be fetched.', 503);
+  const mime = response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase();
+  if (mime !== 'image/png' && mime !== 'image/jpeg') {
+    return errorResponse('The configured academy logo must be a PNG or JPEG image.', 422);
+  }
+  if (!response.body) return errorResponse('The configured academy logo response was empty.', 503);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      total += chunk.value.byteLength;
+      if (total > 3 * 1024 * 1024) {
+        await reader.cancel();
+        return errorResponse('The configured academy logo is too large.', 422);
+      }
+      chunks.push(chunk.value);
+    }
+  } catch (error) {
+    console.error('Historical recovery could not read the current academy logo.', {
+      operation: 'official_document.historical_recovery.branding_read',
+      error: messageOf(error),
+    });
+    return errorResponse('The current academy logo could not be read.', 503);
+  }
+  if (!total) return errorResponse('The configured academy logo is empty.', 422);
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { bytes, mime };
+};
+
 const generatePdfFromSnapshot = async (
   env: Env,
   snapshotValue: unknown,
@@ -941,7 +1059,11 @@ const generatePdfFromSnapshot = async (
     }
     assets.studentPhoto = { bytes: photo.bytes, mime: photo.mime as 'image/jpeg' | 'image/png' };
   }
-  if (settings.logoObjectKey) {
+  if (snapshot.historical_recovery?.is_historical_recovery === true) {
+    const logo = await loadCurrentBrandingLogo(env);
+    if (isResponse(logo)) return logo;
+    assets.logo = logo;
+  } else if (settings.logoObjectKey) {
     const logo = await readPrivateR2Object(env, settings.logoObjectKey, 'official-document-assets');
     if (isResponse(logo)) return logo;
     if (logo.mime === 'image/webp') {
@@ -1032,10 +1154,21 @@ const ensureIssuedOfficialPdf = async (
   snapshot: unknown,
   applicationId: string,
 ): Promise<Uint8Array | Response> => {
-  if (issuance.status === 'ready' && typeof issuance.pdf_object_key === 'string') {
+  if (issuance.status === 'ready') {
+    const storedKey = typeof issuance.pdf_object_key === 'string'
+      ? issuance.pdf_object_key.trim()
+      : '';
+    if (!/^official-documents\/[0-9a-f-]+\/v[0-9]+-[0-9a-f-]+\.pdf$/i.test(storedKey)) {
+      return errorResponse('The issued official PDF is marked ready but its storage key is missing or invalid.', 500);
+    }
+    const storedPdf = await readPrivateR2Object(env, storedKey, 'official-documents');
+    if (isResponse(storedPdf)) return storedPdf;
+    return storedPdf.bytes;
+  }
+
+  if (typeof issuance.pdf_object_key === 'string') {
     const storedPdf = await readPrivateR2Object(env, issuance.pdf_object_key, 'official-documents');
     if (!isResponse(storedPdf)) return storedPdf.bytes;
-    if (storedPdf.status !== 404) return storedPdf;
   }
 
   const versionNumber = Number.isInteger(issuance.version_number) ? issuance.version_number : 1;
@@ -1252,10 +1385,11 @@ const enqueuePaymentDocumentVersion = async (
       p_application_id: applicationId,
       p_event_key: eventKey,
     });
-    const issuanceId = typeof data === 'string'
-      ? data
-      : Array.isArray(data) && typeof data[0] === 'string'
-        ? data[0]
+    const response = Array.isArray(data) ? data[0] : data;
+    const issuanceId = typeof response === 'string'
+      ? response
+      : response && typeof response === 'object'
+        ? Object.values(response as Record<string, unknown>).find((value): value is string => validId(String(value)))
         : null;
     if (!error && issuanceId && validId(issuanceId)) return null;
 
@@ -1271,20 +1405,6 @@ const enqueuePaymentDocumentVersion = async (
     });
     return 'Payment was saved, but its PDF version could not be queued; retry document processing after resolving the queue error.';
   }
-};
-
-const paymentUpdateEventKey = async (payment: Record<string, unknown>): Promise<string> => {
-  const stableFields = JSON.stringify([
-    payment.id,
-    payment.amount,
-    payment.payment_method,
-    payment.payment_stage,
-    payment.reference_number ?? null,
-    payment.notes ?? null,
-  ]);
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableFields));
-  const fingerprint = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
-  return `payment:${String(payment.id)}:updated:${fingerprint}`;
 };
 
 const processPendingPaymentDocumentVersions = async (
@@ -1319,6 +1439,70 @@ const processPendingPaymentDocumentVersions = async (
       error: messageOf(error),
     });
     return { success: false, versions: [], error: 'Payment saved; PDF/email processing is queued for retry.' };
+  }
+};
+
+export const runPaymentDocumentRecovery = async (env: Env): Promise<void> => {
+  const supabase = getSupabaseClient(env, true, 'official_document.payment_version.recovery');
+  if (!supabase) return;
+
+  const { error: reconciliationError } = await supabase.rpc(
+    'reconcile_payment_document_versions',
+    { p_application_id: null },
+  );
+  if (reconciliationError) {
+    console.error('Payment document recovery could not reconcile committed payment events.', {
+      operation: 'official_document.payment_version.recovery.reconcile',
+      error_code: reconciliationError.code || 'database_query_failed',
+    });
+  }
+
+  let cursorCreatedAt: string | null = null;
+  let cursorId: string | null = null;
+  for (;;) {
+    let queueQuery = supabase
+      .from('official_document_issuances')
+      .select('id,application_id,created_at')
+      .eq('issuance_type', 'payment_update')
+      .in('status', ['pending', 'processing', 'failed'])
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(100);
+    if (cursorCreatedAt && cursorId) {
+      queueQuery = queueQuery.or(
+        `created_at.gt.${cursorCreatedAt},and(created_at.eq.${cursorCreatedAt},id.gt.${cursorId})`,
+      );
+    }
+
+    const { data: queuedIssuances, error: queueError } = await queueQuery;
+    if (queueError) {
+      console.error('Payment document recovery could not load queued issuances.', {
+        operation: 'official_document.payment_version.recovery.load',
+        error_code: queueError.code || 'database_query_failed',
+      });
+      return;
+    }
+    if (!queuedIssuances?.length) break;
+
+    const applicationIds = [...new Set(
+      queuedIssuances
+        .map((issuance) => issuance.application_id)
+        .filter((applicationId): applicationId is string => validId(applicationId)),
+    )];
+    for (const applicationId of applicationIds) {
+      const result = await processPendingPaymentDocumentVersions(supabase, env, applicationId);
+      if (!result.success) {
+        console.error('Payment document recovery left queued work for a later retry.', {
+          operation: 'official_document.payment_version.recovery.process',
+          error_code: 'queued_work_remaining',
+        });
+      }
+    }
+
+    const lastIssuance = queuedIssuances[queuedIssuances.length - 1];
+    cursorCreatedAt = typeof lastIssuance.created_at === 'string' ? lastIssuance.created_at : null;
+    cursorId = typeof lastIssuance.id === 'string' ? lastIssuance.id : null;
+    if (!cursorCreatedAt || !cursorId || queuedIssuances.length < 100) break;
   }
 };
 
@@ -2530,6 +2714,54 @@ const approveApplication = async (request: Request, env: Env): Promise<Response>
     pdf_attached: true,
     application_reference: application.application_reference,
     student_id: application.student_id,
+  });
+};
+
+const recoverHistoricalOfficialDocument = async (request: Request, env: Env): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'super_admin');
+  if (isResponse(auth)) return auth;
+  const body = await parseJson(request);
+  if (isResponse(body)) return body;
+  const applicationId = requiredString(body.application_id, 'Application ID', 64);
+  if (isResponse(applicationId)) return applicationId;
+  if (!validId(applicationId)) return errorResponse('Application ID must be a valid UUID.', 400);
+
+  const { data: recoveryResult, error: recoveryError } = await auth.supabase.rpc(
+    'create_historical_official_document_version_one',
+    { p_application_id: applicationId },
+  );
+  if (recoveryError || !recoveryResult || typeof recoveryResult !== 'object' ||
+    !recoveryResult.issuance || typeof recoveryResult.issuance !== 'object') {
+    console.error('Historical official document recovery was refused or failed.', {
+      operation: 'official_document.historical_recovery.create',
+      error_code: recoveryError?.code || 'invalid_response',
+    });
+    return errorResponse(
+      recoveryError?.message || 'Historical Version 1 recovery could not be completed because the evidence was incomplete.',
+      recoveryError ? 409 : 500,
+    );
+  }
+
+  const issuance = recoveryResult.issuance as Record<string, any>;
+  const pdfBytes = await ensureIssuedOfficialPdf(
+    auth.supabase,
+    env,
+    issuance,
+    issuance.snapshot,
+    applicationId,
+  );
+  if (isResponse(pdfBytes)) return pdfBytes;
+
+  return json({
+    success: true,
+    created: recoveryResult.created === true,
+    email_sent: false,
+    issuance_id: issuance.id,
+    version_number: issuance.version_number,
+    status: 'ready',
+    message: recoveryResult.created === true
+      ? 'Historical Version 1 was recovered and stored without sending an approval email.'
+      : 'The existing historical Version 1 was reused without sending an approval email.',
   });
 };
 
@@ -3963,8 +4195,15 @@ const createApplicationPayment = async (
 
   const savedPayment = data as Record<string, unknown> | null;
   const paymentId = typeof savedPayment?.id === 'string' ? savedPayment.id : '';
+  const paymentTimestamp = typeof savedPayment?.updated_at === 'string'
+    ? savedPayment.updated_at
+    : typeof savedPayment?.created_at === 'string' ? savedPayment.created_at : '';
   const enqueueError = paymentId
-    ? await enqueuePaymentDocumentVersion(auth.supabase, applicationId, `payment:${paymentId}:created`)
+    ? await enqueuePaymentDocumentVersion(
+      auth.supabase,
+      applicationId,
+      `payment:${paymentId}:created${paymentTimestamp ? `:${paymentTimestamp}` : ''}`,
+    )
     : 'Payment was saved, but its ID could not be resolved for PDF versioning.';
   const documentUpdate = enqueueError
     ? { success: false, versions: [], error: enqueueError }
@@ -4036,8 +4275,13 @@ const updateApplicationPayment = async (
 
   const updatedPayment = data as Record<string, unknown> | null;
   const applicationId = typeof updatedPayment?.application_id === 'string' ? updatedPayment.application_id : '';
+  const paymentTimestamp = typeof updatedPayment?.updated_at === 'string' ? updatedPayment.updated_at : '';
   const enqueueError = applicationId && updatedPayment?.id
-    ? await enqueuePaymentDocumentVersion(auth.supabase, applicationId, await paymentUpdateEventKey(updatedPayment))
+    ? await enqueuePaymentDocumentVersion(
+      auth.supabase,
+      applicationId,
+      `payment:${String(updatedPayment.id)}:updated${paymentTimestamp ? `:${paymentTimestamp}` : ''}`,
+    )
     : 'Payment saved; its application or payment ID could not be resolved for document processing.';
   const documentUpdate = enqueueError
     ? { success: false, versions: [], error: enqueueError }
@@ -4145,6 +4389,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     if (pathname === '/api/demo-class-requests' && method === 'POST') return submitDemoClassRequest(request, env);
     if (pathname === '/api/callback-request' && method === 'POST') return submitCallback(request, env);
     if (pathname === '/api/approve-application' && method === 'POST') return approveApplication(request, env);
+    if (pathname === '/api/admin/official-document/historical-recovery' && method === 'POST') {
+      return recoverHistoricalOfficialDocument(request, env);
+    }
     if (pathname === '/api/retry-notification' && method === 'POST') return retryNotification(request, env);
 
     if (pathname === '/api/admin/programs') {
@@ -4381,6 +4628,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         '/api/demo-class-requests': ['POST'],
         '/api/callback-request': ['POST'],
         '/api/approve-application': ['POST'],
+        '/api/admin/official-document/historical-recovery': ['POST'],
         '/api/retry-notification': ['POST'],
         '/api/admin/applications': ['GET'],
         '/api/admin/demo-class-requests': ['GET'],
