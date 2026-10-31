@@ -87,7 +87,7 @@ const makeWorkerEnv = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const withAdminFetch = async (
-  role: 'admin' | 'super_admin',
+  role: 'staff' | 'admin' | 'super_admin',
   handleRestRequest: (request: Request, url: URL) => Promise<Response>,
   run: () => Promise<void>,
 ) => {
@@ -625,6 +625,51 @@ test('official PDF settings require super-admin and store uploaded assets privat
   assert.equal(savedSettings[0]?.heading, 'Updated Admission Confirmation');
   assert.equal(uploadedKeys.length, 1);
   assert.match(uploadedKeys[0], /^official-document-assets\/[0-9a-f-]+\.png$/i);
+});
+
+test('enrollment PDF loads the configured private logo through the authenticated asset endpoint', async () => {
+  const logoKey = 'official-document-assets/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.png';
+  let fetchedKey = '';
+  const configuredSettings = { ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS, logoObjectKey: logoKey };
+  const env = makeWorkerEnv({
+    APPLICATION_MEDIA: {
+      get: async (key: string) => {
+        fetchedKey = key;
+        return {
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(pngBytes);
+              controller.close();
+            },
+          }),
+          httpMetadata: { contentType: 'image/png' },
+        };
+      },
+      put: async () => undefined,
+      delete: async () => undefined,
+      list: async () => ({ objects: [] }),
+    },
+  });
+
+  await withAdminFetch('staff', async (request, url) => {
+    if (!url.pathname.endsWith('/official_document_settings')) {
+      throw new Error(`Unexpected Supabase request: ${url.pathname}`);
+    }
+    return Response.json([{ setting_key: 'official_fee_structure', document_data: configuredSettings }]);
+  }, async () => {
+    const response = await handleApiRequest(
+      authorizedRequest('/api/admin/official-document/assets?type=logo'),
+      env,
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/png');
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), pngBytes);
+  });
+
+  assert.equal(fetchedKey, logoKey);
+  const adminPortal = await readFile(new URL('../src/pages/AdminPortal.tsx', import.meta.url), 'utf8');
+  assert.match(adminPortal, /fetchAdmin\('\/api\/admin\/official-document\/assets\?type=logo'/);
+  assert.doesNotMatch(adminPortal, /const logoUrl = "https:\/\/gpnfznwqwaokfzmozpxo\.supabase\.co/);
 });
 
 test('course fee endpoint persists editable fee components for an admin', async () => {

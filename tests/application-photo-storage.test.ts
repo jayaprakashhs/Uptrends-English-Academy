@@ -4,13 +4,32 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  base64DataUrlByteLength,
   legacyUploadFilenameFromMetadata,
+  MAX_APPLICATION_PHOTO_BYTES,
   managedR2ObjectKeyFromMetadata,
 } from '../application-photo-storage';
 import { removeLegacyUploadFile } from '../local-upload-storage';
 
 const legacyReference = '/uploads/1792923450095_1a1oza.jpg';
 const legacyFilename = '1792923450095_1a1oza.jpg';
+
+test('application photo byte limit is exactly 300 KiB and base64 sizes exclude the data URL header', () => {
+  assert.equal(MAX_APPLICATION_PHOTO_BYTES, 300 * 1024);
+  const encodeLength = (sizeBytes: number) => {
+    const padding = sizeBytes % 3 === 0 ? 0 : sizeBytes % 3 === 1 ? 2 : 1;
+    const encodedLength = Math.ceil(sizeBytes / 3) * 4;
+    return `${'A'.repeat(encodedLength - padding)}${'='.repeat(padding)}`;
+  };
+  const exactPayload = encodeLength(MAX_APPLICATION_PHOTO_BYTES);
+  const abovePayload = encodeLength(MAX_APPLICATION_PHOTO_BYTES + 1);
+  const exactDataUrl = `data:image/jpeg;base64,${exactPayload}`;
+  const aboveDataUrl = `data:image/jpeg;base64,${abovePayload}`;
+
+  assert.equal(base64DataUrlByteLength(exactDataUrl), MAX_APPLICATION_PHOTO_BYTES);
+  assert.equal(base64DataUrlByteLength(aboveDataUrl), MAX_APPLICATION_PHOTO_BYTES + 1);
+  assert.equal(base64DataUrlByteLength('not-a-data-url'), null);
+});
 
 test('recognizes the verified legacy local-upload reference and no broader paths', () => {
   assert.equal(legacyUploadFilenameFromMetadata(legacyReference), legacyFilename);

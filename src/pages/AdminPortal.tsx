@@ -175,6 +175,20 @@ interface DashboardDemoRequest {
   created_at: string;
 }
 
+interface RequestEmailNotification {
+  id: string;
+  request_type: 'demo_class_requests' | 'callback_requests';
+  request_id: string;
+  notification_type: 'applicant_confirmation' | 'academy_notification';
+  recipient_email: string;
+  status: 'Pending' | 'Sent' | 'Failed';
+  attempt_count: number;
+  provider_message_id: string | null;
+  error_message: string | null;
+  sent_at: string | null;
+  created_at: string;
+}
+
 const integrationStatusLabel = (health: IntegrationHealth | undefined, missingLabel: string): string => {
   if (!health) return 'Checking...';
   if (health.connected) return 'Connected';
@@ -346,10 +360,16 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   // Data states
   const [applications, setApplications] = useState<StudentApplication[]>([]);
   const [archivedApplications, setArchivedApplications] = useState<StudentApplication[]>([]);
+  const [applicationsLoading, setApplicationsLoading] = useState(false);
+  const [applicationsError, setApplicationsError] = useState<string | null>(null);
+  const [applicationDisplayLimit, setApplicationDisplayLimit] = useState(10);
   const [applicationPhotoCleanupJobs, setApplicationPhotoCleanupJobs] = useState<ApplicationPhotoCleanupJob[]>([]);
   const [programFeeConfigurations, setProgramFeeConfigurations] = useState<Record<string, ProgramFeeConfiguration>>({});
   const [demoRequests, setDemoRequests] = useState<DashboardDemoRequest[]>([]);
+  const [demoRefreshToken, setDemoRefreshToken] = useState(0);
   const [notifications, setNotifications] = useState<ApplicationNotification[]>([]);
+  const [requestEmailNotifications, setRequestEmailNotifications] = useState<RequestEmailNotification[]>([]);
+  const [requestEmailError, setRequestEmailError] = useState<string | null>(null);
   const [callbacks, setCallbacks] = useState<CallbackRequest[]>([]);
   const [callbacksLoading, setCallbacksLoading] = useState(false);
   const [callbacksError, setCallbacksError] = useState<string | null>(null);
@@ -653,6 +673,26 @@ useEffect(() => {
 
   const notifyPublicDataChanged = () => window.dispatchEvent(new Event('admin-data-updated'));
 
+  const loadApplications = async (includeArchived = appFilterStatus === 'Archived') => {
+    setApplicationsLoading(true);
+    setApplicationsError(null);
+    try {
+      const [activeData, archivedData] = await Promise.all([
+        requestJson('/api/admin/applications', { headers: getAuthHeaders() }),
+        includeArchived
+          ? requestJson('/api/admin/applications?archived=true', { headers: getAuthHeaders() })
+          : Promise.resolve(null),
+      ]);
+      if (!Array.isArray(activeData)) throw new Error('The applications response was invalid.');
+      setApplications(activeData);
+      if (Array.isArray(archivedData)) setArchivedApplications(archivedData);
+    } catch (error) {
+      setApplicationsError(error instanceof Error ? error.message : 'Unable to load applications.');
+    } finally {
+      setApplicationsLoading(false);
+    }
+  };
+
   const loadCallbackRequests = async () => {
     setCallbacksLoading(true);
     setCallbacksError(null);
@@ -668,15 +708,28 @@ useEffect(() => {
     }
   };
 
+  const loadRequestEmailNotifications = async () => {
+    if (!isSuperAdmin) return;
+    setRequestEmailError(null);
+    try {
+      const data = await requestJson('/api/admin/request-email-notifications', { headers: getAuthHeaders() });
+      if (!Array.isArray(data)) throw new Error('The request email notification response was invalid.');
+      setRequestEmailNotifications(data);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to load request email notifications.';
+      setRequestEmailError(message);
+    }
+  };
+
   const fetchAllData = async () => {
     void fetchSystemStatus().then(setSystemStatus);
     setLoading(true);
+    void loadApplications();
     void loadCallbackRequests();
+    void loadRequestEmailNotifications();
     try {
       const headers = getAuthHeaders();
       const [
-        appsRes,
-        archivedAppsRes,
         cleanupJobsRes,
         demoRequestsRes,
         notifsRes,
@@ -688,10 +741,6 @@ useEffect(() => {
         brandingRes,
         profilesRes,
       ] = await Promise.all([
-        requestJson('/api/admin/applications', { headers }),
-        appFilterStatus === 'Archived'
-          ? requestJson('/api/admin/applications?archived=true', { headers })
-          : Promise.resolve([]),
         isSuperAdmin
           ? requestJson('/api/admin/application-photo-cleanup-jobs', { headers }).catch((error) => {
             console.error('Unable to load application photo cleanup jobs.', error);
@@ -713,8 +762,6 @@ useEffect(() => {
           : Promise.resolve([]),
       ]);
 
-      if (Array.isArray(appsRes)) setApplications(appsRes);
-      if (Array.isArray(archivedAppsRes)) setArchivedApplications(archivedAppsRes);
       if (Array.isArray(cleanupJobsRes)) setApplicationPhotoCleanupJobs(cleanupJobsRes);
       if (Array.isArray(demoRequestsRes)) setDemoRequests(demoRequestsRes);
       if (Array.isArray(notifsRes)) setNotifications(notifsRes);
@@ -748,21 +795,14 @@ useEffect(() => {
   const refreshRequestData = async () => {
     const requestLists = [
       {
-        endpoint: appFilterStatus === 'Archived'
-          ? '/api/admin/applications?archived=true'
-          : '/api/admin/applications',
-        update: (data: StudentApplication[]) => {
-          if (appFilterStatus === 'Archived') setArchivedApplications(data);
-          else setApplications(data);
-        },
-      },
-      {
         endpoint: '/api/admin/demo-class-requests',
         update: (data: DashboardDemoRequest[]) => setDemoRequests(data),
       },
     ];
 
+    void loadApplications();
     void loadCallbackRequests();
+    setDemoRefreshToken((current) => current + 1);
     await Promise.all(requestLists.map(async ({ endpoint, update }) => {
       try {
         const data = await requestJson(endpoint, { headers: getAuthHeaders() });
@@ -1093,15 +1133,24 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
         .replace(/[–—]/g, '-')
         .replace(/[^\x20-\x7E]/g, '?');
 
-      // Reuse the same public logo asset already used by the website/general PDF.
+      // Reuse the configured official PDF logo.
       try {
-        const logoUrl = "https://gpnfznwqwaokfzmozpxo.supabase.co/storage/v1/object/public/Uptrend's%20English%20Academy-photos/main_logo/UEA_main_03.png";
-        const response = await fetch(logoUrl);
+        const response = await fetchAdmin('/api/admin/official-document/assets?type=logo', {
+          headers: getAuthHeaders(),
+        });
         if (response.ok) {
           const logoBytes = new Uint8Array(await response.arrayBuffer());
-          const logo = await pdf.embedPng(logoBytes);
+          const contentType = response.headers.get('content-type') || '';
+          const logo = contentType.includes('png')
+            ? await pdf.embedPng(logoBytes)
+            : contentType.includes('jpeg') || contentType.includes('jpg')
+              ? await pdf.embedJpg(logoBytes)
+              : null;
+          if (!logo) throw new Error('Configured PDF logo is not a PNG or JPEG image.');
           const logoDims = logo.scale(Math.min(58 / logo.width, 48 / logo.height));
           page.drawImage(logo, { x: left, y: y - 48, width: logoDims.width, height: logoDims.height });
+        } else if (response.status !== 404) {
+          throw new Error('Configured PDF logo could not be loaded.');
         }
       } catch (logoError) {
         // Logo is optional; keep PDF generation available if remote fetch/CORS fails.
@@ -1350,18 +1399,10 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
 
   const handleApplicationFilterChange = (status: 'All' | 'Pending' | 'Accepted' | 'Archived') => {
     setAppFilterStatus(status);
+    setApplicationDisplayLimit(10);
     setActionMessage(null);
     if (status !== 'Archived') return;
-    setLoading(true);
-    void requestJson('/api/admin/applications?archived=true', {
-      headers: getAuthHeaders(),
-    }).then((data) => {
-      if (!Array.isArray(data)) throw new Error('Archived applications response was invalid.');
-      setArchivedApplications(data);
-    }).catch((error) => {
-      const message = error instanceof Error ? error.message : 'Unable to load archived applications.';
-      setActionMessage({ type: 'error', text: message });
-    }).finally(() => setLoading(false));
+    void loadApplications(true);
   };
 
   const handleMarkApplicationPending = async (appId: string) => {
@@ -1444,6 +1485,26 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
       await fetchAllData();
     } catch (err: any) {
       setActionMessage({ type: 'error', text: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRetryRequestEmailNotification = async (notificationId: string) => {
+    setActionMessage(null);
+    setLoading(true);
+    try {
+      const result = await requestJson(
+        `/api/admin/request-email-notifications/${encodeURIComponent(notificationId)}/retry`,
+        { method: 'POST', headers: getAuthHeaders() },
+      );
+      setActionMessage({
+        type: result.success ? 'success' : 'error',
+        text: result.message || 'Request email retry completed.',
+      });
+      await loadRequestEmailNotifications();
+    } catch (error) {
+      setActionMessage({ type: 'error', text: error instanceof Error ? error.message : 'Unable to retry request email.' });
     } finally {
       setLoading(false);
     }
@@ -2049,8 +2110,8 @@ const res = await fetchAdmin(url, {
         : !app.archived_at && (appFilterStatus === 'All' || app.status === appFilterStatus);
       return matchesSearch && matchesStatus;
     })
-    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
-    .slice(0, appFilterStatus === 'Archived' ? undefined : 10);
+    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+  const visibleApplications = filteredApplications.slice(0, applicationDisplayLimit);
 
   const filteredCallbacks = callbacks.filter((callback) => {
     const query = callbackSearch.toLowerCase();
@@ -2715,10 +2776,20 @@ const res = await fetchAdmin(url, {
                   type="text"
                   placeholder="Search by student name, ref, mobile, or email..."
                   value={appSearch}
-                  onChange={(e) => setAppSearch(e.target.value)}
+                  onChange={(e) => {
+                    setAppSearch(e.target.value);
+                    setApplicationDisplayLimit(10);
+                  }}
                   className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
                 />
               </div>
+
+              {applicationsError && (
+                <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+                  {applicationsError}
+                  <button type="button" onClick={() => void loadApplications()} className="ml-3 font-bold underline">Retry</button>
+                </div>
+              )}
 
               {isSuperAdmin && applicationPhotoCleanupJobs.length > 0 && (
                 <section aria-label="Application photo cleanup retries" className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
@@ -2750,8 +2821,8 @@ const res = await fetchAdmin(url, {
               )}
 
               <div className="space-y-4">
-                {filteredApplications.length > 0 ? (
-                  filteredApplications.map((app) => (
+                {visibleApplications.length > 0 ? (
+                  visibleApplications.map((app) => (
                     <article
                       key={app.id}
                       className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs transition-shadow hover:shadow-sm"
@@ -2882,10 +2953,21 @@ const res = await fetchAdmin(url, {
                   ))
                 ) : (
                   <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-12 text-center text-sm text-slate-500">
-                    {loading ? 'Loading applications...' : 'No applications found matching your criteria.'}
+                    {applicationsLoading ? 'Loading applications...' : 'No applications found matching your criteria.'}
                   </div>
                 )}
               </div>
+              {visibleApplications.length < filteredApplications.length && (
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => setApplicationDisplayLimit((current) => current + 10)}
+                    className="min-h-10 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                  >
+                    Load 10 more applications ({filteredApplications.length - visibleApplications.length} remaining)
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -2894,6 +2976,7 @@ const res = await fetchAdmin(url, {
               currentAdmin={currentAdmin}
               onRequestsChanged={refreshRequestData}
               onSessionExpired={onSessionExpired}
+                      refreshToken={demoRefreshToken}
             />
           )}
 
@@ -3699,6 +3782,46 @@ const res = await fetchAdmin(url, {
                   </p>
                 </div>
               </div>
+
+              <section aria-label="Demo and callback email notifications" className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900">Demo and Callback Notifications</h2>
+                  <p className="mt-1 text-xs text-slate-500">Delivery attempts for requests saved outside the application workflow.</p>
+                </div>
+                {requestEmailError && <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{requestEmailError}</p>}
+                {requestEmailNotifications.length ? (
+                  <div className="divide-y divide-slate-100">
+                    {requestEmailNotifications.map((notification) => (
+                      <article key={notification.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0 space-y-1">
+                          <p className="text-xs font-bold text-slate-900">
+                            {notification.request_type === 'demo_class_requests' ? 'Demo class' : 'Callback'} · {notification.notification_type.replace('_', ' ')}
+                          </p>
+                          <p className="break-all text-xs text-slate-600">{notification.recipient_email}</p>
+                          <p className="text-[11px] text-slate-500">
+                            {notification.status} · {notification.attempt_count} attempt{notification.attempt_count === 1 ? '' : 's'}
+                            {notification.error_message ? ` · ${notification.error_message}` : ''}
+                          </p>
+                        </div>
+                        {notification.status !== 'Sent' && (
+                          <button
+                            type="button"
+                            disabled={loading}
+                            onClick={() => void handleRetryRequestEmailNotification(notification.id)}
+                            className="min-h-9 shrink-0 rounded-lg bg-orange-600 px-3 text-xs font-bold text-white hover:bg-orange-700 disabled:opacity-50"
+                          >
+                            Retry email
+                          </button>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="rounded-xl border border-dashed border-slate-300 px-4 py-8 text-center text-xs text-slate-500">
+                    {loading ? 'Loading request email notifications…' : 'No demo or callback email attempts logged.'}
+                  </p>
+                )}
+              </section>
 
               <div className="bg-transparent sm:bg-white rounded-2xl sm:border sm:border-slate-200 sm:shadow-xs overflow-hidden">
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:hidden">

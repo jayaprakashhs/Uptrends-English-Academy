@@ -7,7 +7,11 @@ import {
   type OfficialCourse,
   type OfficialDocumentSettings,
 } from './official-document';
-import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
+import {
+  legacyUploadFilenameFromMetadata,
+  managedR2ObjectKeyFromMetadata,
+  MAX_APPLICATION_PHOTO_BYTES,
+} from './application-photo-storage';
 import type { R2BucketBinding } from './worker-r2';
 import { validateDemoClassRequest } from './demo-class-request';
 import {
@@ -47,7 +51,7 @@ const MAX_JSON_BYTES = 15 * 1024 * 1024;
 const MAX_MEDIA_BYTES = 5 * 1024 * 1024;
 const MAX_BRANDING_IMAGE_BYTES = 1024 * 1024;
 const MAX_BRANDING_LOGO_HERO_IMAGE_BYTES = 3 * 1024 * 1024;
-const MAX_PASSPORT_BYTES = 300 * 1024;
+const MAX_PASSPORT_BYTES = MAX_APPLICATION_PHOTO_BYTES;
 const ROLE_RANK: Record<string, number> = { staff: 1, admin: 2, super_admin: 3 };
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -335,7 +339,7 @@ const contactAcknowledgement = () => json({
   message: 'We received your request. If it can be processed, the academy will contact you.',
 }, 202);
 
-const duplicateContactResponse = contactAcknowledgement;
+const duplicateContactResponse = () => errorResponse('A request using this email or mobile already exists for this form.', 409);
 
 const isDuplicateContactError = (
   error: { code?: string; message?: string } | null | undefined,
@@ -343,11 +347,13 @@ const isDuplicateContactError = (
 
 const checkContactDuplicates = async (
   supabase: SupabaseClient,
+  sourceTable: 'applications' | 'demo_class_requests' | 'callback_requests',
   email: string | null,
   mobile: string | null,
 ): Promise<boolean | Response> => {
   try {
     const { data, error } = await supabase.rpc('check_application_contact_duplicate', {
+      p_source_table: sourceTable,
       p_email: email,
       p_mobile: mobile,
     });
@@ -624,12 +630,86 @@ const sendEmail = async (
   }
 };
 
-const insertNotification = async (
+type RequestEmailType = 'applicant_confirmation' | 'academy_notification';
+type RequestTable = 'demo_class_requests' | 'callback_requests';
+
+interface RequestEmailMessage {
+  notification_type: RequestEmailType;
+  recipient_email: string;
+  subject: string;
+  html: string;
+  text?: string;
+}
+
+const sendAndTrackRequestEmails = async (
   supabase: SupabaseClient,
-  record: Record<string, unknown>,
-): Promise<Response | null> => {
-  const { error } = await supabase.from('application_notifications').insert(record);
-  return error ? errorResponse(`Email was processed, but its notification could not be recorded: ${error.message}`, 500) : null;
+  env: Env,
+  requestType: RequestTable,
+  requestId: string,
+  messages: RequestEmailMessage[],
+): Promise<void> => {
+  const createdAt = new Date().toISOString();
+  const rows = messages.map((message) => ({
+    id: crypto.randomUUID(),
+    request_type: requestType,
+    request_id: requestId,
+    notification_type: message.notification_type,
+    recipient_email: message.recipient_email,
+    status: 'Pending',
+    attempt_count: 1,
+    created_at: createdAt,
+  }));
+  let queueAvailable = false;
+  let queueErrorCode: string | undefined;
+  try {
+    const { error } = await supabase.from('request_email_notifications').insert(rows);
+    queueAvailable = !error;
+    queueErrorCode = error?.code;
+  } catch {
+    queueErrorCode = 'request_failed';
+  }
+  if (!queueAvailable) {
+    console.error('Request was saved but notification tracking could not be queued.', {
+      operation: `${requestType}.email_queue`,
+      error_code: queueErrorCode || 'database_query_failed',
+    });
+  }
+
+  await Promise.all(messages.map(async (message, index) => {
+    const row = rows[index];
+    const emailResult = await sendEmail(env, {
+      to: message.recipient_email,
+      subject: message.subject,
+      html: message.html,
+      text: message.text,
+      idempotencyKey: `request-${requestType}-${requestId}-${message.notification_type}`,
+    });
+    if (!emailResult.success) {
+      console.error('Request email delivery failed.', {
+        operation: `${requestType}.${message.notification_type}`,
+        error: emailResult.error || 'Resend did not confirm delivery.',
+      });
+    }
+    if (!queueAvailable) return;
+
+    const updatedAt = new Date().toISOString();
+    try {
+      const { error: updateError } = await supabase.from('request_email_notifications').update({
+        status: emailResult.success ? 'Sent' : 'Failed',
+        provider_message_id: emailResult.provider_message_id,
+        error_message: emailResult.error || null,
+        sent_at: emailResult.success ? updatedAt : null,
+        updated_at: updatedAt,
+      }).eq('id', row.id);
+      if (updateError) throw updateError;
+    } catch (error) {
+      console.error('Request email result could not be recorded.', {
+        operation: `${requestType}.email_tracking_update`,
+        notification_type: message.notification_type,
+        error_code: (error as { code?: string }).code || 'request_failed',
+      });
+    }
+  }));
 };
 
 type ApprovalNotificationClaim = {
@@ -1708,7 +1788,7 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
   fields.mobile = normalizedMobile;
   if (body.privacy_consent !== true) return errorResponse('Privacy consent is required to process your application.', 400);
 
-  const duplicate = await checkContactDuplicates(supabase, fields.email, fields.mobile);
+  const duplicate = await checkContactDuplicates(supabase, 'applications', fields.email, fields.mobile);
   if (isResponse(duplicate)) return duplicate;
   if (duplicate) return duplicateContactResponse();
 
@@ -1784,30 +1864,81 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
   const applicationReference = insertedApplication.application_reference;
   const studentHtml = `<div><h2>Uptrend's English Academy</h2><p>Dear <strong>${safeName}</strong>,</p><p>Thank you for applying to Uptrend's English Academy. Your application for <strong>${safeProgram}</strong> is waiting for staff review.</p><p>Application Reference: <strong>${applicationReference}</strong></p></div>`;
   const staffHtml = `<div><h3>New Student Application Received</h3><p>Student: ${safeName}<br>Program: ${safeProgram}<br>Mobile: ${escapeHtml(fields.mobile)}<br>Email: ${escapeHtml(fields.email)}<br>Qualification: ${escapeHtml(fields.qualification)}<br>Reference: ${applicationReference}</p></div>`;
-  const studentEmail = await sendEmail(env, {
+  const notificationRows = [
+    {
+      id: crypto.randomUUID(),
+      application_id: applicationId,
+      notification_type: 'student_confirmation',
+      recipient_email: fields.email,
+      status: 'Pending',
+      attempt_count: 1,
+      created_at: now,
+    },
+    {
+      id: crypto.randomUUID(),
+      application_id: applicationId,
+      notification_type: 'staff_notification',
+      recipient_email: env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com',
+      status: 'Pending',
+      attempt_count: 1,
+      created_at: now,
+    },
+  ];
+  let applicationNotificationQueueAvailable = false;
+  let applicationNotificationQueueErrorCode: string | undefined;
+  try {
+    const { error } = await supabase.from('application_notifications').insert(notificationRows);
+    applicationNotificationQueueAvailable = !error;
+    applicationNotificationQueueErrorCode = error?.code;
+  } catch {
+    applicationNotificationQueueErrorCode = 'request_failed';
+  }
+  if (!applicationNotificationQueueAvailable) {
+    console.error('Application was saved but notification tracking could not be queued.', {
+      operation: 'applications.submit.notification_queue',
+      error_code: applicationNotificationQueueErrorCode || 'database_query_failed',
+    });
+  }
+
+  const [studentEmail, academyEmail] = await Promise.all([sendEmail(env, {
     to: fields.email,
     subject: "Application Received — Uptrend's English Academy",
     html: studentHtml,
-  });
-  await sendEmail(env, {
+    idempotencyKey: `application-student-confirmation-${applicationId}`,
+  }), sendEmail(env, {
     to: env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com',
     subject: `New Student Application — ${fields.student_name}`,
     html: staffHtml,
-  });
+    idempotencyKey: `application-staff-notification-${applicationId}`,
+  })]);
 
-  const logError = await insertNotification(supabase, {
-    id: crypto.randomUUID(),
-    application_id: applicationId,
-    notification_type: 'student_confirmation',
-    recipient_email: fields.email,
-    status: studentEmail.success ? 'Sent' : 'Failed',
-    attempt_count: 1,
-    provider_message_id: studentEmail.provider_message_id,
-    error_message: studentEmail.error || null,
-    sent_at: studentEmail.success ? now : null,
-    created_at: now,
-  });
-  if (logError) return logError;
+  const emailResults = [studentEmail, academyEmail];
+  for (const [index, result] of emailResults.entries()) {
+    const row = notificationRows[index];
+    if (!result.success) {
+      console.error('Application notification delivery failed.', {
+        operation: `applications.submit.${row.notification_type}`,
+        error: result.error || 'Resend did not confirm delivery.',
+      });
+    }
+    if (!applicationNotificationQueueAvailable) continue;
+    try {
+      const { error: updateError } = await supabase.from('application_notifications').update({
+        status: result.success ? 'Sent' : 'Failed',
+        provider_message_id: result.provider_message_id,
+        error_message: result.error || null,
+        sent_at: result.success ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString(),
+      }).eq('id', row.id);
+      if (updateError) throw updateError;
+    } catch (error) {
+      console.error('Application notification result could not be recorded.', {
+        operation: 'applications.submit.notification_update',
+        notification_type: row.notification_type,
+        error_code: (error as { code?: string }).code || 'request_failed',
+      });
+    }
+  }
 
   return contactAcknowledgement();
 };
@@ -1830,7 +1961,7 @@ const submitDemoClassRequest = async (request: Request, env: Env): Promise<Respo
   if (!requestRecord.mobile || !isValidContactEmail(requestRecord.email)) {
     return errorResponse('Enter a valid email address and Indian mobile number.', 400);
   }
-  const duplicate = await checkContactDuplicates(supabase, requestRecord.email, requestRecord.mobile);
+  const duplicate = await checkContactDuplicates(supabase, 'demo_class_requests', requestRecord.email, requestRecord.mobile);
   if (isResponse(duplicate)) return duplicate;
   if (duplicate) return duplicateContactResponse();
 
@@ -1856,26 +1987,22 @@ const submitDemoClassRequest = async (request: Request, env: Env): Promise<Respo
   const escapedCourse = escapeHtml(educational_qualification);
   const escapedCity = escapeHtml(city);
   const internalEmail = env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com';
-  const [applicantEmail, academyEmail] = await Promise.all([
-    sendEmail(env, {
-      to: email,
+  await sendAndTrackRequestEmails(supabase, env, 'demo_class_requests', saved.id, [
+    {
+      notification_type: 'applicant_confirmation',
+      recipient_email: email,
       subject: "Demo Class Request Received — Uptrend's English Academy",
       html: `<p>Dear ${name},</p><p>Thank you for requesting a free demo class at Uptrend's English Academy. Our team will contact you soon to discuss arrangements.</p><p>Regards,<br>Uptrend's English Academy</p>`,
       text: `Dear ${full_name}, thank you for requesting a free demo class at Uptrend's English Academy. Our team will contact you soon to discuss arrangements.`,
-    }),
-    sendEmail(env, {
-      to: internalEmail,
+    },
+    {
+      notification_type: 'academy_notification',
+      recipient_email: internalEmail,
       subject: `New Demo Class Request — ${full_name}`,
       html: `<h2>New Free Demo Class Request</h2><ul><li>Name: ${name}</li><li>Mobile: ${escapedMobile}</li><li>Email: ${emailAddress}</li><li>Category: ${escapedCategory}</li><li>Qualification / Course: ${escapedCourse}</li><li>City: ${escapedCity}</li></ul><p>Status: Pending</p>`,
       text: `New free demo class request from ${full_name}; mobile ${mobile}; email ${email}; category ${qualification_category}; course ${educational_qualification}; city ${city}.`,
-    }),
+    },
   ]);
-  if (!applicantEmail.success || !academyEmail.success) {
-    console.error('Demo class request email delivery was incomplete.', {
-      applicant_email_sent: applicantEmail.success,
-      academy_notification_sent: academyEmail.success,
-    });
-  }
 
   return contactAcknowledgement();
 };
@@ -1915,20 +2042,25 @@ const submitCallback = async (request: Request, env: Env): Promise<Response> => 
     consent: true,
     status: 'Pending',
   };
-  const duplicate = await checkContactDuplicates(supabase, record.email, record.mobile);
+  const duplicate = await checkContactDuplicates(supabase, 'callback_requests', record.email, record.mobile);
   if (isResponse(duplicate)) return duplicate;
   if (duplicate) return duplicateContactResponse();
-  const { error } = await supabase.from('callback_requests').insert(record);
-  if (error) {
+  const { data: saved, error } = await supabase
+    .from('callback_requests')
+    .insert(record)
+    .select('id')
+    .single();
+  if (error || !saved) {
     if (isDuplicateContactError(error)) return duplicateContactResponse();
     return errorResponse('Failed to record callback request. Please try again.', 500);
   }
 
-  await sendEmail(env, {
-    to: env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com',
+  await sendAndTrackRequestEmails(supabase, env, 'callback_requests', saved.id, [{
+    notification_type: 'academy_notification',
+    recipient_email: env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com',
     subject: `New Callback Request — ${fullName} (${preferredTime})`,
     html: `<p>New callback request received:</p><p><strong>Name:</strong> ${escapeHtml(fullName)}<br><strong>Mobile:</strong> ${escapeHtml(normalizedMobile)}<br><strong>Program:</strong> ${escapeHtml(programName || 'General Inquiry')}<br><strong>Preferred Time:</strong> ${escapeHtml(preferredTime)}<br><strong>Message:</strong> ${escapeHtml(message || 'None')}</p>`,
-  });
+  }]);
   return contactAcknowledgement();
 };
 
@@ -2056,10 +2188,14 @@ const retryNotification = async (request: Request, env: Env): Promise<Response> 
   if (!validId(notificationId)) return errorResponse('Notification ID must be a valid UUID.', 400);
 
   const { data: notification, error: loadError } = await auth.supabase.from('application_notifications')
-    .select('id,application_id,notification_type,recipient_email,attempt_count').eq('id', notificationId).maybeSingle();
+    .select('id,application_id,notification_type,recipient_email,attempt_count,status').eq('id', notificationId).maybeSingle();
   if (loadError) return errorResponse(`Unable to load notification: ${loadError.message}`, 500);
   if (!notification) return errorResponse('Notification record not found.', 404);
-  const { data: application, error: appError } = await auth.supabase.from('applications').select('application_reference,student_id').eq('id', notification.application_id).maybeSingle();
+  const { data: application, error: appError } = await auth.supabase
+    .from('applications')
+    .select('application_reference,student_id,student_name,program_name,mobile,email,qualification')
+    .eq('id', notification.application_id)
+    .maybeSingle();
   if (appError) return errorResponse(`Unable to load application notification context: ${appError.message}`, 500);
 
   let approvalEmail: ApprovalEmail | null = null;
@@ -2122,10 +2258,22 @@ const retryNotification = async (request: Request, env: Env): Promise<Response> 
         : emailResult.error || 'Email provider did not confirm delivery.',
     });
   }
+  if (notification.status === 'Sent') {
+    return json({ success: true, status: 'Sent', message: 'This notification has already been sent.' });
+  }
+  const isStaffNotification = notification.notification_type === 'staff_notification';
+  const fullName = escapeHtml(application?.student_name || 'Student');
+  const programName = escapeHtml(application?.program_name || 'the selected program');
+  const html = isStaffNotification
+    ? `<div><h3>New Student Application Received</h3><p>Student: ${fullName}<br>Program: ${programName}<br>Mobile: ${escapeHtml(application?.mobile || '')}<br>Email: ${escapeHtml(application?.email || '')}<br>Qualification: ${escapeHtml(application?.qualification || '')}<br>Reference: ${escapeHtml(application?.application_reference || notification.application_id)}</p></div>`
+    : `<div><h2>Uptrend's English Academy</h2><p>Dear <strong>${fullName}</strong>,</p><p>Thank you for applying to Uptrend's English Academy. Your application for <strong>${programName}</strong> is waiting for staff review.</p><p>Application Reference: <strong>${escapeHtml(application?.application_reference || notification.application_id)}</strong></p></div>`;
   const emailResult = await sendEmail(env, {
     to: notification.recipient_email,
-    subject: "Application Received — Uptrend's English Academy",
-    html: `<p>Notification retry for application reference: ${escapeHtml(application?.application_reference || notification.application_id)}${application?.student_id ? `<br>Student ID: ${escapeHtml(application.student_id)}` : ''}</p>`,
+    subject: isStaffNotification
+      ? `New Student Application — ${application?.student_name || 'Applicant'}`
+      : "Application Received — Uptrend's English Academy",
+    html,
+    idempotencyKey: `application-${notification.notification_type}-${notification.application_id}`,
   });
   const updatedAt = new Date().toISOString();
   const { error: updateError } = await auth.supabase.from('application_notifications').update({
@@ -2137,6 +2285,109 @@ const retryNotification = async (request: Request, env: Env): Promise<Response> 
     updated_at: updatedAt,
   }).eq('id', notificationId);
   if (updateError) return errorResponse(`Email retry completed, but notification status could not be recorded: ${updateError.message}`, 500);
+  return json({
+    success: emailResult.success,
+    status: emailResult.success ? 'Sent' : 'Failed',
+    message: emailResult.success ? 'Notification sent successfully on retry.' : emailResult.error,
+  });
+};
+
+const listRequestEmailNotifications = async (request: Request, env: Env): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'super_admin');
+  if (isResponse(auth)) return auth;
+  const { data, error } = await auth.supabase
+    .from('request_email_notifications')
+    .select('id,request_type,request_id,notification_type,recipient_email,status,attempt_count,provider_message_id,error_message,sent_at,created_at,updated_at')
+    .order('created_at', { ascending: false });
+  if (error) return errorResponse(`Unable to load request email notifications: ${error.message}`, 500);
+  return json(data || []);
+};
+
+const retryRequestEmailNotification = async (
+  request: Request,
+  env: Env,
+  notificationId: string,
+): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'super_admin');
+  if (isResponse(auth)) return auth;
+  const { data: notification, error: notificationError } = await auth.supabase
+    .from('request_email_notifications')
+    .select('id,request_type,request_id,notification_type,recipient_email,status,attempt_count')
+    .eq('id', notificationId)
+    .maybeSingle();
+  if (notificationError) return errorResponse('Unable to load the request email notification.', 500);
+  if (!notification) return errorResponse('Request email notification not found.', 404);
+  if (notification.status === 'Sent') {
+    return json({ success: true, status: 'Sent', message: 'This notification has already been sent.' });
+  }
+
+  const table: RequestTable | null = notification.request_type === 'demo_class_requests'
+    ? 'demo_class_requests'
+    : notification.request_type === 'callback_requests'
+      ? 'callback_requests'
+      : null;
+  if (!table) return errorResponse('Request email notification type is invalid.', 500);
+
+  const columns = table === 'demo_class_requests'
+    ? 'full_name,mobile,email,qualification_category,educational_qualification,city'
+    : 'full_name,mobile,email,program_name,preferred_contact_time,message';
+  const { data: source, error: sourceError } = await auth.supabase
+    .from(table)
+    .select(columns)
+    .eq('id', notification.request_id)
+    .maybeSingle();
+  if (sourceError) return errorResponse('Unable to load the saved request for email retry.', 500);
+  if (!source) return errorResponse('The saved request was deleted; its email cannot be retried.', 404);
+
+  let subject: string;
+  let html: string;
+  let text: string | undefined;
+  if (table === 'demo_class_requests') {
+    const requestData = source as {
+      full_name: string; mobile: string; email: string; qualification_category: string;
+      educational_qualification: string; city: string;
+    };
+    const name = escapeHtml(requestData.full_name);
+    if (notification.notification_type === 'applicant_confirmation') {
+      subject = "Demo Class Request Received — Uptrend's English Academy";
+      html = `<p>Dear ${name},</p><p>Thank you for requesting a free demo class at Uptrend's English Academy. Our team will contact you soon to discuss arrangements.</p><p>Regards,<br>Uptrend's English Academy</p>`;
+      text = `Dear ${requestData.full_name}, thank you for requesting a free demo class at Uptrend's English Academy. Our team will contact you soon to discuss arrangements.`;
+    } else if (notification.notification_type === 'academy_notification') {
+      subject = `New Demo Class Request — ${requestData.full_name}`;
+      html = `<h2>New Free Demo Class Request</h2><ul><li>Name: ${name}</li><li>Mobile: ${escapeHtml(requestData.mobile)}</li><li>Email: ${escapeHtml(requestData.email)}</li><li>Category: ${escapeHtml(requestData.qualification_category)}</li><li>Qualification / Course: ${escapeHtml(requestData.educational_qualification)}</li><li>City: ${escapeHtml(requestData.city)}</li></ul><p>Status: Pending</p>`;
+      text = `New free demo class request from ${requestData.full_name}; mobile ${requestData.mobile}; email ${requestData.email}; category ${requestData.qualification_category}; course ${requestData.educational_qualification}; city ${requestData.city}.`;
+    } else {
+      return errorResponse('Demo request email type is invalid.', 500);
+    }
+  } else {
+    const requestData = source as {
+      full_name: string; mobile: string; email: string | null; program_name: string;
+      preferred_contact_time: string; message: string | null;
+    };
+    if (notification.notification_type !== 'academy_notification') {
+      return errorResponse('Callback request email type is invalid.', 500);
+    }
+    subject = `New Callback Request — ${requestData.full_name} (${requestData.preferred_contact_time})`;
+    html = `<p>New callback request received:</p><p><strong>Name:</strong> ${escapeHtml(requestData.full_name)}<br><strong>Mobile:</strong> ${escapeHtml(requestData.mobile)}<br><strong>Program:</strong> ${escapeHtml(requestData.program_name)}<br><strong>Preferred Time:</strong> ${escapeHtml(requestData.preferred_contact_time)}<br><strong>Message:</strong> ${escapeHtml(requestData.message || 'None')}</p>`;
+  }
+
+  const emailResult = await sendEmail(env, {
+    to: notification.recipient_email,
+    subject,
+    html,
+    text,
+    idempotencyKey: `request-${notification.request_type}-${notification.request_id}-${notification.notification_type}`,
+  });
+  const updatedAt = new Date().toISOString();
+  const { error: updateError } = await auth.supabase.from('request_email_notifications').update({
+    status: emailResult.success ? 'Sent' : 'Failed',
+    attempt_count: (notification.attempt_count || 0) + 1,
+    provider_message_id: emailResult.provider_message_id,
+    error_message: emailResult.error || null,
+    sent_at: emailResult.success ? updatedAt : null,
+    updated_at: updatedAt,
+  }).eq('id', notification.id);
+  if (updateError) return errorResponse('Email retry ran, but its result could not be recorded.', 500);
   return json({
     success: emailResult.success,
     status: emailResult.success ? 'Sent' : 'Failed',
@@ -2897,10 +3148,10 @@ const getOfficialDocumentAsset = async (
   request: Request,
   env: Env,
 ): Promise<Response> => {
-  const auth = await requireAdmin(request, env, 'admin');
-  if (isResponse(auth)) return auth;
   const assetType = new URL(request.url).searchParams.get('type');
   if (assetType !== 'logo' && assetType !== 'graphic') return errorResponse('Asset type must be logo or graphic.', 400);
+  const auth = await requireAdmin(request, env, assetType === 'logo' ? 'staff' : 'admin');
+  if (isResponse(auth)) return auth;
   const settings = await loadOfficialDocumentSettings(auth.supabase);
   if (isResponse(settings)) return settings;
   const key = assetType === 'logo' ? settings.logoObjectKey : settings.graphicObjectKey;
@@ -3607,6 +3858,17 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       return methodNotAllowed(['POST']);
     }
 
+    const requestEmailRetryRoute = pathname.match(/^\/api\/admin\/request-email-notifications\/([^/]+)\/retry$/);
+    if (requestEmailRetryRoute) {
+      let notificationId: string;
+      try { notificationId = decodeURIComponent(requestEmailRetryRoute[1]); } catch {
+        return errorResponse('Invalid request email notification ID.', 400);
+      }
+      if (!validId(notificationId)) return errorResponse('Request email notification ID must be a valid UUID.', 400);
+      if (method === 'POST') return retryRequestEmailNotification(request, env, notificationId);
+      return methodNotAllowed(['POST']);
+    }
+
     const idRoute = pathname.match(/^\/api\/admin\/(programs|announcements|reviews|faqs|media|applications|demo-class-requests|callbacks|profiles)\/([^/]+)$/);
     if (idRoute) {
       let id: string;
@@ -3663,6 +3925,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
     if (pathname === '/api/admin/demo-class-requests' && method === 'GET') return adminTable(request, env, 'demo_class_requests', READ_COLUMNS.demoClassRequests, 'created_at');
     if (pathname === '/api/admin/notifications' && method === 'GET') return adminTable(request, env, 'application_notifications', READ_COLUMNS.notifications, 'created_at', false, 'super_admin');
+    if (pathname === '/api/admin/request-email-notifications' && method === 'GET') return listRequestEmailNotifications(request, env);
     if (pathname === '/api/admin/callbacks' && method === 'GET') return adminTable(request, env, 'callback_requests', READ_COLUMNS.callbacks, 'created_at');
     if (pathname === '/api/admin/profiles' && method === 'GET') return adminTable(request, env, 'admin_profiles', READ_COLUMNS.profiles, 'created_at', true, 'super_admin');
     if (pathname === '/api/admin/branding' && method === 'PUT') return updateBranding(request, env);
@@ -3701,6 +3964,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         '/api/admin/applications': ['GET'],
         '/api/admin/demo-class-requests': ['GET'],
         '/api/admin/notifications': ['GET'],
+        '/api/admin/request-email-notifications': ['GET'],
         '/api/admin/callbacks': ['GET'],
         '/api/admin/profiles': ['GET'],
         '/api/admin/branding': ['PUT'],

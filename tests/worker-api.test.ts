@@ -42,6 +42,19 @@ const contactAcknowledgement = {
   message: 'We received your request. If it can be processed, the academy will contact you.',
 };
 
+const jpegDataUrlOfSize = (sizeBytes: number): string => {
+  const bytes = new Uint8Array(sizeBytes);
+  bytes[0] = 0xff;
+  bytes[1] = 0xd8;
+  bytes[sizeBytes - 2] = 0xff;
+  bytes[sizeBytes - 1] = 0xd9;
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return `data:image/jpeg;base64,${btoa(binary)}`;
+};
+
 const publicContactSubmissions: Array<{
   path: string;
   table: string;
@@ -92,8 +105,8 @@ const publicContactSubmissions: Array<{
 async function submitPublicContact(
   path: string,
   body: Record<string, unknown>,
-  duplicateCheck: () => Response | Promise<Response> = () => Response.json(false),
-  options: { insertDuplicate?: boolean; insertFailure?: boolean; cleanupFailure?: boolean } = {},
+  duplicateCheck: (payload: Record<string, unknown>) => Response | Promise<Response> = () => Response.json(false),
+  options: { insertDuplicate?: boolean; insertFailure?: boolean; notificationLogFailure?: boolean; cleanupFailure?: boolean } = {},
 ) {
   const originalFetch = globalThis.fetch;
   const applicationMedia = mockR2Bucket({ deleteError: options.cleanupFailure });
@@ -105,11 +118,18 @@ async function submitPublicContact(
     const url = new URL(request.url);
     if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
     if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') {
-      duplicateCheckPayloads.push(await request.json() as Record<string, unknown>);
-      return duplicateCheck();
+      const payload = await request.json() as Record<string, unknown>;
+      duplicateCheckPayloads.push(payload);
+      return duplicateCheck(payload);
     }
     if (url.pathname === '/rest/v1/application_notifications') {
-      return new Response(null, { status: 201 });
+      if (options.notificationLogFailure && request.method === 'POST') {
+        return Response.json({ code: 'XX000', message: 'notification log unavailable' }, { status: 500 });
+      }
+      return new Response(null, { status: request.method === 'POST' ? 201 : 204 });
+    }
+    if (url.pathname === '/rest/v1/request_email_notifications') {
+      return new Response(null, { status: request.method === 'POST' ? 201 : 204 });
     }
     if (options.insertFailure && url.pathname === '/rest/v1/callback_requests') {
       return Response.json({ code: 'XX000', message: 'database unavailable' }, { status: 500 });
@@ -122,6 +142,9 @@ async function submitPublicContact(
       insertedRecords.push(record);
       if (url.pathname === '/rest/v1/applications') {
         return Response.json({ application_reference: 'UEA-APP-2026-0001' }, { status: 201 });
+      }
+      if (url.pathname === '/rest/v1/callback_requests') {
+        return Response.json({ id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }, { status: 201 });
       }
       if (url.pathname === '/rest/v1/demo_class_requests') {
         return Response.json({ id: '550e8400-e29b-41d4-a716-446655440000' }, { status: 201 });
@@ -399,10 +422,10 @@ test('staff cannot change hero branding through the admin API', async () => {
   }
 });
 
-test('demo class request deletion is admin-only and deletes the requested record', async () => {
+test('demo class request deletion remains available to admin and super admin only', async () => {
   const originalFetch = globalThis.fetch;
   const requestId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-  let deletingRole: 'staff' | 'admin' = 'staff';
+  let deletingRole: 'staff' | 'admin' | 'super_admin' = 'staff';
   let deleteCount = 0;
   globalThis.fetch = async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
@@ -443,14 +466,90 @@ test('demo class request deletion is admin-only and deletes the requested record
     assert.equal(staffResponse.status, 403);
     assert.equal(deleteCount, 0);
 
-    deletingRole = 'admin';
-    const adminResponse = await handleApiRequest(makeDeleteRequest(), env);
-    assert.equal(adminResponse.status, 200);
-    assert.deepEqual(await adminResponse.json(), {
-      success: true,
-      message: 'Demo class request deleted successfully.',
-    });
-    assert.equal(deleteCount, 1);
+    for (const role of ['admin', 'super_admin'] as const) {
+      deletingRole = role;
+      const response = await handleApiRequest(makeDeleteRequest(), env);
+      assert.equal(response.status, 200, role);
+      assert.deepEqual(await response.json(), {
+        success: true,
+        message: 'Demo class request deleted successfully.',
+      });
+    }
+    assert.equal(deleteCount, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('staff, admin, and super admin can list and update the same demo request', async () => {
+  const originalFetch = globalThis.fetch;
+  const requestId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  let currentRole: 'staff' | 'admin' | 'super_admin' = 'staff';
+  let requestStatus = 'Pending';
+  const requestRecord = {
+    id: requestId,
+    full_name: 'Demo Applicant',
+    mobile: '9876543210',
+    email: 'demo@example.com',
+    qualification_category: 'Student',
+    parent_name: 'Parent',
+    school_or_college_name: 'College',
+    college_name: null,
+    profession: null,
+    educational_qualification: 'B.Com',
+    date_of_birth: '2000-01-01',
+    address: 'Davangere',
+    city: 'Davangere',
+    additional_information: null,
+    status: requestStatus,
+    created_at: '2026-10-31T10:00:00.000Z',
+  };
+
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/auth/v1/user') return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        full_name: 'Test Admin',
+        role: currentRole,
+        is_active: true,
+      }]);
+    }
+    if (url.pathname === '/rest/v1/demo_class_requests' && request.method === 'GET') {
+      assert.equal(url.searchParams.get('order'), 'created_at.desc');
+      return Response.json([requestRecord]);
+    }
+    if (url.pathname === '/rest/v1/demo_class_requests' && request.method === 'PATCH') {
+      requestStatus = (await request.json() as { status: string }).status;
+      return Response.json([{ ...requestRecord, status: requestStatus }]);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const env = {
+      SUPABASE_URL: 'https://project.example',
+      SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+    };
+    for (const role of ['staff', 'admin', 'super_admin'] as const) {
+      currentRole = role;
+      const headers = { Authorization: 'Bearer test-admin-token' };
+      const listResponse = await handleApiRequest(new Request('https://academy.example/api/admin/demo-class-requests', { headers }), env);
+      assert.equal(listResponse.status, 200, role);
+      assert.equal((await listResponse.json() as Array<{ id: string }>)[0].id, requestId);
+
+      const updateResponse = await handleApiRequest(new Request(`https://academy.example/api/admin/demo-class-requests/${requestId}`, {
+        method: 'PUT',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'Completed' }),
+      }), env);
+      assert.equal(updateResponse.status, 200, role);
+      assert.equal((await updateResponse.json() as { status: string }).status, 'Completed');
+      assert.equal(requestStatus, 'Completed');
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -590,6 +689,94 @@ test('all staff roles read the same newest-first callback records and update sha
     ), env);
     assert.equal(invalidStatusResponse.status, 400);
     assert.equal(updateCount, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('request email retries track failures, reuse an idempotency key, and do not resend Sent notifications', async () => {
+  const originalFetch = globalThis.fetch;
+  const notificationId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const requestId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const notification = {
+    id: notificationId,
+    request_type: 'callback_requests',
+    request_id: requestId,
+    notification_type: 'academy_notification',
+    recipient_email: 'academy@example.com',
+    status: 'Failed',
+    attempt_count: 1,
+  };
+  const callback = {
+    full_name: 'Test Student',
+    mobile: '9876543210',
+    email: 'student@example.com',
+    program_name: 'General Inquiry',
+    preferred_contact_time: 'Morning',
+    message: 'Please call after 5.',
+  };
+  const emailKeys: string[] = [];
+  let emailAttempt = 0;
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname === 'project.example' && url.pathname === '/auth/v1/user') {
+      return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    }
+    if (url.hostname === 'project.example' && url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        full_name: 'Test Super Admin',
+        role: 'super_admin',
+        is_active: true,
+      }]);
+    }
+    if (url.hostname === 'project.example' && url.pathname === '/rest/v1/request_email_notifications') {
+      if (request.method === 'GET') return Response.json(notification);
+      if (request.method === 'PATCH') {
+        Object.assign(notification, await request.json() as Partial<typeof notification>);
+        return Response.json([notification]);
+      }
+    }
+    if (url.hostname === 'project.example' && url.pathname === '/rest/v1/callback_requests') {
+      return Response.json(callback);
+    }
+    if (url.hostname === 'api.resend.com' && url.pathname === '/emails') {
+      emailKeys.push(request.headers.get('Idempotency-Key') || '');
+      emailAttempt += 1;
+      if (emailAttempt === 1) return Response.json({ message: 'temporary provider failure' }, { status: 503 });
+      return Response.json({ id: 'resend-message-1' });
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  try {
+    const retryRequest = () => new Request(
+      `https://academy.example/api/admin/request-email-notifications/${notificationId}/retry`,
+      { method: 'POST', headers: { Authorization: 'Bearer test-super-admin-token' } },
+    );
+    const env = {
+      SUPABASE_URL: 'https://project.example',
+      SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+      RESEND_API_KEY: 'test-resend-key',
+    };
+
+    const failedResponse = await handleApiRequest(retryRequest(), env);
+    assert.equal(failedResponse.status, 200);
+    assert.equal((await failedResponse.json() as { status: string }).status, 'Failed');
+    assert.equal(notification.status, 'Failed');
+
+    const sentResponse = await handleApiRequest(retryRequest(), env);
+    assert.equal(sentResponse.status, 200);
+    assert.equal((await sentResponse.json() as { status: string }).status, 'Sent');
+    assert.equal(notification.status, 'Sent');
+
+    const alreadySentResponse = await handleApiRequest(retryRequest(), env);
+    assert.equal(alreadySentResponse.status, 200);
+    assert.equal((await alreadySentResponse.json() as { status: string }).status, 'Sent');
+    assert.equal(emailAttempt, 2);
+    assert.equal(emailKeys[0], emailKeys[1]);
+    assert.equal(emailKeys[0], `request-callback_requests-${requestId}-academy_notification`);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1585,13 +1772,19 @@ test('payment routes reject malformed application and payment IDs', async () => 
   }
 });
 
-test('all public contact submissions normalize contacts, run the duplicate check, and acknowledge accepted requests generically', async () => {
+test('all public contact submissions normalize contacts and check duplicates within their own form type', async () => {
+  const sourceTables = {
+    '/api/apply': 'applications',
+    '/api/demo-class-requests': 'demo_class_requests',
+    '/api/callback-request': 'callback_requests',
+  } as const;
   for (const submission of publicContactSubmissions) {
     const result = await submitPublicContact(submission.path, submission.body);
     assert.equal(result.response.status, 202, submission.path);
     assert.deepEqual(await result.response.json(), contactAcknowledgement, submission.path);
     assert.equal(result.duplicateCheckPayloads.length, 1, submission.path);
     assert.deepEqual(result.duplicateCheckPayloads[0], {
+      p_source_table: sourceTables[submission.path as keyof typeof sourceTables],
       p_email: 'student@example.com',
       p_mobile: '9876543210',
     }, submission.path);
@@ -1613,6 +1806,39 @@ test('all public contact submissions normalize contacts, run the duplicate check
   }
 });
 
+test('application Worker accepts exactly 300 KiB and rejects one byte over before R2 upload', async () => {
+  const submission = publicContactSubmissions.find(({ path }) => path === '/api/apply');
+  assert.ok(submission);
+  const exactResult = await submitPublicContact(submission.path, {
+    ...submission.body,
+    photo_base64: jpegDataUrlOfSize(300 * 1024),
+    photo_mime_type: 'image/jpeg',
+  });
+  assert.equal(exactResult.response.status, 202);
+  assert.equal(exactResult.applicationMedia.puts.length, 1);
+  assert.equal(exactResult.applicationMedia.puts[0].value.byteLength, 300 * 1024);
+
+  const oversizedResult = await submitPublicContact(submission.path, {
+    ...submission.body,
+    photo_base64: jpegDataUrlOfSize(300 * 1024 + 1),
+    photo_mime_type: 'image/jpeg',
+  });
+  assert.equal(oversizedResult.response.status, 400);
+  assert.match((await oversizedResult.response.json() as { error: string }).error, /300 KB limit/i);
+  assert.equal(oversizedResult.applicationMedia.puts.length, 0);
+  assert.equal(oversizedResult.insertedRecords.length, 0);
+});
+
+test('saved application remains successful when notification outbox insertion fails', async () => {
+  const submission = publicContactSubmissions.find(({ path }) => path === '/api/apply');
+  assert.ok(submission);
+  const result = await submitPublicContact(submission.path, submission.body, undefined, { notificationLogFailure: true });
+  assert.equal(result.response.status, 202);
+  assert.deepEqual(await result.response.json(), contactAcknowledgement);
+  assert.equal(result.insertedRecords.filter(({ path }) => path === '/rest/v1/applications').length, 1);
+  assert.equal(result.applicationMedia.puts.length, 1);
+});
+
 test('callback submission returns an error and does not acknowledge success when database insert fails', async () => {
   const submission = publicContactSubmissions.find(({ path }) => path === '/api/callback-request');
   assert.ok(submission);
@@ -1624,22 +1850,50 @@ test('callback submission returns an error and does not acknowledge success when
   assert.equal(result.insertedRecords.length, 0);
 });
 
-test('all public contact submissions return the same generic acknowledgement for duplicates without inserting', async () => {
+test('same-form duplicates return an error and are not reported as saved', async () => {
   for (const submission of publicContactSubmissions) {
     const result = await submitPublicContact(
       submission.path,
       submission.body,
       () => Response.json(true),
     );
-    assert.equal(result.response.status, 202, submission.path);
-    assert.deepEqual(await result.response.json(), contactAcknowledgement, submission.path);
+    assert.equal(result.response.status, 409, submission.path);
+    assert.match((await result.response.json() as { error: string }).error, /already exists for this form/i);
     assert.equal(result.duplicateCheckPayloads.length, 1, submission.path);
     assert.equal(result.insertedRecords.length, 0, submission.path);
     assert.equal(result.applicationMedia.puts.length, 0, submission.path);
   }
 });
 
-test('application duplicate race keeps the generic acknowledgement if R2 cleanup fails', async () => {
+test('identical contact details are accepted independently by each request form', async () => {
+  const sourceTables = {
+    '/api/apply': 'applications',
+    '/api/demo-class-requests': 'demo_class_requests',
+    '/api/callback-request': 'callback_requests',
+  } as const;
+  for (const submission of publicContactSubmissions) {
+    const currentSource = sourceTables[submission.path as keyof typeof sourceTables];
+    const existingContacts = Object.values(sourceTables)
+      .filter((sourceTable) => sourceTable !== currentSource)
+      .map((sourceTable) => ({
+        source_table: sourceTable,
+        email: 'student@example.com',
+        mobile: '9876543210',
+      }));
+    const result = await submitPublicContact(submission.path, submission.body, (payload) => {
+      assert.equal(payload.p_source_table, sourceTables[submission.path as keyof typeof sourceTables]);
+      const duplicate = existingContacts.some((contact) =>
+        contact.source_table === payload.p_source_table &&
+        (contact.email === payload.p_email || contact.mobile === payload.p_mobile),
+      );
+      return Response.json(duplicate);
+    });
+    assert.equal(result.response.status, 202, submission.path);
+    assert.equal(result.insertedRecords.length, 1, submission.path);
+  }
+});
+
+test('application duplicate race returns a conflict and attempts photo cleanup', async () => {
   const submission = publicContactSubmissions.find(({ path }) => path === '/api/apply');
   assert.ok(submission);
   const result = await submitPublicContact(
@@ -1648,8 +1902,8 @@ test('application duplicate race keeps the generic acknowledgement if R2 cleanup
     () => Response.json(false),
     { insertDuplicate: true, cleanupFailure: true },
   );
-  assert.equal(result.response.status, 202);
-  assert.deepEqual(await result.response.json(), contactAcknowledgement);
+  assert.equal(result.response.status, 409);
+  assert.match((await result.response.json() as { error: string }).error, /already exists for this form/i);
   assert.equal(result.insertedRecords.length, 0);
   assert.equal(result.applicationMedia.deletes.length, 1);
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { isValidIndianMobileNumber, validateDemoClassRequest } from '../demo-class-request';
 import { handleApiRequest } from '../worker-api';
@@ -94,10 +95,36 @@ test('demo request admin endpoint remains protected when server credentials are 
   assert.equal(response.status, 503);
 });
 
+test('Admin Portal loads applications independently and refreshes the open demo list', async () => {
+  const adminPortal = await readFile(new URL('../src/pages/AdminPortal.tsx', import.meta.url), 'utf8');
+  const demoRequests = await readFile(new URL('../src/components/AdminDemoClassRequests.tsx', import.meta.url), 'utf8');
+
+  assert.match(adminPortal, /const loadApplications = async/);
+  assert.match(adminPortal, /void loadApplications\(\);[\s\S]*?const headers = getAuthHeaders\(\);[\s\S]*?await Promise\.all/);
+  assert.match(adminPortal, /Load 10 more applications/);
+  assert.match(adminPortal, /refreshToken=\{demoRefreshToken\}/);
+  assert.match(demoRequests, /refreshToken: number/);
+  assert.match(demoRequests, /useEffect\(\(\) => \{\s*void loadRequests\(\);\s*\}, \[currentAdmin\.id, refreshToken\]\)/);
+});
+
+test('request email outbox migration is private and does not delete request records', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261031000002_request_email_outbox.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(migration, /BEGIN;[\s\S]*COMMIT;/);
+  assert.match(migration, /UNIQUE \(request_type, request_id, notification_type\)/);
+  assert.match(migration, /ENABLE ROW LEVEL SECURITY/);
+  assert.match(migration, /REVOKE ALL ON TABLE public\.request_email_notifications FROM PUBLIC, anon, authenticated/);
+  assert.match(migration, /GRANT ALL ON TABLE public\.request_email_notifications TO service_role/);
+  assert.doesNotMatch(migration, /DELETE\s+FROM\s+public\.(applications|demo_class_requests|callback_requests)/i);
+});
+
 test('stores demo requests separately and sends independent applicant and academy emails', async () => {
   const previousFetch = globalThis.fetch;
-  const databaseRequests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const databaseRequests: Array<{ url: string; method: string; body: unknown }> = [];
   const emailMessages: Array<{ to: string | string[]; subject: string }> = [];
+  const outboxStatuses: string[] = [];
 
   globalThis.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -105,13 +132,17 @@ test('stores demo requests separately and sends independent applicant and academ
       if (url.includes('/rpc/check_application_contact_duplicate')) return Response.json(false);
       databaseRequests.push({
         url,
-        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        method: init?.method || 'GET',
+        body: JSON.parse(String(init?.body)) as unknown,
       });
       return Response.json({ id: '550e8400-e29b-41d4-a716-446655440000' }, { status: 201 });
     }
     if (url === 'https://api.resend.com/emails') {
       const email = JSON.parse(String(init?.body)) as { to: string | string[]; subject: string };
       emailMessages.push(email);
+      if (emailMessages.length === 1) {
+        return Response.json({ message: 'temporary Resend failure' }, { status: 503 });
+      }
       return Response.json({ id: `email-${emailMessages.length}` });
     }
     throw new Error(`Unexpected external request: ${url}`);
@@ -134,10 +165,20 @@ test('stores demo requests separately and sends independent applicant and academ
       success: true,
       message: 'We received your request. If it can be processed, the academy will contact you.',
     });
-    assert.equal(databaseRequests.length, 1);
-    assert.match(databaseRequests[0].url, /\/rest\/v1\/demo_class_requests\?/);
-    assert.equal(databaseRequests[0].body.status, 'Pending');
-    assert.equal('photo_object_key' in databaseRequests[0].body, false);
+    const savedRequest = databaseRequests.find(({ url }) => url.includes('/rest/v1/demo_class_requests?'));
+    assert.ok(savedRequest);
+    assert.equal((savedRequest.body as Record<string, unknown>).status, 'Pending');
+    assert.equal('photo_object_key' in (savedRequest.body as Record<string, unknown>), false);
+    const notificationInsert = databaseRequests.find(({ url, method }) =>
+      url.includes('/rest/v1/request_email_notifications?') && method === 'POST');
+    assert.ok(notificationInsert);
+    assert.equal((notificationInsert.body as Array<Record<string, unknown>>).length, 2);
+    assert.equal(databaseRequests.filter(({ url, method }) =>
+      url.includes('/rest/v1/request_email_notifications?') && method === 'PATCH').length, 2);
+    outboxStatuses.push(...databaseRequests
+      .filter(({ url, method }) => url.includes('/rest/v1/request_email_notifications?') && method === 'PATCH')
+      .map(({ body }) => (body as { status: string }).status));
+    assert.deepEqual(outboxStatuses.sort(), ['Failed', 'Sent']);
     assert.equal(emailMessages.length, 2);
     assert.equal(emailMessages[0].to, 'applicant@example.com');
     assert.equal(emailMessages[1].to, 'academy@example.com');

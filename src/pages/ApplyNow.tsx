@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Program } from '../types';
 import { compressPassportPhoto } from '../lib/imageCompressor';
+import { MAX_APPLICATION_PHOTO_BYTES } from '../../application-photo-storage';
 import { CheckCircle2, AlertCircle, Upload, ArrowRight, ShieldCheck, FileCheck, RefreshCw } from 'lucide-react';
 import { isValidContactEmail, normalizeIndianMobileNumber } from '../../contact-validation';
 import { ContactValidationMessage, useContactDuplicateValidation } from '../hooks/useContactDuplicateValidation';
@@ -35,6 +36,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [photoSizeKB, setPhotoSizeKB] = useState<number | null>(null);
+  const [photoSizeBytes, setPhotoSizeBytes] = useState<number | null>(null);
   const [photoMimeType, setPhotoMimeType] = useState<string>('image/jpeg');
   const [compressing, setCompressing] = useState(false);
 
@@ -63,12 +65,14 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
       setPhotoFile(file);
       setPhotoPreview(compressed.base64);
       setPhotoSizeKB(compressed.sizeKB);
+      setPhotoSizeBytes(compressed.sizeBytes);
       setPhotoMimeType(compressed.mimeType);
     } catch (err: any) {
       setErrorMessage(err.message || 'Error compressing passport photo.');
       setPhotoFile(null);
       setPhotoPreview(null);
       setPhotoSizeKB(null);
+      setPhotoSizeBytes(null);
     } finally {
       setCompressing(false);
     }
@@ -99,7 +103,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
       setErrorMessage('A passport-size photograph (300 KB or less) is required.');
       return;
     }
-    if (photoSizeKB && photoSizeKB > 300) {
+    if (photoSizeBytes !== null && photoSizeBytes > MAX_APPLICATION_PHOTO_BYTES) {
       setErrorMessage(`Photograph size (${photoSizeKB} KB) exceeds the 300 KB maximum limit. Please re-upload.`);
       return;
     }
@@ -183,6 +187,7 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                 setPhotoFile(null);
                 setPhotoPreview(null);
                 setPhotoSizeKB(null);
+                setPhotoSizeBytes(null);
               }}
               className="px-6 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer"
             >

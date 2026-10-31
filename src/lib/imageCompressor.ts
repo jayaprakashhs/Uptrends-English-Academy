@@ -1,11 +1,16 @@
+import {
+  base64DataUrlByteLength,
+  MAX_APPLICATION_PHOTO_BYTES,
+} from '../../application-photo-storage';
+
 /**
  * Compresses an image file in the browser using HTML5 Canvas.
  * Ensures the output file size is strictly 300 KB or less.
  */
 export async function compressPassportPhoto(
   file: File,
-  maxSizeKB = 300
-): Promise<{ base64: string; sizeKB: number; mimeType: string }> {
+  maxSizeBytes = MAX_APPLICATION_PHOTO_BYTES,
+): Promise<{ base64: string; sizeBytes: number; sizeKB: number; mimeType: string }> {
   const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
   if (!allowedMimeTypes.includes(file.type)) {
     throw new Error('Unsupported image format. Please upload JPEG, PNG, or WebP.');
@@ -34,57 +39,39 @@ export async function compressPassportPhoto(
           }
         }
 
-        canvas.width = width;
-        canvas.height = height;
-
         const ctx = canvas.getContext('2d');
         if (!ctx) {
           return reject(new Error('Canvas 2D context is not available.'));
         }
 
-        // Fill background with white in case of transparent PNGs
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(img, 0, 0, width, height);
-
-        // Progressively compress starting from 0.9 down to 0.4
-        let quality = 0.9;
-        let base64 = canvas.toDataURL('image/jpeg', quality);
-        let sizeInBytes = Math.round((base64.length * 3) / 4);
-
-        while (sizeInBytes > maxSizeKB * 1024 && quality > 0.3) {
-          quality -= 0.1;
-          base64 = canvas.toDataURL('image/jpeg', quality);
-          sizeInBytes = Math.round((base64.length * 3) / 4);
-        }
-
-        // If still over maxSizeKB, attempt further dimension downscaling
-        if (sizeInBytes > maxSizeKB * 1024) {
-          canvas.width = Math.round(width * 0.7);
-          canvas.height = Math.round(height * 0.7);
+        const qualities = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3];
+        while (width > 0 && height > 0) {
+          canvas.width = width;
+          canvas.height = height;
           ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          quality = 0.7;
-          base64 = canvas.toDataURL('image/jpeg', quality);
-          sizeInBytes = Math.round((base64.length * 3) / 4);
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+
+          for (const quality of qualities) {
+            const base64 = canvas.toDataURL('image/jpeg', quality);
+            const sizeBytes = base64DataUrlByteLength(base64);
+            if (sizeBytes !== null && sizeBytes <= maxSizeBytes) {
+              resolve({
+                base64,
+                sizeBytes,
+                sizeKB: Math.ceil(sizeBytes / 1024 * 10) / 10,
+                mimeType: 'image/jpeg',
+              });
+              return;
+            }
+          }
+
+          if (width === 1 && height === 1) break;
+          width = Math.max(1, Math.floor(width * 0.7));
+          height = Math.max(1, Math.floor(height * 0.7));
         }
 
-        const finalSizeKB = Math.round(sizeInBytes / 1024);
-
-        if (finalSizeKB > maxSizeKB) {
-          return reject(
-            new Error(
-              `Unable to compress image below ${maxSizeKB} KB. Final size is ${finalSizeKB} KB. Please select a smaller photo.`
-            )
-          );
-        }
-
-        resolve({
-          base64,
-          sizeKB: finalSizeKB,
-          mimeType: 'image/jpeg',
-        });
+        reject(new Error(`Unable to compress image below ${maxSizeBytes} bytes. Please select a smaller photo.`));
       };
       img.src = reader.result as string;
     };

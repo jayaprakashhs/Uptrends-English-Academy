@@ -42,6 +42,7 @@ interface AdminDemoClassRequestsProps {
   currentAdmin: AdminProfile;
   onRequestsChanged: () => void;
   onSessionExpired: () => void;
+  refreshToken: number;
 }
 
 const demoStatuses: DemoClassStatus[] = ['Pending', 'Contacted', 'Scheduled', 'Completed', 'Cancelled'];
@@ -63,6 +64,7 @@ export const AdminDemoClassRequests: React.FC<AdminDemoClassRequestsProps> = ({
   currentAdmin,
   onRequestsChanged,
   onSessionExpired,
+  refreshToken,
 }) => {
   const [requests, setRequests] = useState<DemoClassRequest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -101,7 +103,7 @@ export const AdminDemoClassRequests: React.FC<AdminDemoClassRequestsProps> = ({
 
   useEffect(() => {
     void loadRequests();
-  }, []);
+  }, [currentAdmin.id, refreshToken]);
 
   const changeStatus = async (request: DemoClassRequest, status: DemoClassStatus) => {
     setSavingId(request.id);
