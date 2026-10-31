@@ -51,18 +51,18 @@ export const CallbackModal: React.FC<CallbackModalProps> = ({
       return;
     }
 
-    const [emailResult, mobileResult] = await Promise.all([
-      contactValidation.validateEmail(email),
-      contactValidation.validateMobile(mobile),
-    ]);
-    if (emailResult.error || mobileResult.error) {
-      setError(emailResult.error || mobileResult.error || 'Unable to verify your contact information. Please try again.');
-      return;
-    }
-
     setLoading(true);
 
     try {
+      const [emailResult, mobileResult] = await Promise.all([
+        contactValidation.validateEmail(email),
+        contactValidation.validateMobile(mobile),
+      ]);
+      if (emailResult.error || mobileResult.error) {
+        setError(emailResult.error || mobileResult.error || 'Unable to verify your contact information. Please try again.');
+        return;
+      }
+
       const res = await fetch('/api/callback-request', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -77,9 +77,14 @@ export const CallbackModal: React.FC<CallbackModalProps> = ({
         }),
       });
 
-      const data = await res.json();
+      let data: { error?: string } | null = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to submit callback request.');
+        throw new Error(data?.error || 'Unable to submit your callback request. Please try again.');
       }
 
       setSuccess(true);

@@ -80,7 +80,7 @@ export interface CallbackRequest {
   preferred_contact_time: 'Morning' | 'Afternoon' | 'Evening';
   message?: string | null;
   consent: boolean;
-  status: 'New' | 'Contacted' | 'Resolved';
+  status: 'Pending' | 'Contacted' | 'Completed';
   created_at: string;
 }
 

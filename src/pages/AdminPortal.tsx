@@ -351,6 +351,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [demoRequests, setDemoRequests] = useState<DashboardDemoRequest[]>([]);
   const [notifications, setNotifications] = useState<ApplicationNotification[]>([]);
   const [callbacks, setCallbacks] = useState<CallbackRequest[]>([]);
+  const [callbacksLoading, setCallbacksLoading] = useState(false);
+  const [callbacksError, setCallbacksError] = useState<string | null>(null);
   const [programs, setPrograms] = useState<Program[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
@@ -651,9 +653,25 @@ useEffect(() => {
 
   const notifyPublicDataChanged = () => window.dispatchEvent(new Event('admin-data-updated'));
 
+  const loadCallbackRequests = async () => {
+    setCallbacksLoading(true);
+    setCallbacksError(null);
+    try {
+      const data = await requestJson('/api/admin/callbacks', { headers: getAuthHeaders() });
+      if (!Array.isArray(data)) throw new Error('The callback request response was invalid.');
+      setCallbacks(data);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to load callback requests.';
+      setCallbacksError(message);
+    } finally {
+      setCallbacksLoading(false);
+    }
+  };
+
   const fetchAllData = async () => {
     void fetchSystemStatus().then(setSystemStatus);
     setLoading(true);
+    void loadCallbackRequests();
     try {
       const headers = getAuthHeaders();
       const [
@@ -662,7 +680,6 @@ useEffect(() => {
         cleanupJobsRes,
         demoRequestsRes,
         notifsRes,
-        cbsRes,
         progsRes,
         programFeesRes,
         annsRes,
@@ -683,7 +700,6 @@ useEffect(() => {
           : Promise.resolve([]),
         requestJson('/api/admin/demo-class-requests', { headers }),
         isSuperAdmin ? requestJson('/api/admin/notifications', { headers }) : Promise.resolve([]),
-        requestJson('/api/admin/callbacks', { headers }),
         requestJson(isAdminOrHigher ? '/api/admin/programs' : '/api/programs', isAdminOrHigher ? { headers } : undefined),
         isAdminOrHigher ? requestJson('/api/admin/program-fees', { headers }) : Promise.resolve([]),
         requestJson(isAdminOrHigher ? '/api/admin/announcements' : '/api/announcements', isAdminOrHigher ? { headers } : undefined),
@@ -702,7 +718,6 @@ useEffect(() => {
       if (Array.isArray(cleanupJobsRes)) setApplicationPhotoCleanupJobs(cleanupJobsRes);
       if (Array.isArray(demoRequestsRes)) setDemoRequests(demoRequestsRes);
       if (Array.isArray(notifsRes)) setNotifications(notifsRes);
-      if (Array.isArray(cbsRes)) setCallbacks(cbsRes);
       if (Array.isArray(progsRes)) setPrograms(progsRes);
       if (Array.isArray(programFeesRes)) {
         setProgramFeeConfigurations(Object.fromEntries(
@@ -745,12 +760,9 @@ useEffect(() => {
         endpoint: '/api/admin/demo-class-requests',
         update: (data: DashboardDemoRequest[]) => setDemoRequests(data),
       },
-      {
-        endpoint: '/api/admin/callbacks',
-        update: (data: CallbackRequest[]) => setCallbacks(data),
-      },
     ];
 
+    void loadCallbackRequests();
     await Promise.all(requestLists.map(async ({ endpoint, update }) => {
       try {
         const data = await requestJson(endpoint, { headers: getAuthHeaders() });
@@ -1391,7 +1403,7 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
   };
 
   const handleDeleteCallback = async (callback: CallbackRequest) => {
-    if (!isAdminOrHigher || !confirm('Are you sure you want to delete this callback request? This action cannot be undone.')) return;
+    if (!confirm('Are you sure you want to delete this callback request? This action cannot be undone.')) return;
     setLoading(true);
     setActionMessage(null);
     try {
@@ -2020,7 +2032,7 @@ const res = await fetchAdmin(url, {
   const pendingRequestCounts = {
     applications: applications.filter((application) => application.status === 'Pending').length,
     demoClassRequests: demoRequests.filter((request) => request.status === 'Pending').length,
-    callbacks: callbacks.filter((callback) => callback.status === 'New').length,
+    callbacks: callbacks.filter((callback) => callback.status === 'Pending').length,
   };
 
   // Filtered applications
@@ -2621,7 +2633,7 @@ const res = await fetchAdmin(url, {
                       {recentCallbacks.map((callback) => (
                         <div key={callback.id} className="flex min-w-0 items-center justify-between gap-3 py-3">
                           <div className="min-w-0"><p className="truncate text-xs font-semibold text-slate-900">{callback.full_name}</p><p className="mt-1 truncate text-[11px] text-slate-500">{callback.program_name} · {new Date(callback.created_at).toLocaleDateString('en-IN')}</p></div>
-                          <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold ${callback.status === 'Resolved' ? 'bg-emerald-50 text-emerald-700' : callback.status === 'Contacted' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'}`}>{callback.status}</span>
+                          <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold ${callback.status === 'Completed' ? 'bg-emerald-50 text-emerald-700' : callback.status === 'Contacted' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'}`}>{callback.status}</span>
                         </div>
                       ))}
                     </div>
@@ -2903,11 +2915,11 @@ const res = await fetchAdmin(url, {
                 </div>
                 <button
                   type="button"
-                  onClick={fetchAllData}
-                  disabled={loading}
+                  onClick={() => void loadCallbackRequests()}
+                  disabled={callbacksLoading}
                   className="inline-flex min-h-11 items-center justify-center gap-2 self-start rounded-xl border border-white/20 bg-white/10 px-4 py-2.5 text-xs font-bold text-white transition-colors hover:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-300 disabled:opacity-60 sm:self-auto"
                 >
-                  <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
+                  <RefreshCw className={`h-4 w-4 ${callbacksLoading ? 'animate-spin' : ''}`} aria-hidden="true" />
                   Refresh Callbacks
                 </button>
               </header>
@@ -2915,15 +2927,15 @@ const res = await fetchAdmin(url, {
               <section aria-label="Callback request totals" className="grid grid-cols-1 gap-3 min-[400px]:grid-cols-2 xl:grid-cols-4">
                 {[
                   { label: 'Total Requests', count: callbacks.length, description: 'All callback enquiries', icon: PhoneCall, styles: 'border-blue-100 bg-blue-50 text-blue-800', iconStyles: 'bg-blue-100 text-blue-700' },
-                  { label: 'New', count: callbacks.filter((callback) => callback.status === 'New').length, description: 'Awaiting first contact', icon: ClockIcon, styles: 'border-orange-100 bg-orange-50 text-orange-800', iconStyles: 'bg-orange-100 text-orange-700' },
+                  { label: 'Pending', count: callbacks.filter((callback) => callback.status === 'Pending').length, description: 'Awaiting first contact', icon: ClockIcon, styles: 'border-orange-100 bg-orange-50 text-orange-800', iconStyles: 'bg-orange-100 text-orange-700' },
                   { label: 'Contacted', count: callbacks.filter((callback) => callback.status === 'Contacted').length, description: 'Follow-up in progress', icon: Users, styles: 'border-violet-100 bg-violet-50 text-violet-800', iconStyles: 'bg-violet-100 text-violet-700' },
-                  { label: 'Resolved', count: callbacks.filter((callback) => callback.status === 'Resolved').length, description: 'Requests completed', icon: CheckCircle, styles: 'border-emerald-100 bg-emerald-50 text-emerald-800', iconStyles: 'bg-emerald-100 text-emerald-700' },
+                  { label: 'Completed', count: callbacks.filter((callback) => callback.status === 'Completed').length, description: 'Requests completed', icon: CheckCircle, styles: 'border-emerald-100 bg-emerald-50 text-emerald-800', iconStyles: 'bg-emerald-100 text-emerald-700' },
                 ].map(({ label, count, description, icon: Icon, styles, iconStyles }) => (
                   <article key={label} className={`rounded-2xl border p-4 shadow-sm sm:p-5 ${styles}`}>
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="text-xs font-bold">{label}</p>
-                        <p className="mt-2 text-3xl font-extrabold tracking-tight text-[#0B1F4D]">{loading ? '—' : count}</p>
+                        <p className="mt-2 text-3xl font-extrabold tracking-tight text-[#0B1F4D]">{callbacksLoading ? '—' : count}</p>
                         <p className="mt-1 text-[11px] opacity-80">{description}</p>
                       </div>
                       <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${iconStyles}`}>
@@ -2954,10 +2966,16 @@ const res = await fetchAdmin(url, {
                     onChange={(event) => setCallbackFilterStatus(event.target.value as typeof callbackFilterStatus)}
                     className="min-h-9 min-w-32 rounded-lg bg-white px-2 text-sm text-[#0B1F4D] outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
                   >
-                    {(['All', 'New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status === 'All' ? 'All statuses' : status}</option>)}
+                    {(['All', 'Pending', 'Contacted', 'Completed'] as const).map((status) => <option key={status} value={status}>{status === 'All' ? 'All statuses' : status}</option>)}
                   </select>
                 </label>
               </div>
+
+              {callbacksError && filteredCallbacks.length > 0 && (
+                <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                  Could not refresh callback requests: {callbacksError}
+                </p>
+              )}
 
               {filteredCallbacks.length > 0 ? (
                 <>
@@ -2996,7 +3014,7 @@ const res = await fetchAdmin(url, {
                                 <span className="block truncate">{callback.message || 'No message provided'}</span>
                               </td>
                               <td className="whitespace-nowrap px-4 py-4 text-slate-500">
-                                {new Date(callback.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                                {new Date(callback.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}
                               </td>
                               <td className="px-4 py-4">
                                 <label className="sr-only" htmlFor={`callback-status-${callback.id}`}>Status for {callback.full_name}</label>
@@ -3005,26 +3023,24 @@ const res = await fetchAdmin(url, {
                                   value={callback.status}
                                   disabled={loading}
                                   onChange={(event) => handleCallbackStatusChange(callback, event.target.value as CallbackRequest['status'])}
-                                  className={`min-h-9 w-32 rounded-lg border px-2.5 text-xs font-bold outline-none focus-visible:ring-2 focus-visible:ring-orange-500 disabled:opacity-60 ${callback.status === 'Resolved' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : callback.status === 'Contacted' ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
+                                  className={`min-h-9 w-32 rounded-lg border px-2.5 text-xs font-bold outline-none focus-visible:ring-2 focus-visible:ring-orange-500 disabled:opacity-60 ${callback.status === 'Completed' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : callback.status === 'Contacted' ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
                                 >
-                                  {(['New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+                                  {(['Pending', 'Contacted', 'Completed'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
                                 </select>
                               </td>
                               <td className="px-5 py-4">
                                 <div className="flex justify-end gap-2">
                                   <button type="button" disabled={loading} onClick={() => setSelectedCallback(callback)} className="min-h-9 rounded-lg border border-slate-200 bg-white px-3 font-bold text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 disabled:opacity-60">View</button>
-                                  {isAdminOrHigher && (
-                                    <button
-                                      type="button"
-                                      disabled={loading}
-                                      onClick={() => void handleDeleteCallback(callback)}
-                                      aria-label={`Delete callback request from ${callback.full_name}`}
-                                      title="Delete callback request (Admin only)"
-                                      className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 font-bold text-rose-700 transition-colors hover:bg-rose-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-600 disabled:opacity-50"
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />Delete
-                                    </button>
-                                  )}
+                                  <button
+                                    type="button"
+                                    disabled={loading}
+                                    onClick={() => void handleDeleteCallback(callback)}
+                                    aria-label={`Delete callback request from ${callback.full_name}`}
+                                    title="Delete callback request"
+                                    className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 font-bold text-rose-700 transition-colors hover:bg-rose-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-600 disabled:opacity-50"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />Delete
+                                  </button>
                                 </div>
                               </td>
                             </tr>
@@ -3041,7 +3057,7 @@ const res = await fetchAdmin(url, {
                           <div className="min-w-0">
                             <h2 className="break-words font-bold text-[#0B1F4D]">{callback.full_name}</h2>
                             <p className="mt-1 text-[11px] text-slate-500">
-                              Received {new Date(callback.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                              Received {new Date(callback.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}
                             </p>
                           </div>
                           <label className="w-32 shrink-0 space-y-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
@@ -3051,9 +3067,9 @@ const res = await fetchAdmin(url, {
                               value={callback.status}
                               disabled={loading}
                               onChange={(event) => handleCallbackStatusChange(callback, event.target.value as CallbackRequest['status'])}
-                              className={`min-h-9 w-full rounded-lg border px-2 text-xs font-bold normal-case tracking-normal outline-none focus-visible:ring-2 focus-visible:ring-orange-500 disabled:opacity-60 ${callback.status === 'Resolved' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : callback.status === 'Contacted' ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
+                              className={`min-h-9 w-full rounded-lg border px-2 text-xs font-bold normal-case tracking-normal outline-none focus-visible:ring-2 focus-visible:ring-orange-500 disabled:opacity-60 ${callback.status === 'Completed' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : callback.status === 'Contacted' ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
                             >
-                              {(['New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+                              {(['Pending', 'Contacted', 'Completed'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
                             </select>
                           </label>
                         </div>
@@ -3071,17 +3087,15 @@ const res = await fetchAdmin(url, {
                         </p>
                         <div className="flex gap-2 border-t border-slate-100 pt-3">
                           <button type="button" disabled={loading} onClick={() => setSelectedCallback(callback)} className="min-h-10 flex-1 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-60">View details</button>
-                          {isAdminOrHigher && (
-                            <button
-                              type="button"
-                              disabled={loading}
-                              onClick={() => void handleDeleteCallback(callback)}
-                              aria-label={`Delete callback request from ${callback.full_name}`}
-                              className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 text-xs font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-50"
-                            >
-                              <Trash2 className="h-4 w-4" aria-hidden="true" />Delete
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            disabled={loading}
+                            onClick={() => void handleDeleteCallback(callback)}
+                            aria-label={`Delete callback request from ${callback.full_name}`}
+                            className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 text-xs font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />Delete
+                          </button>
                         </div>
                       </article>
                     ))}
@@ -3093,11 +3107,12 @@ const res = await fetchAdmin(url, {
                     <PhoneCall className="h-6 w-6" aria-hidden="true" />
                   </span>
                   <h2 className="mt-4 font-bold text-[#0B1F4D]">
-                    {loading ? 'Loading callback requests…' : callbacks.length ? 'No matching requests' : 'No callback requests yet'}
+                    {callbacksLoading ? 'Loading callback requests…' : callbacksError && !callbacks.length ? 'Unable to load callback requests' : callbacks.length ? 'No matching requests' : 'No callback requests yet'}
                   </h2>
                   <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-slate-500">
-                    {callbacks.length ? 'Try adjusting your search or status filter.' : 'New callback enquiries will appear here when prospective learners contact the academy.'}
+                    {callbacksError || (callbacks.length ? 'Try adjusting your search or status filter.' : 'New callback enquiries will appear here when prospective learners contact the academy.')}
                   </p>
+                  {callbacksError && <button type="button" onClick={() => void loadCallbackRequests()} className="mt-3 text-xs font-bold text-orange-700 underline">Retry loading requests</button>}
                 </div>
               )}
             </div>
@@ -4438,7 +4453,7 @@ const res = await fetchAdmin(url, {
             <p className="p-3 bg-slate-50 rounded-xl text-xs text-slate-700 whitespace-pre-wrap">{selectedCallback.message || 'No message provided.'}</p>
             <label className="block text-xs font-semibold text-slate-700">Status
               <select value={selectedCallback.status} disabled={loading} onChange={(event) => handleCallbackStatusChange(selectedCallback, event.target.value as CallbackRequest['status'])} className="ml-2 px-3 py-2 border border-slate-200 rounded-lg">
-                {(['New', 'Contacted', 'Resolved'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+                {(['Pending', 'Contacted', 'Completed'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
               </select>
             </label>
           </section>

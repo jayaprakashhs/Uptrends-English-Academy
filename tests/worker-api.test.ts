@@ -93,7 +93,7 @@ async function submitPublicContact(
   path: string,
   body: Record<string, unknown>,
   duplicateCheck: () => Response | Promise<Response> = () => Response.json(false),
-  options: { insertDuplicate?: boolean; cleanupFailure?: boolean } = {},
+  options: { insertDuplicate?: boolean; insertFailure?: boolean; cleanupFailure?: boolean } = {},
 ) {
   const originalFetch = globalThis.fetch;
   const applicationMedia = mockR2Bucket({ deleteError: options.cleanupFailure });
@@ -110,6 +110,9 @@ async function submitPublicContact(
     }
     if (url.pathname === '/rest/v1/application_notifications') {
       return new Response(null, { status: 201 });
+    }
+    if (options.insertFailure && url.pathname === '/rest/v1/callback_requests') {
+      return Response.json({ code: 'XX000', message: 'database unavailable' }, { status: 500 });
     }
     if (url.pathname.startsWith('/rest/v1/') && request.method === 'POST') {
       if (options.insertDuplicate && url.pathname === '/rest/v1/applications') {
@@ -453,10 +456,10 @@ test('demo class request deletion is admin-only and deletes the requested record
   }
 });
 
-test('callback request deletion is admin-only and deletes the requested record', async () => {
+test('callback request deletion is available to staff, admin, and super admin', async () => {
   const originalFetch = globalThis.fetch;
   const requestId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
-  let deletingRole: 'staff' | 'admin' = 'staff';
+  let deletingRole: 'staff' | 'admin' | 'super_admin' = 'staff';
   let deleteCount = 0;
   globalThis.fetch = async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
@@ -492,19 +495,101 @@ test('callback request deletion is admin-only and deletes the requested record',
       headers: { Authorization: 'Bearer test-admin-token' },
     });
 
-    deletingRole = 'staff';
-    const staffResponse = await handleApiRequest(makeDeleteRequest(), env);
-    assert.equal(staffResponse.status, 403);
-    assert.equal(deleteCount, 0);
+    for (const role of ['staff', 'admin', 'super_admin'] as const) {
+      deletingRole = role;
+      const response = await handleApiRequest(makeDeleteRequest(), env);
+      assert.equal(response.status, 200, role);
+      assert.deepEqual(await response.json(), {
+        success: true,
+        message: 'Callback request deleted successfully.',
+      });
+    }
+    assert.equal(deleteCount, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
-    deletingRole = 'admin';
-    const adminResponse = await handleApiRequest(makeDeleteRequest(), env);
-    assert.equal(adminResponse.status, 200);
-    assert.deepEqual(await adminResponse.json(), {
-      success: true,
-      message: 'Callback request deleted successfully.',
-    });
-    assert.equal(deleteCount, 1);
+test('all staff roles read the same newest-first callback records and update shared statuses', async () => {
+  const originalFetch = globalThis.fetch;
+  let currentRole: 'staff' | 'admin' | 'super_admin' = 'staff';
+  let updateCount = 0;
+  const callback = {
+    id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    full_name: 'Test Student',
+    mobile: '9876543210',
+    email: 'student@example.com',
+    program_name: 'General Inquiry',
+    preferred_contact_time: 'Morning',
+    message: null,
+    consent: true,
+    status: 'Pending',
+    created_at: '2026-10-31T10:00:00.000Z',
+  };
+
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/auth/v1/user') return Response.json({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    if (url.pathname === '/rest/v1/admin_profiles') {
+      return Response.json([{
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        full_name: 'Test Admin',
+        role: currentRole,
+        is_active: true,
+      }]);
+    }
+    if (url.pathname === '/rest/v1/callback_requests' && request.method === 'GET') {
+      assert.equal(url.searchParams.get('order'), 'created_at.desc');
+      return Response.json([callback]);
+    }
+    if (url.pathname === '/rest/v1/callback_requests' && request.method === 'PATCH') {
+      const { status } = await request.json() as { status: string };
+      callback.status = status;
+      updateCount += 1;
+      return Response.json([callback]);
+    }
+    throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+  };
+
+  const env = {
+    SUPABASE_URL: 'https://project.example',
+    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+  };
+
+  try {
+    const statuses = ['Contacted', 'Completed', 'Pending'] as const;
+    for (const [index, role] of (['staff', 'admin', 'super_admin'] as const).entries()) {
+      currentRole = role;
+      const listResponse = await handleApiRequest(new Request('https://academy.example/api/admin/callbacks', {
+        headers: { Authorization: 'Bearer test-admin-token' },
+      }), env);
+      assert.equal(listResponse.status, 200, role);
+      assert.deepEqual(await listResponse.json(), [callback], role);
+
+      const updateResponse = await handleApiRequest(new Request(
+        `https://academy.example/api/admin/callbacks/${callback.id}`,
+        {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: statuses[index] }),
+        },
+      ), env);
+      assert.equal(updateResponse.status, 200, role);
+      assert.equal((await updateResponse.json() as { status: string }).status, statuses[index]);
+    }
+
+    const invalidStatusResponse = await handleApiRequest(new Request(
+      `https://academy.example/api/admin/callbacks/${callback.id}`,
+      {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'New' }),
+      },
+    ), env);
+    assert.equal(invalidStatusResponse.status, 400);
+    assert.equal(updateCount, 3);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1514,12 +1599,29 @@ test('all public contact submissions normalize contacts, run the duplicate check
     assert.equal(result.insertedRecords[0].path, `/rest/v1/${submission.table}`, submission.path);
     assert.equal(result.insertedRecords[0].body.email, 'student@example.com', submission.path);
     assert.equal(result.insertedRecords[0].body.mobile, '9876543210', submission.path);
+    if (submission.path === '/api/callback-request') {
+      assert.equal(result.insertedRecords[0].body.status, 'Pending');
+      assert.equal(result.insertedRecords[0].body.full_name, 'Test Student');
+      assert.equal(result.insertedRecords[0].body.preferred_contact_time, 'Morning');
+      assert.equal(result.insertedRecords[0].body.program_name, 'General Inquiry');
+    }
     if (submission.path === '/api/apply') {
       assert.equal(result.insertedRecords[0].body.status, 'Pending');
       assert.equal('archived_at' in result.insertedRecords[0].body, false);
       assert.equal('archived_by' in result.insertedRecords[0].body, false);
     }
   }
+});
+
+test('callback submission returns an error and does not acknowledge success when database insert fails', async () => {
+  const submission = publicContactSubmissions.find(({ path }) => path === '/api/callback-request');
+  assert.ok(submission);
+  const result = await submitPublicContact(submission.path, submission.body, undefined, { insertFailure: true });
+  assert.equal(result.response.status, 500);
+  assert.deepEqual(await result.response.json(), {
+    error: 'Failed to record callback request. Please try again.',
+  });
+  assert.equal(result.insertedRecords.length, 0);
 });
 
 test('all public contact submissions return the same generic acknowledgement for duplicates without inserting', async () => {

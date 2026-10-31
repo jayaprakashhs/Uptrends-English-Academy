@@ -1913,7 +1913,7 @@ const submitCallback = async (request: Request, env: Env): Promise<Response> => 
     preferred_contact_time: preferredTime,
     message,
     consent: true,
-    status: 'New',
+    status: 'Pending',
   };
   const duplicate = await checkContactDuplicates(supabase, record.email, record.mobile);
   if (isResponse(duplicate)) return duplicate;
@@ -3649,8 +3649,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         return methodNotAllowed(['PUT', 'DELETE']);
       }
       if (resource === 'callbacks') {
-        if (method === 'PUT') return updateRequestStatus(request, env, 'callback_requests', id, ['New', 'Contacted', 'Resolved']);
-        if (method === 'DELETE') return deleteRow(request, env, 'callback_requests', id, 'admin', 'Callback request');
+        if (method === 'PUT') return updateRequestStatus(request, env, 'callback_requests', id, ['Pending', 'Contacted', 'Completed']);
+        if (method === 'DELETE') return deleteRow(request, env, 'callback_requests', id, 'staff', 'Callback request');
         return methodNotAllowed(['PUT', 'DELETE']);
       }
       if (resource === 'profiles' && method === 'PUT') return updateProfile(request, env, id);
