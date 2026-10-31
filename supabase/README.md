@@ -88,6 +88,24 @@ data-maintenance process before applying it. Do not remove student records to
 make the migration succeed. No new environment variables are required; the
 existing server-side Supabase service-role key is used for validation.
 
+## 2.3. Official Admission PDF Payment Versions
+
+After applying `20261031000003_application_qualification_category.sql`, apply
+`supabase/migrations/20261031000004_official_document_payment_versions.sql`.
+It adds nullable `programs.course_mode`, payment-create idempotency metadata, and
+version/status fields to the existing `official_document_issuances` table. A
+transactional trigger uses the existing `application_payments` ledger to create
+immutable PDF-version snapshots and `student_payment_update` outbox rows after
+authorized payment changes. It does not create duplicate payment, issuance, or
+notification tables and does not delete historical records.
+
+The existing private `APPLICATION_MEDIA` R2 binding stores PDFs under
+version-specific keys. The Worker generates each PDF and sends a separate
+payment-update email; failed generation or delivery remains retryable from the
+admin notification workflow. Joining instructions remain in the existing
+`official_document_settings.document_data` JSON configuration. No additional
+environment variables are required.
+
 ---
 
 ## 3. Provisioning the Super Admin (Target UID: `59bbb687-4e0d-47f7-b458-5a91955f915d`)

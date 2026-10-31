@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
 import {
@@ -391,17 +391,30 @@ type JoiningInformationSettings = {
   venue: string;
 };
 
+interface OfficialDocumentVersion {
+  version_number: number;
+  issuance_type: 'approval' | 'payment_update';
+  status: 'pending' | 'processing' | 'ready' | 'failed';
+  email_status: 'Pending' | 'Sent' | 'Failed';
+  generated_at: string | null;
+  created_at: string;
+  payment_status: string;
+  total_paid: number;
+  outstanding_balance: number | null;
+}
+
 const DEFAULT_JOINING_INFORMATION: JoiningInformationSettings = {
-  joiningDate: 'To be confirmed',
-  classSchedule: 'Monday to Saturday',
-  classTimings: 'To be confirmed',
-  venue: 'Uptrends English Academy, Davangere',
+  joiningDate: '',
+  classSchedule: '',
+  classTimings: '',
+  venue: '',
 };
 
 const [officialDocumentSettings, setOfficialDocumentSettings] =
   useState<OfficialDocumentSettings>({ ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS });
 const [officialPdfPreviewUrl, setOfficialPdfPreviewUrl] = useState<string | null>(null);
 const [officialPdfApplicationId, setOfficialPdfApplicationId] = useState('');
+const [officialDocumentVersions, setOfficialDocumentVersions] = useState<OfficialDocumentVersion[]>([]);
 const [pendingOfficialLogo, setPendingOfficialLogo] = useState<string | null>(null);
 const [pendingOfficialGraphic, setPendingOfficialGraphic] = useState<string | null>(null);
 const [officialLogoPreviewUrl, setOfficialLogoPreviewUrl] = useState<string | null>(null);
@@ -474,6 +487,7 @@ useEffect(() => {
   const [paymentStageInput, setPaymentStageInput] = useState<PaymentStage>('first_fee');
   const [paymentReferenceInput, setPaymentReferenceInput] = useState('');
   const [paymentNotesInput, setPaymentNotesInput] = useState('');
+  const paymentCreationIntentRef = useRef<{ signature: string; key: string } | null>(null);
 
   const [selectedCallback, setSelectedCallback] = useState<CallbackRequest | null>(null);
   const [appPhotoModal, setAppPhotoModal] = useState<string | null>(null);
@@ -591,6 +605,7 @@ useEffect(() => {
   };
 
   const resetPaymentForm = () => {
+    paymentCreationIntentRef.current = null;
     setEditingPaymentId(null);
     setPaymentAmountInput('');
     setPaymentMethodInput('upi');
@@ -615,21 +630,33 @@ useEffect(() => {
       const url = isEditing
         ? `/api/admin/payments/${encodeURIComponent(editingPaymentId as string)}`
         : `/api/admin/applications/${encodeURIComponent(paymentApp.id)}/payments`;
+      const paymentPayload = {
+        amount: Math.round(amount * 100) / 100,
+        payment_method: paymentMethodInput,
+        payment_stage: paymentStageInput,
+        reference_number: paymentReferenceInput.trim() || null,
+        notes: paymentNotesInput.trim() || null,
+      };
+      const headers = getAuthHeaders();
+      if (!isEditing) {
+        const signature = JSON.stringify(paymentPayload);
+        if (paymentCreationIntentRef.current?.signature !== signature) {
+          paymentCreationIntentRef.current = { signature, key: crypto.randomUUID() };
+        }
+        headers['Idempotency-Key'] = paymentCreationIntentRef.current.key;
+      }
 
-      await requestJson(url, {
+      const result = await requestJson(url, {
         method: isEditing ? 'PUT' : 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          amount: Math.round(amount * 100) / 100,
-          payment_method: paymentMethodInput,
-          payment_stage: paymentStageInput,
-          reference_number: paymentReferenceInput.trim() || null,
-          notes: paymentNotesInput.trim() || null,
-        }),
+        headers,
+        body: JSON.stringify(paymentPayload),
       });
 
       resetPaymentForm();
       await loadApplicationPaymentData(paymentApp);
+      if (result?.document_update?.success === false) {
+        setPaymentError('Payment was saved. Its official PDF or email update is queued for retry from Notifications.');
+      }
     } catch (error) {
       setPaymentError(error instanceof Error ? error.message : 'Unable to save payment.');
     } finally {
@@ -879,6 +906,23 @@ useEffect(() => {
   setPreview(URL.createObjectURL(await response.blob()));
 };
 
+const loadOfficialDocumentVersions = async (applicationId: string) => {
+  if (!applicationId) {
+    setOfficialDocumentVersions([]);
+    return;
+  }
+  try {
+    const versions = await requestJson(
+      `/api/admin/official-document/versions?application_id=${encodeURIComponent(applicationId)}`,
+      { headers: getAuthHeaders() },
+    );
+    setOfficialDocumentVersions(Array.isArray(versions) ? versions as OfficialDocumentVersion[] : []);
+  } catch (error) {
+    setOfficialDocumentVersions([]);
+    setActionMessage({ type: 'error', text: error instanceof Error ? error.message : 'Unable to load PDF version history.' });
+  }
+};
+
 const fetchOfficialDocumentSettings = async () => {
   try {
     const result = await requestJson('/api/admin/official-document', {
@@ -981,21 +1025,13 @@ const handleOfficialAssetChange = (
 };
 
 const previewOfficialDocumentPdf = async (download = false) => {
-  const application = applications.find((item) =>
-    item.id === officialPdfApplicationId && item.status === 'Accepted' && Boolean(item.student_id),
-  );
-  if (!application) {
-    setActionMessage({ type: 'error', text: 'Select an approved application with a permanent Student ID first.' });
-    return;
-  }
-
   try {
     await saveOfficialDocumentSettings();
     setLoading(true);
     const response = await fetchAdmin('/api/admin/official-document/preview', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ application_id: application.id, download }),
+      body: JSON.stringify({ download }),
     });
     if (!response.ok) {
       const data = await response.json().catch(() => null);
@@ -1005,12 +1041,12 @@ const previewOfficialDocumentPdf = async (download = false) => {
     if (download) {
       const link = document.createElement('a');
       link.href = pdfUrl;
-      link.download = `Sample_Official_Document_${application.application_reference.replace(/[^A-Za-z0-9_-]/g, '_')}.pdf`;
+      link.download = 'Official_Document_PREVIEW.pdf';
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(pdfUrl), 1000);
-      setActionMessage({ type: 'success', text: 'Sample PDF downloaded using the selected approved student and course.' });
+      setActionMessage({ type: 'success', text: 'Preview-only PDF downloaded. No student application data was used.' });
     } else {
       setOfficialPdfPreviewUrl(pdfUrl);
       setActionMessage(null);
@@ -1023,7 +1059,7 @@ const previewOfficialDocumentPdf = async (download = false) => {
   }
 };
 
-const downloadIssuedOfficialDocument = async () => {
+const downloadIssuedOfficialDocument = async (versionNumber?: number) => {
   const application = applications.find((item) =>
     item.id === officialPdfApplicationId && item.status === 'Accepted' && Boolean(item.student_id),
   );
@@ -1034,7 +1070,7 @@ const downloadIssuedOfficialDocument = async () => {
   setLoading(true);
   try {
     const response = await fetchAdmin(
-      `/api/admin/official-document/issued?application_id=${encodeURIComponent(application.id)}`,
+      `/api/admin/official-document/issued?application_id=${encodeURIComponent(application.id)}${versionNumber ? `&version=${versionNumber}` : ''}`,
       { headers: getAuthHeaders() },
     );
     if (!response.ok) {
@@ -1044,7 +1080,7 @@ const downloadIssuedOfficialDocument = async () => {
     const pdfUrl = URL.createObjectURL(await response.blob());
     const link = document.createElement('a');
     link.href = pdfUrl;
-    link.download = `Issued_${application.application_reference.replace(/[^A-Za-z0-9_-]/g, '_')}.pdf`;
+    link.download = `Issued_V${versionNumber || 'latest'}_${application.application_reference.replace(/[^A-Za-z0-9_-]/g, '_')}.pdf`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -4301,16 +4337,30 @@ const res = await fetchAdmin(url, {
                 <p className="mt-2 text-xs leading-relaxed text-slate-600">Configure the branded PDF template. Student-specific information is read directly from an approved application and cannot be edited here.</p>
               </header>
 
-              <section className="space-y-4 rounded-2xl border border-blue-100 bg-white p-4 shadow-sm sm:p-5" aria-labelledby="official-student-preview-heading">
+              <section className="space-y-4 rounded-xl border border-blue-100 bg-white p-4 shadow-sm sm:p-5" aria-labelledby="official-student-preview-heading">
                 <div>
-                  <h2 id="official-student-preview-heading" className="font-bold text-[#0B1F4D]">Approved student for preview</h2>
-                  <p className="mt-1 text-xs text-slate-500">Previews use the selected approved student, their private passport photo, permanent IDs, and only their selected course.</p>
+                  <h2 id="official-student-preview-heading" className="font-bold text-[#0B1F4D]">Template preview</h2>
+                  <p className="mt-1 text-xs text-slate-500">Preview PDFs use clearly marked placeholder details only. They are never issued or emailed to applicants.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" disabled={loading} onClick={() => void previewOfficialDocumentPdf()} className="min-h-11 rounded-xl bg-[#0B1F4D] px-4 py-2.5 text-xs font-bold text-white transition-colors hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-50">Preview PDF</button>
+                  <button type="button" disabled={loading} onClick={() => void previewOfficialDocumentPdf(true)} className="min-h-11 rounded-xl border border-orange-300 bg-white px-4 py-2.5 text-xs font-bold text-orange-800 transition-colors hover:bg-orange-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-50">Download Preview PDF</button>
+                </div>
+              </section>
+
+              <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5" aria-labelledby="official-issued-document-heading">
+                <div>
+                  <h2 id="official-issued-document-heading" className="font-bold text-[#0B1F4D]">Issued student document</h2>
+                  <p className="mt-1 text-xs text-slate-500">Select an approved application to inspect its real data and download its issued PDF. This selection is not used by the template preview.</p>
                 </div>
                 <label className="block max-w-2xl text-xs font-semibold text-slate-700">
-                  Approved application
+                  Application history
                   <select
                     value={officialPdfApplicationId}
-                    onChange={(event) => setOfficialPdfApplicationId(event.target.value)}
+                    onChange={(event) => {
+                      setOfficialPdfApplicationId(event.target.value);
+                      void loadOfficialDocumentVersions(event.target.value);
+                    }}
                     className="mt-1 min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-100"
                   >
                     <option value="">Select an approved application</option>
@@ -4323,7 +4373,7 @@ const res = await fetchAdmin(url, {
                 </label>
                 {(() => {
                   const application = applications.find((item) => item.id === officialPdfApplicationId && item.status === 'Accepted' && item.student_id);
-                  if (!application) return <p className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800">{applications.some((item) => item.status === 'Accepted' && item.student_id) ? 'Choose a student to inspect read-only details and enable PDF preview.' : 'No approved applications with permanent Student IDs are available yet.'}</p>;
+                  if (!application) return <p className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800">{applications.some((item) => item.status === 'Accepted' && item.student_id) ? 'Choose an application to inspect its issued document history.' : 'No approved applications with permanent Student IDs are available yet.'}</p>;
                   return (
                     <dl className="grid gap-3 rounded-xl border border-slate-100 bg-slate-50 p-4 text-xs sm:grid-cols-2 lg:grid-cols-3">
                       {([
@@ -4345,11 +4395,21 @@ const res = await fetchAdmin(url, {
                     </dl>
                   );
                 })()}
-                <div className="flex flex-wrap gap-2">
-                  <button type="button" disabled={loading || !applications.some((item) => item.id === officialPdfApplicationId && item.status === 'Accepted' && item.student_id)} onClick={() => void previewOfficialDocumentPdf()} className="min-h-11 rounded-xl bg-[#0B1F4D] px-4 py-2.5 text-xs font-bold text-white transition-colors hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-50">Preview PDF</button>
-                  <button type="button" disabled={loading || !applications.some((item) => item.id === officialPdfApplicationId && item.status === 'Accepted' && item.student_id)} onClick={() => void previewOfficialDocumentPdf(true)} className="min-h-11 rounded-xl border border-orange-300 bg-white px-4 py-2.5 text-xs font-bold text-orange-800 transition-colors hover:bg-orange-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-50">Download Sample PDF</button>
-                  <button type="button" disabled={loading || !applications.some((item) => item.id === officialPdfApplicationId && item.status === 'Accepted' && item.student_id)} onClick={() => void downloadIssuedOfficialDocument()} className="min-h-11 rounded-xl border border-emerald-300 bg-white px-4 py-2.5 text-xs font-bold text-emerald-800 transition-colors hover:bg-emerald-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 disabled:cursor-not-allowed disabled:opacity-50">Download Issued PDF</button>
-                </div>
+                {officialPdfApplicationId && (
+                  <div className="divide-y divide-slate-100 rounded-xl border border-slate-200">
+                    {officialDocumentVersions.length ? officialDocumentVersions.map((version) => (
+                      <div key={version.version_number} className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5 text-xs">
+                        <div className="min-w-0">
+                          <p className="font-bold text-[#0B1F4D]">Version {version.version_number} · {version.issuance_type.replace('_', ' ')}</p>
+                          <p className="mt-1 text-slate-500">PDF: {version.status} · Email: {version.email_status} · Payment: {version.payment_status.replaceAll('_', ' ')}</p>
+                          <p className="mt-1 text-slate-500">Paid: INR {Number(version.total_paid).toLocaleString('en-IN', { minimumFractionDigits: 2 })}{version.generated_at ? ` · Generated ${new Date(version.generated_at).toLocaleString('en-IN')}` : ''}</p>
+                        </div>
+                        <button type="button" disabled={loading || version.status !== 'ready'} onClick={() => void downloadIssuedOfficialDocument(version.version_number)} className="min-h-9 rounded-lg border border-emerald-300 px-3 font-bold text-emerald-800 disabled:cursor-not-allowed disabled:opacity-50">Download V{version.version_number}</button>
+                      </div>
+                    )) : <p className="p-3 text-xs text-slate-500">No issued PDF versions are available.</p>}
+                  </div>
+                )}
+                <button type="button" disabled={loading || !applications.some((item) => item.id === officialPdfApplicationId && item.status === 'Accepted' && item.student_id)} onClick={() => void downloadIssuedOfficialDocument()} className="min-h-11 rounded-xl border border-emerald-300 bg-white px-4 py-2.5 text-xs font-bold text-emerald-800 transition-colors hover:bg-emerald-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 disabled:cursor-not-allowed disabled:opacity-50">Download Latest Issued PDF</button>
               </section>
 
               <form onSubmit={(event) => { event.preventDefault(); void saveOfficialDocumentSettings().catch(() => undefined); }} className="space-y-4">
@@ -4367,10 +4427,10 @@ const res = await fetchAdmin(url, {
                       <button type="button" onClick={() => { setPendingOfficialLogo(null); setOfficialDocumentSettings((current) => ({ ...current, logoObjectKey: null })); setOfficialLogoPreviewUrl(null); }} className="text-xs font-semibold text-rose-700 underline">Remove logo</button>
                     </div>
                     <div className="space-y-3 rounded-xl border border-slate-100 p-3">
-                      <label className="block text-xs font-semibold text-slate-700">Decorative graphic (PNG/JPEG, up to 3 MB)
+                      <label className="block text-xs font-semibold text-slate-700">Footer building / decorative image (PNG/JPEG, up to 3 MB)
                         <input type="file" accept="image/png,image/jpeg" onChange={(event) => handleOfficialAssetChange('graphic', event)} className="mt-2 block w-full text-xs" />
                       </label>
-                      {officialGraphicPreviewUrl && <img src={officialGraphicPreviewUrl} alt="Official PDF decorative graphic preview" className="h-24 w-full rounded-lg border border-slate-200 bg-white p-2 object-contain" />}
+                      {officialGraphicPreviewUrl && <img src={officialGraphicPreviewUrl} alt="Official PDF footer image preview" className="h-24 w-full rounded-lg border border-slate-200 bg-white p-2 object-contain" />}
                       <button type="button" onClick={() => { setPendingOfficialGraphic(null); setOfficialDocumentSettings((current) => ({ ...current, graphicObjectKey: null })); setOfficialGraphicPreviewUrl(null); }} className="text-xs font-semibold text-rose-700 underline">Remove graphic</button>
                     </div>
                   </div>
@@ -4412,7 +4472,7 @@ const res = await fetchAdmin(url, {
                       ['academyName', 'Academy name'], ['heading', 'Main heading'], ['subtitle', 'Subtitle'],
                       ['approvalMessage', 'Approval banner'], ['address', 'Academy address'], ['phone', 'Phone number'],
                       ['email', 'Academy email'], ['hours', 'Opening hours'], ['footerText', 'Footer text'],
-                      ['motivationalTagline', 'Motivational tagline'],
+                      ['motivationalTagline', 'Academy tagline'],
                     ] as const).map(([field, label]) => (
                       <label key={field} className="text-xs font-semibold text-slate-700">{label}
                         <input value={officialDocumentSettings[field]} onChange={(event) => setOfficialDocumentSettings((current) => ({ ...current, [field]: event.target.value }))} className="mt-1 min-h-10 w-full rounded-lg border border-slate-200 px-3" />
@@ -4524,10 +4584,10 @@ const res = await fetchAdmin(url, {
             <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-gradient-to-r from-[#0B1F4D] to-[#173B70] px-4 py-3 text-white sm:px-6">
               <div>
                 <h2 id="official-pdf-preview-title" className="font-bold">
-                  Approved Student PDF Preview
+                  Official PDF Template Preview
                 </h2>
                 <p className="mt-1 text-xs text-blue-100">
-                  Generated from the selected approved application and its selected course.
+                  Uses preview-only placeholders; this document is not issued or emailed.
                 </p>
               </div>
               <div className="flex items-center gap-3">
