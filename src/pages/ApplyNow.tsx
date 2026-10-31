@@ -3,6 +3,7 @@ import { Program } from '../types';
 import { compressPassportPhoto } from '../lib/imageCompressor';
 import { MAX_APPLICATION_PHOTO_BYTES } from '../../application-photo-storage';
 import {
+  getApplicationPrimaryContact,
   validateApplicationCategoryFields,
   type ApplicationCategoryField,
   type ApplicationCategoryFieldErrors,
@@ -61,7 +62,9 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [categoryErrors, setCategoryErrors] = useState<ApplicationCategoryFieldErrors>({});
   const [categoryValidationAttempted, setCategoryValidationAttempted] = useState(false);
-  const contactValidation = useContactDuplicateValidation(email, mobile);
+  const primaryEmail = qualificationCategory === 'Student' ? parentEmail : email;
+  const primaryMobile = qualificationCategory === 'Student' ? parentPhone : mobile;
+  const contactValidation = useContactDuplicateValidation(primaryEmail, primaryMobile);
 
   const validateCategoryFields = (overrides: Partial<Record<ApplicationCategoryField, string>> = {}) => (
     validateApplicationCategoryFields({
@@ -165,15 +168,20 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
       setErrorMessage('Student full name is required.');
       return;
     }
-    if (!normalizeIndianMobileNumber(mobile)) {
+    if (!categoryFields.valid) {
+      return;
+    }
+    if (qualificationCategory !== 'Student' && !normalizeIndianMobileNumber(mobile)) {
       setErrorMessage('Please provide a valid Indian mobile number.');
       return;
     }
-    if (!isValidContactEmail(email)) {
+    if (qualificationCategory !== 'Student' && !isValidContactEmail(email)) {
       setErrorMessage('A valid email address is mandatory to receive confirmation and admission decisions.');
       return;
     }
-    if (!categoryFields.valid) {
+    const applicationContact = getApplicationPrimaryContact(categoryFields.value, { mobile, email });
+    if (!applicationContact) {
+      setErrorMessage('Valid parent contact details are required for Student applications.');
       return;
     }
     if (compressing) {
@@ -194,8 +202,8 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
     }
 
     const [emailResult, mobileResult] = await Promise.all([
-      contactValidation.validateEmail(email),
-      contactValidation.validateMobile(mobile),
+      contactValidation.validateEmail(applicationContact.email),
+      contactValidation.validateMobile(applicationContact.mobile),
     ]);
     if (emailResult.error || mobileResult.error) {
       setErrorMessage(emailResult.error || mobileResult.error || 'Unable to verify your contact information. Please try again.');
@@ -213,8 +221,8 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           student_name: studentName,
-          mobile,
-          email,
+          mobile: applicationContact.mobile,
+          email: applicationContact.email,
           ...categoryFields.value,
           program_id: programId,
           program_name: progTitle,
@@ -368,46 +376,50 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    {qualificationCategory === 'Student' ? 'Student Mobile Number *' : 'Phone Number *'}
-                  </label>
-                  <input
-                    type="tel"
-                    required
-                    value={mobile}
-                    onChange={(e) => setMobile(e.target.value)}
-                    onBlur={() => void contactValidation.validateMobile(mobile)}
-                    aria-invalid={contactValidation.mobileCheck.duplicate || Boolean(contactValidation.mobileCheck.error)}
-                    aria-describedby="application-mobile-validation"
-                    placeholder="+91 98765 43210"
-                    className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${contactValidation.mobileCheck.duplicate || contactValidation.mobileCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
-                  />
-                  <ContactValidationMessage id="application-mobile-validation" state={contactValidation.mobileCheck} />
-                </div>
-              </div>
+              {qualificationCategory !== 'Student' && (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                        Mobile Number *
+                      </label>
+                      <input
+                        type="tel"
+                        required
+                        value={mobile}
+                        onChange={(e) => setMobile(e.target.value)}
+                        onBlur={() => void contactValidation.validateMobile(mobile)}
+                        aria-invalid={contactValidation.mobileCheck.duplicate || Boolean(contactValidation.mobileCheck.error)}
+                        aria-describedby="application-mobile-validation"
+                        placeholder="+91 98765 43210"
+                        className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${contactValidation.mobileCheck.duplicate || contactValidation.mobileCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
+                      />
+                      <ContactValidationMessage id="application-mobile-validation" state={contactValidation.mobileCheck} />
+                    </div>
+                  </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    {qualificationCategory === 'Student' ? 'Student Email ID *' : 'Email ID *'}
-                  </label>
-                  <input
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    onBlur={() => void contactValidation.validateEmail(email)}
-                    aria-invalid={contactValidation.emailCheck.duplicate || Boolean(contactValidation.emailCheck.error)}
-                    aria-describedby="application-email-validation"
-                    placeholder="student@example.com"
-                    className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${contactValidation.emailCheck.duplicate || contactValidation.emailCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
-                  />
-                  <ContactValidationMessage id="application-email-validation" state={contactValidation.emailCheck} />
-                  <p className="text-[11px] text-slate-400 mt-1">Confirmation and application updates will be delivered to this address.</p>
-                </div>
-              </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                        Email ID *
+                      </label>
+                      <input
+                        type="email"
+                        required
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        onBlur={() => void contactValidation.validateEmail(email)}
+                        aria-invalid={contactValidation.emailCheck.duplicate || Boolean(contactValidation.emailCheck.error)}
+                        aria-describedby="application-email-validation"
+                        placeholder="student@example.com"
+                        className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${contactValidation.emailCheck.duplicate || contactValidation.emailCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
+                      />
+                      <ContactValidationMessage id="application-email-validation" state={contactValidation.emailCheck} />
+                      <p className="text-[11px] text-slate-400 mt-1">Confirmation and application updates will be delivered to this address.</p>
+                    </div>
+                  </div>
+                </>
+              )}
 
               {qualificationCategory === 'Student' && (
                 <div>
@@ -423,12 +435,14 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                         autoComplete="tel"
                         value={parentPhone}
                         onChange={(event) => updateCategoryField('parent_phone', event.target.value, setParentPhone)}
-                        aria-invalid={Boolean(categoryErrors.parent_phone)}
-                        aria-describedby={categoryErrors.parent_phone ? categoryErrorId('parent_phone') : undefined}
+                        onBlur={() => void contactValidation.validateMobile(parentPhone)}
+                        aria-invalid={Boolean(categoryErrors.parent_phone || contactValidation.mobileCheck.error)}
+                        aria-describedby={[categoryErrors.parent_phone ? categoryErrorId('parent_phone') : null, 'application-parent-mobile-validation'].filter(Boolean).join(' ')}
                         placeholder="+91 98765 43210"
-                        className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.parent_phone ? 'border-rose-600' : 'border-slate-300'}`}
+                        className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.parent_phone || contactValidation.mobileCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
                       />
                       {renderCategoryError('parent_phone')}
+                      <ContactValidationMessage id="application-parent-mobile-validation" state={contactValidation.mobileCheck} />
                     </label>
                     <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
                       Parent Email ID *
@@ -440,12 +454,15 @@ export const ApplyNow: React.FC<ApplyNowProps> = ({
                         autoComplete="email"
                         value={parentEmail}
                         onChange={(event) => updateCategoryField('parent_email', event.target.value, setParentEmail)}
-                        aria-invalid={Boolean(categoryErrors.parent_email)}
-                        aria-describedby={categoryErrors.parent_email ? categoryErrorId('parent_email') : undefined}
+                        onBlur={() => void contactValidation.validateEmail(parentEmail)}
+                        aria-invalid={Boolean(categoryErrors.parent_email || contactValidation.emailCheck.error)}
+                        aria-describedby={[categoryErrors.parent_email ? categoryErrorId('parent_email') : null, 'application-parent-email-validation'].filter(Boolean).join(' ')}
                         placeholder="parent@example.com"
-                        className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.parent_email ? 'border-rose-600' : 'border-slate-300'}`}
+                        className={`mt-1 w-full rounded-xl border px-4 py-2.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 ${categoryErrors.parent_email || contactValidation.emailCheck.error ? 'border-rose-600' : 'border-slate-300'}`}
                       />
                       {renderCategoryError('parent_email')}
+                      <ContactValidationMessage id="application-parent-email-validation" state={contactValidation.emailCheck} />
+                      <p className="mt-1 text-[11px] text-slate-400 normal-case">Confirmation and application updates will be delivered to this address.</p>
                     </label>
                     <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
                       School Name *

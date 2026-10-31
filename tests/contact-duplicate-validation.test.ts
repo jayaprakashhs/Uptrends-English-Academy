@@ -261,6 +261,36 @@ test('direct submissions to all three APIs cannot bypass same-form duplicate che
   }
 });
 
+test('Student application duplicate checks use parent contacts when applicant contacts are omitted', async () => {
+  const backend = setupContactBackend({
+    applications: [contactRecord('parent@example.com', '+91 98765 43210')],
+  });
+  try {
+    const response = await handleApiRequest(new Request('https://academy.example/api/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        student_name: 'Student Applicant',
+        qualification_category: 'Student',
+        qualification: '10th Standard',
+        parent_phone: '+91 98765 43210',
+        parent_email: 'Parent@Example.com',
+        school_name: 'Example School',
+        place: 'Vijayanagar',
+        city: 'Davangere',
+        program_name: 'Spoken English',
+        privacy_consent: true,
+        photo_base64: 'data:image/jpeg;base64,/9j/2Q==',
+      }),
+    }), env);
+
+    assert.equal(response.status, 409);
+    assert.match((await response.json() as { error: string }).error, /already exists for this form/i);
+  } finally {
+    backend.restore();
+  }
+});
+
 test('concurrent same-form duplicate submissions produce one save and one conflict', async () => {
   const backend = setupContactBackend();
   const request = () => callbackRequest('applicant@example.com', '+91 98765 43210');

@@ -120,10 +120,17 @@ async function submitPublicContact(
   const applicationMedia = mockR2Bucket({ deleteError: options.cleanupFailure });
   const duplicateCheckPayloads: Array<Record<string, unknown>> = [];
   const insertedRecords: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const applicationNotifications: Array<Record<string, unknown>> = [];
+  const sentEmails: string[] = [];
 
   globalThis.fetch = async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
+    if (url.hostname === 'api.resend.com' && url.pathname === '/emails') {
+      const email = await request.json() as { to: string };
+      sentEmails.push(email.to);
+      return Response.json({ id: `test-email-${sentEmails.length}` });
+    }
     if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
     if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') {
       const payload = await request.json() as Record<string, unknown>;
@@ -131,6 +138,9 @@ async function submitPublicContact(
       return duplicateCheck(payload);
     }
     if (url.pathname === '/rest/v1/application_notifications') {
+      if (request.method === 'POST') {
+        applicationNotifications.push(...await request.json() as Array<Record<string, unknown>>);
+      }
       if (options.notificationLogFailure && request.method === 'POST') {
         return Response.json({ code: 'XX000', message: 'notification log unavailable' }, { status: 500 });
       }
@@ -172,10 +182,11 @@ async function submitPublicContact(
       {
         SUPABASE_URL: 'https://project.example',
         SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+        RESEND_API_KEY: 'test-resend-key',
         APPLICATION_MEDIA: applicationMedia.binding,
       },
     );
-    return { response, duplicateCheckPayloads, insertedRecords, applicationMedia };
+    return { response, duplicateCheckPayloads, insertedRecords, applicationMedia, applicationNotifications, sentEmails };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1833,6 +1844,8 @@ test('application Worker stores category-specific fields and removes hidden cate
     {
       qualification_category: 'Student',
       qualification: '10th Standard',
+      mobile: undefined,
+      email: undefined,
       parent_phone: '+91 98765 43210',
       parent_email: ' PARENT@EXAMPLE.COM ',
       school_name: 'Example School',
@@ -1876,9 +1889,19 @@ test('application Worker stores category-specific fields and removes hidden cate
     if (fields.qualification_category === 'Student') {
       assert.equal(saved.parent_phone, '9876543210');
       assert.equal(saved.parent_email, 'parent@example.com');
+      assert.equal(saved.mobile, '9876543210');
+      assert.equal(saved.email, 'parent@example.com');
       assert.equal(saved.school_name, 'Example School');
       assert.equal(saved.college_name, null);
       assert.equal(saved.occupation, null);
+      assert.deepEqual(result.duplicateCheckPayloads[0], {
+        p_source_table: 'applications',
+        p_email: 'parent@example.com',
+        p_mobile: '9876543210',
+      });
+      assert.equal(result.applicationNotifications.find(({ notification_type }) =>
+        notification_type === 'student_confirmation')?.recipient_email, 'parent@example.com');
+      assert.ok(result.sentEmails.includes('parent@example.com'));
     } else if (fields.qualification_category === 'Graduate') {
       assert.equal(saved.college_name, 'Example College');
       assert.equal(saved.parent_phone, null);
@@ -1891,6 +1914,30 @@ test('application Worker stores category-specific fields and removes hidden cate
       assert.equal(saved.parent_email, null);
       assert.equal(saved.school_name, null);
       assert.equal(saved.college_name, null);
+    }
+  }
+});
+
+test('Graduate and Working applications still require applicant mobile and email', async () => {
+  const application = publicContactSubmissions.find(({ path }) => path === '/api/apply');
+  assert.ok(application);
+  const cases = [
+    { qualification_category: 'Graduate', college_name: 'Example College', qualification: 'B.Com' },
+    { qualification_category: 'Working', occupation: 'Teacher', qualification: 'Diploma' },
+  ];
+
+  for (const fields of cases) {
+    for (const missingContact of ['mobile', 'email'] as const) {
+      const body = {
+        ...application.body,
+        ...fields,
+        [missingContact]: undefined,
+      };
+      const result = await submitPublicContact(application.path, body);
+      assert.equal(result.response.status, 400, `${fields.qualification_category} ${missingContact}`);
+      assert.match((await result.response.json() as { error: string }).error, /email|mobile/i);
+      assert.equal(result.insertedRecords.filter(({ path }) => path === '/rest/v1/applications').length, 0);
+      assert.equal(result.applicationMedia.puts.length, 0);
     }
   }
 });
