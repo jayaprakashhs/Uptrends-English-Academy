@@ -1573,6 +1573,7 @@ app.all(
     '/api/admin/applications',
     '/api/admin/applications/:id',
     '/api/admin/applications/:id/archive',
+    '/api/admin/applications/:id/restore',
     '/api/admin/applications/:id/payments',
     '/api/admin/payments/:paymentId',
     '/api/demo-class-requests',

@@ -278,6 +278,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   // Data states
   const [applications, setApplications] = useState<StudentApplication[]>([]);
+  const [archivedApplications, setArchivedApplications] = useState<StudentApplication[]>([]);
   const [applicationsLoading, setApplicationsLoading] = useState(false);
   const [applicationsError, setApplicationsError] = useState<string | null>(null);
   const [applicationDisplayLimit, setApplicationDisplayLimit] = useState(10);
@@ -414,6 +415,7 @@ useEffect(() => {
   // Search and filter states
   const [appSearch, setAppSearch] = useState('');
   const [appFilterStatus, setAppFilterStatus] = useState<'All' | 'Pending' | 'Accepted'>('All');
+  const [applicationArchiveFilter, setApplicationArchiveFilter] = useState<'Active' | 'Archived'>('Active');
   const [callbackSearch, setCallbackSearch] = useState('');
   const [callbackFilterStatus, setCallbackFilterStatus] = useState<'All' | CallbackRequest['status']>('All');
   const [notifFilterStatus, setNotifFilterStatus] = useState<'All' | 'Pending' | 'Sent' | 'Failed'>('All');
@@ -619,15 +621,21 @@ useEffect(() => {
 
   const notifyPublicDataChanged = () => window.dispatchEvent(new Event('admin-data-updated'));
 
-  const loadApplications = async () => {
+  const loadApplications = async (includeArchived = applicationArchiveFilter === 'Archived'): Promise<boolean> => {
     setApplicationsLoading(true);
     setApplicationsError(null);
     try {
-      const activeData = await requestJson('/api/admin/applications', { headers: getAuthHeaders() });
-      if (!Array.isArray(activeData)) throw new Error('The applications response was invalid.');
-      setApplications(activeData);
+      const data = await requestJson(
+        includeArchived ? '/api/admin/applications?archived=true' : '/api/admin/applications',
+        { headers: getAuthHeaders() },
+      );
+      if (!Array.isArray(data)) throw new Error('The applications response was invalid.');
+      if (includeArchived) setArchivedApplications(data);
+      else setApplications(data);
+      return true;
     } catch (error) {
       setApplicationsError(error instanceof Error ? error.message : 'Unable to load applications.');
+      return false;
     } finally {
       setApplicationsLoading(false);
     }
@@ -1048,6 +1056,48 @@ const resetOfficialDocumentSettings = () => {
     setAppFilterStatus(status);
     setApplicationDisplayLimit(10);
     setActionMessage(null);
+  };
+
+  const handleApplicationArchiveFilterChange = (filter: 'Active' | 'Archived') => {
+    setApplicationArchiveFilter(filter);
+    setApplicationDisplayLimit(10);
+    setActionMessage(null);
+    void loadApplications(filter === 'Archived');
+  };
+
+  const handleApplicationArchiveChange = async (app: StudentApplication) => {
+    if (!isAdminOrHigher) return;
+    const isArchived = Boolean(app.archived_at);
+    const action = isArchived ? 'unarchive' : 'archive';
+    const actionLabel = isArchived ? 'Unarchive' : 'Archive';
+    if (!window.confirm(`${actionLabel} ${app.student_name}'s application?`)) return;
+
+    setActionMessage(null);
+    setLoading(true);
+    try {
+      await requestJson(`/api/admin/applications/${encodeURIComponent(app.id)}/${isArchived ? 'restore' : 'archive'}`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+      if (!await loadApplications()) {
+        setActionMessage({
+          type: 'error',
+          text: `Application ${isArchived ? 'unarchived' : 'archived'}, but the list could not be refreshed.`,
+        });
+        return;
+      }
+      setActionMessage({
+        type: 'success',
+        text: `Application ${isArchived ? 'unarchived' : 'archived'} successfully.`,
+      });
+    } catch (error) {
+      setActionMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : `Unable to ${action} application.`,
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleMarkApplicationPending = async (appId: string) => {
@@ -1662,7 +1712,8 @@ const res = await fetchAdmin(url, {
   };
 
   // Filtered applications
-  const filteredApplications = applications
+  const currentApplications = applicationArchiveFilter === 'Archived' ? archivedApplications : applications;
+  const filteredApplications = currentApplications
     .filter((app) => {
       const matchesSearch =
         app.student_name.toLowerCase().includes(appSearch.toLowerCase()) ||
@@ -2318,6 +2369,28 @@ const res = await fetchAdmin(url, {
                 </div>
               </div>
 
+              <div role="group" aria-label="Application archive filter" className="flex flex-wrap gap-2">
+                {([
+                  ['Active', 'Active Applications'],
+                  ['Archived', 'Archived Applications'],
+                ] as const).map(([filter, label]) => (
+                  <button
+                    key={filter}
+                    type="button"
+                    aria-pressed={applicationArchiveFilter === filter}
+                    onClick={() => handleApplicationArchiveFilterChange(filter)}
+                    disabled={applicationsLoading}
+                    className={`rounded-lg px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-60 ${
+                      applicationArchiveFilter === filter
+                        ? 'bg-[#0B1F4D] text-white'
+                        : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
               <section
                 aria-label="Accepted application total"
                 className="flex max-w-sm items-center justify-between gap-4 rounded-2xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-white p-4 shadow-sm"
@@ -2451,6 +2524,20 @@ const res = await fetchAdmin(url, {
                               title="Open review and complete joining information before approval"
                             >
                               Review &amp; Approve
+                            </button>
+                          )}
+                          {isAdminOrHigher && (
+                            <button
+                              type="button"
+                              disabled={loading}
+                              onClick={() => void handleApplicationArchiveChange(app)}
+                              className={`col-span-2 inline-flex min-h-10 items-center justify-center rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                                app.archived_at
+                                  ? 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
+                                  : 'border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                              }`}
+                            >
+                              {app.archived_at ? 'Unarchive' : 'Archive'}
                             </button>
                           )}
                         </div>

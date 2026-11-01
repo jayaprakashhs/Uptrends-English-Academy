@@ -131,6 +131,160 @@ test('archive action rejects staff accounts', async () => {
   });
 });
 
+test('Admin and Super Admin can restore archived applications without changing other records', async () => {
+  for (const role of ['admin', 'super_admin'] as const) {
+    await mockAdmin(role, async () => {
+      let application: {
+        id: string;
+        archived_at: string | null;
+        archived_by: string | null;
+        status: string;
+        student_name: string;
+      } = {
+        id: APPLICATION_ID,
+        archived_at: '2026-10-30T12:00:00.000Z',
+        archived_by: ADMIN_ID,
+        status: 'Accepted',
+        student_name: 'Test Learner',
+      };
+      const paymentRecords = [{ id: 'payment-1', application_id: APPLICATION_ID, amount: 5000 }];
+      const originalPaymentRecords = structuredClone(paymentRecords);
+      let restoreUpdates = 0;
+      globalThis.fetch = async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const url = new URL(request.url);
+        if (url.pathname === '/auth/v1/user') return Response.json({ id: ADMIN_ID });
+        if (url.pathname === '/rest/v1/admin_profiles') {
+          return Response.json([{ id: ADMIN_ID, full_name: 'Test Admin', role, is_active: true }]);
+        }
+        if (url.pathname === '/rest/v1/applications' && request.method === 'GET') {
+          return Response.json([{
+            id: application.id,
+            archived_at: application.archived_at,
+            archived_by: application.archived_by,
+          }]);
+        }
+        if (url.pathname === '/rest/v1/applications' && request.method === 'PATCH') {
+          assert.equal(url.searchParams.get('archived_at'), 'not.is.null');
+          const updates = await request.json() as { archived_at: null; archived_by: null };
+          assert.deepEqual(updates, { archived_at: null, archived_by: null });
+          application = {
+            ...application,
+            archived_at: updates.archived_at,
+            archived_by: updates.archived_by,
+          };
+          restoreUpdates += 1;
+          return Response.json([{
+            id: application.id,
+            archived_at: application.archived_at,
+            archived_by: application.archived_by,
+          }]);
+        }
+        if (url.pathname.includes('application_payments')) {
+          throw new Error('Restoring an application must not query or change payment records.');
+        }
+        throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+      };
+
+      const response = await handleApiRequest(
+        new Request(`https://academy.example/api/admin/applications/${APPLICATION_ID}/restore`, {
+          method: 'POST',
+          headers: AUTH_HEADERS,
+          body: '{}',
+        }),
+        testEnv,
+      );
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        id: APPLICATION_ID,
+        archived_at: null,
+        archived_by: null,
+      });
+      assert.equal(restoreUpdates, 1);
+      assert.equal(application.status, 'Accepted');
+      assert.equal(application.student_name, 'Test Learner');
+      assert.deepEqual(paymentRecords, originalPaymentRecords);
+    });
+  }
+});
+
+test('restore action rejects staff accounts', async () => {
+  await mockAdmin('staff', async () => {
+    const response = await handleApiRequest(
+      new Request(`https://academy.example/api/admin/applications/${APPLICATION_ID}/restore`, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+        body: '{}',
+      }),
+      testEnv,
+    );
+    assert.equal(response.status, 403);
+  });
+});
+
+test('restore action returns not found for nonexistent applications', async () => {
+  await mockAdmin('admin', async () => {
+    let updateAttempted = false;
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === '/auth/v1/user') return Response.json({ id: ADMIN_ID });
+      if (url.pathname === '/rest/v1/admin_profiles') {
+        return Response.json([{ id: ADMIN_ID, full_name: 'Test Admin', role: 'admin', is_active: true }]);
+      }
+      if (url.pathname === '/rest/v1/applications' && request.method === 'GET') return Response.json([]);
+      if (url.pathname === '/rest/v1/applications' && request.method === 'PATCH') updateAttempted = true;
+      throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+    };
+
+    const response = await handleApiRequest(
+      new Request(`https://academy.example/api/admin/applications/${APPLICATION_ID}/restore`, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+        body: '{}',
+      }),
+      testEnv,
+    );
+    assert.equal(response.status, 404);
+    assert.equal(updateAttempted, false);
+  });
+});
+
+test('restore action leaves already-active applications unchanged', async () => {
+  await mockAdmin('admin', async () => {
+    let updateAttempted = false;
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === '/auth/v1/user') return Response.json({ id: ADMIN_ID });
+      if (url.pathname === '/rest/v1/admin_profiles') {
+        return Response.json([{ id: ADMIN_ID, full_name: 'Test Admin', role: 'admin', is_active: true }]);
+      }
+      if (url.pathname === '/rest/v1/applications' && request.method === 'GET') {
+        return Response.json([{ id: APPLICATION_ID, archived_at: null, archived_by: null }]);
+      }
+      if (url.pathname === '/rest/v1/applications' && request.method === 'PATCH') updateAttempted = true;
+      throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
+    };
+
+    const response = await handleApiRequest(
+      new Request(`https://academy.example/api/admin/applications/${APPLICATION_ID}/restore`, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+        body: '{}',
+      }),
+      testEnv,
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      id: APPLICATION_ID,
+      archived_at: null,
+      archived_by: null,
+    });
+    assert.equal(updateAttempted, false);
+  });
+});
+
 test('archive migration preserves payment restrictions and forwards a photo cleanup queue', () => {
   const migration = readFileSync(
     new URL('../supabase/migrations/20261030000008_application_archive_and_photo_cleanup.sql', import.meta.url),

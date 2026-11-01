@@ -2637,6 +2637,37 @@ const archiveApplication = async (request: Request, env: Env, id: string): Promi
   return archived ? json(archived) : errorResponse('Application not found.', 404);
 };
 
+const restoreApplication = async (request: Request, env: Env, id: string): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'admin');
+  if (isResponse(auth)) return auth;
+  const { data: existing, error: readError } = await auth.supabase
+    .from('applications')
+    .select('id,archived_at,archived_by')
+    .eq('id', id)
+    .maybeSingle();
+  if (readError) return errorResponse('Unable to load application for restoration.', 500);
+  if (!existing) return errorResponse('Application not found.', 404);
+  if (!existing.archived_at) return json(existing);
+
+  const { data, error } = await auth.supabase
+    .from('applications')
+    .update({ archived_at: null, archived_by: null })
+    .eq('id', id)
+    .not('archived_at', 'is', null)
+    .select('id,archived_at,archived_by')
+    .maybeSingle();
+  if (error) return errorResponse('Unable to restore application.', 500);
+  if (data) return json(data);
+
+  const { data: restored, error: restoreReadError } = await auth.supabase
+    .from('applications')
+    .select('id,archived_at,archived_by')
+    .eq('id', id)
+    .maybeSingle();
+  if (restoreReadError) return errorResponse('Unable to verify application restoration status.', 500);
+  return restored ? json(restored) : errorResponse('Application not found.', 404);
+};
+
 const updateApplicationStatus = async (request: Request, env: Env, id: string): Promise<Response> => {
   const auth = await requireAdmin(request, env, 'staff');
   if (isResponse(auth)) return auth;
@@ -3818,6 +3849,17 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       }
       if (!validId(applicationId)) return errorResponse('Application ID must be a valid UUID.', 400);
       if (method === 'POST') return archiveApplication(request, env, applicationId);
+      return methodNotAllowed(['POST']);
+    }
+
+    const applicationRestoreRoute = pathname.match(/^\/api\/admin\/applications\/([^/]+)\/restore$/);
+    if (applicationRestoreRoute) {
+      let applicationId: string;
+      try { applicationId = decodeURIComponent(applicationRestoreRoute[1]); } catch {
+        return errorResponse('Invalid application ID.', 400);
+      }
+      if (!validId(applicationId)) return errorResponse('Application ID must be a valid UUID.', 400);
+      if (method === 'POST') return restoreApplication(request, env, applicationId);
       return methodNotAllowed(['POST']);
     }
 
