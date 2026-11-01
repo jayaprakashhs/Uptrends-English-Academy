@@ -217,6 +217,7 @@ export function App() {
         />
       );
     }
+
     return (
       <AdminPortal
         currentAdmin={currentAdmin}

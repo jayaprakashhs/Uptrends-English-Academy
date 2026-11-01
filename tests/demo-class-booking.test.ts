@@ -124,7 +124,6 @@ test('stores demo requests separately and sends independent applicant and academ
   const previousFetch = globalThis.fetch;
   const databaseRequests: Array<{ url: string; method: string; body: unknown }> = [];
   const emailMessages: Array<{ to: string | string[]; subject: string }> = [];
-  const outboxStatuses: string[] = [];
 
   globalThis.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -169,16 +168,8 @@ test('stores demo requests separately and sends independent applicant and academ
     assert.ok(savedRequest);
     assert.equal((savedRequest.body as Record<string, unknown>).status, 'Pending');
     assert.equal('photo_object_key' in (savedRequest.body as Record<string, unknown>), false);
-    const notificationInsert = databaseRequests.find(({ url, method }) =>
-      url.includes('/rest/v1/request_email_notifications?') && method === 'POST');
-    assert.ok(notificationInsert);
-    assert.equal((notificationInsert.body as Array<Record<string, unknown>>).length, 2);
-    assert.equal(databaseRequests.filter(({ url, method }) =>
-      url.includes('/rest/v1/request_email_notifications?') && method === 'PATCH').length, 2);
-    outboxStatuses.push(...databaseRequests
-      .filter(({ url, method }) => url.includes('/rest/v1/request_email_notifications?') && method === 'PATCH')
-      .map(({ body }) => (body as { status: string }).status));
-    assert.deepEqual(outboxStatuses.sort(), ['Failed', 'Sent']);
+    assert.equal(databaseRequests.some(({ url }) =>
+      url.includes('/rest/v1/request_email_notifications?')), false);
     assert.equal(emailMessages.length, 2);
     assert.equal(emailMessages[0].to, 'applicant@example.com');
     assert.equal(emailMessages[1].to, 'academy@example.com');

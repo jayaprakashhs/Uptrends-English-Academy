@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
 import {
   DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
@@ -73,29 +72,16 @@ type BrandingImageField =
 
 type BrandingEditor = Partial<SiteBranding> & Partial<Record<BrandingImageField, string>>;
 
-type PaymentStage = 'first_fee' | 'second_fee' | 'installment' | 'final_payment';
+type PaymentStage = 'first_payment' | 'second_payment' | 'installment' | 'final_payment';
+type SavedPaymentStage = PaymentStage | 'first_fee' | 'second_fee';
 type PaymentMethod = 'cash' | 'upi' | 'bank_transfer' | 'card' | 'cheque' | 'other';
-
-interface ApplicationFeeAgreement {
-  id: string;
-  application_id: string;
-  agreed_total: number;
-  currency: string;
-  notes: string | null;
-  created_by: string | null;
-  updated_by: string | null;
-  created_by_name?: string | null;
-  updated_by_name?: string | null;
-  created_at: string;
-  updated_at: string;
-}
 
 interface ApplicationPayment {
   id: string;
   application_id: string;
   amount: number;
   payment_method: PaymentMethod;
-  payment_stage: PaymentStage;
+  payment_stage: SavedPaymentStage;
   recorded_at: string;
   reference_number: string | null;
   notes: string | null;
@@ -108,84 +94,17 @@ interface ApplicationPayment {
 }
 
 interface ApplicationPaymentData {
-  application: {
-    id: string;
-    application_reference: string;
-    student_name: string;
-    program_name: string | null;
-  };
-  feeAgreement: ApplicationFeeAgreement | null;
   payments: ApplicationPayment[];
   totalPaid: number;
-  remainingBalance: number | null;
 }
 
-interface ApplicationPhotoCleanupJob {
-  id: string;
-  application_reference: string;
-  status: 'pending' | 'processing' | 'failed';
-  attempt_count: number;
-  error_message: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface ProgramFeeConfiguration {
-  program_id: string;
-  tuition_fee: number | null;
-  registration_fee: number;
-  study_material_fee: number;
-  other_charges: number;
-  discount_type: 'amount' | 'percent';
-  discount_value: number;
-  final_payable: number | null;
-  updated_at?: string;
-}
-
-type ProgramEditor = Partial<Program> & {
-  image_file_base64?: string;
-  feeConfiguration?: ProgramFeeConfiguration;
-};
-
-const emptyProgramFeeConfiguration = (programId = ''): ProgramFeeConfiguration => ({
-  program_id: programId,
-  tuition_fee: null,
-  registration_fee: 0,
-  study_material_fee: 0,
-  other_charges: 0,
-  discount_type: 'amount',
-  discount_value: 0,
-  final_payable: null,
-});
-
-const calculateProgramFinalPayable = (fee: ProgramFeeConfiguration | undefined): number | null => {
-  if (!fee || fee.tuition_fee === null) return null;
-  const subtotal = fee.tuition_fee + fee.registration_fee + fee.study_material_fee + fee.other_charges;
-  const discount = fee.discount_type === 'percent'
-    ? subtotal * fee.discount_value / 100
-    : fee.discount_value;
-  return Math.max(0, Number((subtotal - discount).toFixed(2)));
-};
+type ProgramEditor = Partial<Program> & { image_file_base64?: string };
 
 interface DashboardDemoRequest {
   id: string;
   full_name: string;
   city: string;
   status: string;
-  created_at: string;
-}
-
-interface RequestEmailNotification {
-  id: string;
-  request_type: 'demo_class_requests' | 'callback_requests';
-  request_id: string;
-  notification_type: 'applicant_confirmation' | 'academy_notification';
-  recipient_email: string;
-  status: 'Pending' | 'Sent' | 'Failed';
-  attempt_count: number;
-  provider_message_id: string | null;
-  error_message: string | null;
-  sent_at: string | null;
   created_at: string;
 }
 
@@ -363,13 +282,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [applicationsLoading, setApplicationsLoading] = useState(false);
   const [applicationsError, setApplicationsError] = useState<string | null>(null);
   const [applicationDisplayLimit, setApplicationDisplayLimit] = useState(10);
-  const [applicationPhotoCleanupJobs, setApplicationPhotoCleanupJobs] = useState<ApplicationPhotoCleanupJob[]>([]);
-  const [programFeeConfigurations, setProgramFeeConfigurations] = useState<Record<string, ProgramFeeConfiguration>>({});
   const [demoRequests, setDemoRequests] = useState<DashboardDemoRequest[]>([]);
   const [demoRefreshToken, setDemoRefreshToken] = useState(0);
   const [notifications, setNotifications] = useState<ApplicationNotification[]>([]);
-  const [requestEmailNotifications, setRequestEmailNotifications] = useState<RequestEmailNotification[]>([]);
-  const [requestEmailError, setRequestEmailError] = useState<string | null>(null);
   const [callbacks, setCallbacks] = useState<CallbackRequest[]>([]);
   const [callbacksLoading, setCallbacksLoading] = useState(false);
   const [callbacksError, setCallbacksError] = useState<string | null>(null);
@@ -398,9 +313,8 @@ interface OfficialDocumentVersion {
   email_status: 'Pending' | 'Sent' | 'Failed';
   generated_at: string | null;
   created_at: string;
-  payment_status: string;
   total_paid: number;
-  outstanding_balance: number | null;
+  payment_count: number;
 }
 
 const DEFAULT_JOINING_INFORMATION: JoiningInformationSettings = {
@@ -478,13 +392,12 @@ useEffect(() => {
   const [paymentData, setPaymentData] = useState<ApplicationPaymentData | null>(null);
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [paymentSaving, setPaymentSaving] = useState(false);
+  const [receiptBusyId, setReceiptBusyId] = useState<string | null>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null);
-  const [feeTotalInput, setFeeTotalInput] = useState('');
-  const [feeNotesInput, setFeeNotesInput] = useState('');
   const [paymentAmountInput, setPaymentAmountInput] = useState('');
   const [paymentMethodInput, setPaymentMethodInput] = useState<PaymentMethod>('upi');
-  const [paymentStageInput, setPaymentStageInput] = useState<PaymentStage>('first_fee');
+  const [paymentStageInput, setPaymentStageInput] = useState<PaymentStage>('first_payment');
   const [paymentReferenceInput, setPaymentReferenceInput] = useState('');
   const [paymentNotesInput, setPaymentNotesInput] = useState('');
   const paymentCreationIntentRef = useRef<{ signature: string; key: string } | null>(null);
@@ -558,12 +471,6 @@ useEffect(() => {
       );
 
       setPaymentData(data as ApplicationPaymentData);
-      setFeeTotalInput(
-        data?.feeAgreement?.agreed_total == null
-          ? ''
-          : String(data.feeAgreement.agreed_total),
-      );
-      setFeeNotesInput(data?.feeAgreement?.notes || '');
     } catch (error) {
       setPaymentError(
         error instanceof Error ? error.message : 'Unable to load payment records.',
@@ -573,45 +480,50 @@ useEffect(() => {
     }
   };
 
-  const saveAgreedFee = async () => {
-    if (!paymentApp || !isAdminOrHigher) return;
-
-    const agreedTotal = Number(feeTotalInput);
-    if (!feeTotalInput.trim() || !Number.isFinite(agreedTotal) || agreedTotal < 0) {
-      setPaymentError('Enter a valid agreed fee of zero or more.');
-      return;
-    }
-
-    setPaymentSaving(true);
-    setPaymentError(null);
-    try {
-      await requestJson(
-        `/api/admin/applications/${encodeURIComponent(paymentApp.id)}/fee`,
-        {
-          method: 'PUT',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({
-            agreed_total: Math.round(agreedTotal * 100) / 100,
-            notes: feeNotesInput.trim() || null,
-          }),
-        },
-      );
-      await loadApplicationPaymentData(paymentApp);
-    } catch (error) {
-      setPaymentError(error instanceof Error ? error.message : 'Unable to save agreed fee.');
-    } finally {
-      setPaymentSaving(false);
-    }
-  };
-
   const resetPaymentForm = () => {
     paymentCreationIntentRef.current = null;
     setEditingPaymentId(null);
     setPaymentAmountInput('');
     setPaymentMethodInput('upi');
-    setPaymentStageInput('first_fee');
+    setPaymentStageInput('first_payment');
     setPaymentReferenceInput('');
     setPaymentNotesInput('');
+  };
+
+  const generatePaymentReceipt = async (paymentId: string, sendEmail = false) => {
+    setReceiptBusyId(paymentId);
+    setPaymentError(null);
+    try {
+      await requestJson(`/api/admin/payments/${encodeURIComponent(paymentId)}/receipt`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+      if (sendEmail) {
+        await requestJson(`/api/admin/payments/${encodeURIComponent(paymentId)}/receipt/email`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+        });
+        setActionMessage({ type: 'success', text: 'Payment receipt emailed to the approved student.' });
+      } else {
+        const response = await fetchAdmin(`/api/admin/payments/${encodeURIComponent(paymentId)}/receipt/file`, {
+          headers: getAuthHeaders(),
+        });
+        if (!response.ok) throw new Error('Unable to download the payment receipt.');
+        const blobUrl = URL.createObjectURL(await response.blob());
+        const anchor = document.createElement('a');
+        anchor.href = blobUrl;
+        anchor.download = `Payment_Receipt_${paymentId}.pdf`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        setActionMessage({ type: 'success', text: 'Payment receipt downloaded.' });
+      }
+    } catch (error) {
+      setPaymentError(error instanceof Error ? error.message : 'Unable to process the payment receipt.');
+    } finally {
+      setReceiptBusyId(null);
+    }
   };
 
   const savePaymentEntry = async () => {
@@ -658,7 +570,7 @@ useEffect(() => {
         setPaymentError(
           typeof result.document_update.error === 'string' && result.document_update.error
             ? result.document_update.error
-            : 'Payment was saved. Its official PDF or email update is queued for retry from Notifications.',
+            : 'Payment was saved, but its official PDF or email update could not be completed. It will not be retried automatically.',
         );
       }
     } catch (error) {
@@ -672,7 +584,11 @@ useEffect(() => {
     setEditingPaymentId(payment.id);
     setPaymentAmountInput(String(payment.amount));
     setPaymentMethodInput(payment.payment_method);
-    setPaymentStageInput(payment.payment_stage);
+    setPaymentStageInput(payment.payment_stage === 'first_fee'
+      ? 'first_payment'
+      : payment.payment_stage === 'second_fee'
+        ? 'second_payment'
+        : payment.payment_stage);
     setPaymentReferenceInput(payment.reference_number || '');
     setPaymentNotesInput(payment.notes || '');
     setPaymentError(null);
@@ -739,49 +655,26 @@ useEffect(() => {
     }
   };
 
-  const loadRequestEmailNotifications = async () => {
-    if (!isSuperAdmin) return;
-    setRequestEmailError(null);
-    try {
-      const data = await requestJson('/api/admin/request-email-notifications', { headers: getAuthHeaders() });
-      if (!Array.isArray(data)) throw new Error('The request email notification response was invalid.');
-      setRequestEmailNotifications(data);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to load request email notifications.';
-      setRequestEmailError(message);
-    }
-  };
-
   const fetchAllData = async () => {
     void fetchSystemStatus().then(setSystemStatus);
     setLoading(true);
     void loadApplications();
     void loadCallbackRequests();
-    void loadRequestEmailNotifications();
     try {
       const headers = getAuthHeaders();
       const [
-        cleanupJobsRes,
         demoRequestsRes,
         notifsRes,
         progsRes,
-        programFeesRes,
         annsRes,
         mediaRes,
         faqsRes,
         brandingRes,
         profilesRes,
       ] = await Promise.all([
-        isSuperAdmin
-          ? requestJson('/api/admin/application-photo-cleanup-jobs', { headers }).catch((error) => {
-            console.error('Unable to load application photo cleanup jobs.', error);
-            return null;
-          })
-          : Promise.resolve([]),
         requestJson('/api/admin/demo-class-requests', { headers }),
         isSuperAdmin ? requestJson('/api/admin/notifications', { headers }) : Promise.resolve([]),
         requestJson(isAdminOrHigher ? '/api/admin/programs' : '/api/programs', isAdminOrHigher ? { headers } : undefined),
-        isAdminOrHigher ? requestJson('/api/admin/program-fees', { headers }) : Promise.resolve([]),
         requestJson(isAdminOrHigher ? '/api/admin/announcements' : '/api/announcements', isAdminOrHigher ? { headers } : undefined),
         isAdminOrHigher ? requestJson('/api/admin/media', { headers }) : Promise.resolve([]),
         isSuperAdmin
@@ -793,15 +686,9 @@ useEffect(() => {
           : Promise.resolve([]),
       ]);
 
-      if (Array.isArray(cleanupJobsRes)) setApplicationPhotoCleanupJobs(cleanupJobsRes);
       if (Array.isArray(demoRequestsRes)) setDemoRequests(demoRequestsRes);
       if (Array.isArray(notifsRes)) setNotifications(notifsRes);
       if (Array.isArray(progsRes)) setPrograms(progsRes);
-      if (Array.isArray(programFeesRes)) {
-        setProgramFeeConfigurations(Object.fromEntries(
-          (programFeesRes as ProgramFeeConfiguration[]).map((fee) => [fee.program_id, fee]),
-        ));
-      }
       if (Array.isArray(annsRes)) setAnnouncements(annsRes);
       if (Array.isArray(mediaRes)) setMediaItems(mediaRes);
       if (Array.isArray(faqsRes)) setFaqs(faqsRes);
@@ -1029,13 +916,20 @@ const handleOfficialAssetChange = (
 };
 
 const previewOfficialDocumentPdf = async (download = false) => {
+  const application = applications.find((item) =>
+    item.id === officialPdfApplicationId && item.status === 'Accepted' && Boolean(item.student_id),
+  );
+  if (!application) {
+    setActionMessage({ type: 'error', text: 'Select an approved application with a permanent Student ID before previewing.' });
+    return;
+  }
   try {
     await saveOfficialDocumentSettings();
     setLoading(true);
     const response = await fetchAdmin('/api/admin/official-document/preview', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ download }),
+      body: JSON.stringify({ application_id: application.id, download }),
     });
     if (!response.ok) {
       const data = await response.json().catch(() => null);
@@ -1050,7 +944,7 @@ const previewOfficialDocumentPdf = async (download = false) => {
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(pdfUrl), 1000);
-      setActionMessage({ type: 'success', text: 'Preview-only PDF downloaded. No student application data was used.' });
+      setActionMessage({ type: 'success', text: 'Preview-only PDF downloaded using the selected student application.' });
     } else {
       setOfficialPdfPreviewUrl(pdfUrl);
       setActionMessage(null);
@@ -1107,199 +1001,6 @@ const resetOfficialDocumentSettings = () => {
   setActionMessage({ type: 'success', text: 'Defaults loaded. Save changes to persist them.' });
 };
 
-const updateOfficialTerm = (index: number, value: string) => {
-  setOfficialDocumentSettings((current) => ({
-    ...current,
-    terms: current.terms.map((term, termIndex) => termIndex === index ? value : term),
-  }));
-};
-
-const moveOfficialTerm = (index: number, offset: -1 | 1) => {
-  setOfficialDocumentSettings((current) => {
-    const target = index + offset;
-    if (target < 0 || target >= current.terms.length) return current;
-    const terms = [...current.terms];
-    [terms[index], terms[target]] = [terms[target], terms[index]];
-    return { ...current, terms };
-  });
-};
-
-const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
-  setOfficialDocumentSettings((current) => {
-    const index = current.layout.sectionOrder.indexOf(section);
-    const target = index + offset;
-    if (index < 0 || target < 0 || target >= current.layout.sectionOrder.length) return current;
-    const sectionOrder = [...current.layout.sectionOrder];
-    [sectionOrder[index], sectionOrder[target]] = [sectionOrder[target], sectionOrder[index]];
-    return { ...current, layout: { ...current.layout, sectionOrder } };
-  });
-};
-
-  const generateStudentConfirmationPdf = async () => {
-    if (!paymentApp || !paymentData) {
-      setPaymentError('Load this student’s payment records before generating the confirmation PDF.');
-      return;
-    }
-
-    if (paymentApp.status !== 'Accepted') {
-      setPaymentError('Approve this application before generating an enrollment confirmation.');
-      return;
-    }
-
-    setPaymentError(null);
-    setPaymentSaving(true);
-    try {
-      const pdf = await PDFDocument.create();
-      const page = pdf.addPage([595.28, 841.89]);
-      const regular = await pdf.embedFont(StandardFonts.Helvetica);
-      const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-      const { width, height } = page.getSize();
-      const orange = rgb(0.88, 0.25, 0.04);
-      const dark = rgb(0.12, 0.16, 0.22);
-      const muted = rgb(0.35, 0.39, 0.44);
-      const green = rgb(0.05, 0.42, 0.27);
-      const left = 48;
-      const right = width - 48;
-      let y = height - 48;
-
-      const drawText = (text: string, x: number, topY: number, size = 10, font = regular, color = dark) => {
-        page.drawText(text, { x, y: topY - size, size, font, color, maxWidth: right - x });
-      };
-      const drawRule = (topY: number) => {
-        page.drawLine({ start: { x: left, y: topY }, end: { x: right, y: topY }, thickness: 0.8, color: rgb(0.88, 0.89, 0.91) });
-      };
-      const safe = (value: unknown) => String(value ?? '—')
-        .replace(/[’‘]/g, "'")
-        .replace(/[–—]/g, '-')
-        .replace(/[^\x20-\x7E]/g, '?');
-
-      // Reuse the configured official PDF logo.
-      try {
-        const response = await fetchAdmin('/api/admin/official-document/assets?type=logo', {
-          headers: getAuthHeaders(),
-        });
-        if (response.ok) {
-          const logoBytes = new Uint8Array(await response.arrayBuffer());
-          const contentType = response.headers.get('content-type') || '';
-          const logo = contentType.includes('png')
-            ? await pdf.embedPng(logoBytes)
-            : contentType.includes('jpeg') || contentType.includes('jpg')
-              ? await pdf.embedJpg(logoBytes)
-              : null;
-          if (!logo) throw new Error('Configured PDF logo is not a PNG or JPEG image.');
-          const logoDims = logo.scale(Math.min(58 / logo.width, 48 / logo.height));
-          page.drawImage(logo, { x: left, y: y - 48, width: logoDims.width, height: logoDims.height });
-        } else if (response.status !== 404) {
-          throw new Error('Configured PDF logo could not be loaded.');
-        }
-      } catch (logoError) {
-        // Logo is optional; keep PDF generation available if remote fetch/CORS fails.
-        console.warn('Student PDF logo could not be embedded:', logoError);
-      }
-
-      drawText(safe(officialDocumentSettings.academyName || "Uptrend's English Academy"), left + 70, y - 3, 17, bold, orange);
-      drawText(safe(officialDocumentSettings.address), left + 70, y - 22, 8, regular, muted);
-      drawText(`Phone: ${safe(officialDocumentSettings.phone)}  |  Email: ${safe(officialDocumentSettings.email)}`, left + 70, y - 35, 8, regular, muted);
-      y -= 76;
-      drawRule(y);
-      y -= 28;
-
-      drawText('STUDENT ENROLLMENT & FEE CONFIRMATION', left, y, 15, bold, dark);
-      y -= 32;
-      drawText(`Application reference: ${safe(paymentData.application.application_reference || paymentApp.application_reference)}`, left, y, 10, bold);
-      y -= 24;
-
-      drawText('STUDENT DETAILS', left, y, 10, bold, orange);
-      y -= 20;
-      const details = [
-        ['Student name', paymentData.application.student_name || paymentApp.student_name],
-        ['Selected course', paymentData.application.program_name || paymentApp.program_name || 'Not specified'],
-        ['Mobile', paymentApp.mobile],
-        ['Email', paymentApp.email || 'Not provided'],
-        ['Application status', paymentApp.status],
-        ['Confirmation date', new Date().toLocaleDateString('en-IN')],
-      ];
-      for (const [label, value] of details) {
-        drawText(`${label}: ${safe(value)}`, left + 4, y, 9, regular, dark);
-        y -= 17;
-      }
-
-      y -= 8;
-      drawRule(y);
-      y -= 25;
-      drawText('FEE SUMMARY (INR)', left, y, 10, bold, orange);
-      y -= 21;
-
-      const agreedTotal = paymentData.feeAgreement?.agreed_total;
-      const totalPaid = Number(paymentData.totalPaid || 0);
-      const remaining = paymentData.remainingBalance;
-      const money = (value: number) => `INR ${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-      drawText(`Agreed total fee: ${agreedTotal == null ? 'Not set' : money(Number(agreedTotal))}`, left + 4, y, 10, bold);
-      y -= 19;
-      drawText(`Total payment recorded: ${money(totalPaid)}`, left + 4, y, 10, regular);
-      y -= 19;
-      drawText(`Remaining balance: ${remaining == null ? 'Not available - agreed fee not set' : money(Number(remaining))}`, left + 4, y, 10, regular);
-      y -= 24;
-
-      const feeStatus = agreedTotal == null
-        ? 'Fee confirmation pending'
-        : Number(remaining) <= 0
-          ? 'Fully paid according to recorded entries'
-          : totalPaid > 0
-            ? 'Partially paid according to recorded entries'
-            : 'Payment not yet recorded';
-      drawText(`Payment status: ${feeStatus}`, left + 4, y, 9, bold, green);
-      y -= 28;
-
-      drawRule(y);
-      y -= 24;
-      drawText('ENROLLMENT NOTE', left, y, 10, bold, orange);
-      y -= 20;
-      drawText('This document confirms the application status and the fee/payment entries saved in the academy admin register.', left + 4, y, 9, regular);
-      y -= 16;
-      drawText('Payment figures reflect records entered by academy staff; retain the official payment receipt where applicable.', left + 4, y, 9, regular, muted);
-      y -= 32;
-
-      if (paymentData.payments.length > 0) {
-        drawText('RECENT PAYMENT RECORDS', left, y, 10, bold, orange);
-        y -= 19;
-        for (const payment of paymentData.payments.slice(0, 8)) {
-          if (y < 95) break;
-          const line = `${new Date(payment.recorded_at).toLocaleDateString('en-IN')} | ${safe(payment.payment_stage.replaceAll('_', ' '))} | ${safe(payment.payment_method.replaceAll('_', ' '))} | ${money(Number(payment.amount))}${payment.reference_number ? ` | Ref: ${safe(payment.reference_number)}` : ''}`;
-          drawText(line, left + 4, y, 8, regular, muted);
-          y -= 15;
-        }
-      }
-
-      page.drawLine({ start: { x: left, y: 58 }, end: { x: right, y: 58 }, thickness: 0.8, color: rgb(0.88, 0.89, 0.91) });
-      page.drawText(`${safe(officialDocumentSettings.academyName || "Uptrend's English Academy")} - Davangere`, {
-        x: left, y: 40, size: 8, font: regular, color: muted,
-      });
-      page.drawText('Student copy', { x: right - 75, y: 40, size: 8, font: regular, color: muted });
-
-      const bytes = await pdf.save();
-      const safeBuffer = new ArrayBuffer(bytes.byteLength);
-      new Uint8Array(safeBuffer).set(bytes);
-      const blob = new Blob([safeBuffer], { type: 'application/pdf' });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      const safeReference = safe(paymentData.application.application_reference || paymentApp.application_reference).replace(/[^A-Za-z0-9_-]/g, '_');
-      anchor.href = url;
-      anchor.download = `Enrollment_Fee_Confirmation_${safeReference}.pdf`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setActionMessage({ type: 'success', text: 'Student enrollment and fee confirmation PDF downloaded.' });
-    } catch (error) {
-      setPaymentError(error instanceof Error ? error.message : 'Unable to generate the student confirmation PDF.');
-    } finally {
-      setPaymentSaving(false);
-    }
-  };
-
-
   useEffect(() => {
     if (isSuperAdmin) void fetchOfficialDocumentSettings();
   }, [isSuperAdmin]);
@@ -1350,50 +1051,8 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
     }
   };
 
-  // Action: Delete Application (Super Admin only)
-  const handleDeleteApplication = async (appId: string) => {
-    if (!confirm('Are you sure you want to permanently delete this application record? This action cannot be undone.')) return;
-    setActionMessage(null);
-    setLoading(true);
-    try {
-      const res = await fetchAdmin(`/api/admin/applications/${appId}`, {
-        method: 'DELETE',
-        headers: getAuthHeaders(),
-      });
-      const data = await res.json();
-      if (res.status === 409 && data.archive_required) {
-        if (!confirm(`${data.error}\n\nArchive this application instead? Payment and agreed fee records will remain attached.`)) {
-          setActionMessage({ type: 'error', text: data.error || 'Application was not deleted.' });
-          return;
-        }
-        const archiveResponse = await fetchAdmin(`/api/admin/applications/${appId}/archive`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-        });
-        const archiveData = await archiveResponse.json();
-        if (!archiveResponse.ok) throw new Error(archiveData.error || 'Failed to archive application.');
-        setActionMessage({ type: 'success', text: 'Application archived. Its payment and agreed fee records remain attached.' });
-        if (selectedApp?.id === appId) setSelectedApp(null);
-        await fetchAllData();
-        return;
-      }
-      if (!res.ok) throw new Error(data.error || 'Failed to delete application.');
-
-      setActionMessage({
-        type: data.photo_cleanup_status && data.photo_cleanup_status !== 'completed' ? 'warning' : 'success',
-        text: data.message || 'Application record deleted successfully.',
-      });
-      if (selectedApp?.id === appId) setSelectedApp(null);
-      await fetchAllData();
-    } catch (err: any) {
-      setActionMessage({ type: 'error', text: err.message || 'Error deleting application.' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleArchiveApplication = async (appId: string) => {
-    if (!confirm('Archive this application? It will remain available in the Archived filter, and any payment or agreed fee records will remain attached.')) return;
+    if (!confirm('Archive this application? It will remain available in the Archived filter, and its payment records will remain attached.')) return;
     setActionMessage(null);
     setLoading(true);
     try {
@@ -1408,29 +1067,6 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
       await fetchAllData();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to archive application.';
-      setActionMessage({ type: 'error', text: message });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleRetryApplicationPhotoCleanup = async (jobId: string) => {
-    setLoading(true);
-    setActionMessage(null);
-    try {
-      const response = await fetchAdmin(`/api/admin/application-photo-cleanup-jobs/${jobId}/retry`, {
-        method: 'POST',
-        headers: getAuthHeaders(),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message || data.error || 'Photo cleanup retry failed.');
-      const jobs = await requestJson('/api/admin/application-photo-cleanup-jobs', {
-        headers: getAuthHeaders(),
-      });
-      if (Array.isArray(jobs)) setApplicationPhotoCleanupJobs(jobs);
-      setActionMessage({ type: 'success', text: data.message || 'Application photo cleanup completed.' });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to retry application photo cleanup.';
       setActionMessage({ type: 'error', text: message });
     } finally {
       setLoading(false);
@@ -1506,64 +1142,6 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
     }
   };
 
-  // Action: Retry Email Notification
-  const handleRetryNotification = async (notifId: string) => {
-    setActionMessage(null);
-    setLoading(true);
-    try {
-      const res = await fetchAdmin('/api/retry-notification', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ notification_id: notifId }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Retry failed');
-      setActionMessage({
-        type: data.success ? 'success' : 'error',
-        text: data.message || 'Notification retry completed.',
-      });
-      await fetchAllData();
-    } catch (err: any) {
-      setActionMessage({ type: 'error', text: err.message });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleRetryRequestEmailNotification = async (notificationId: string) => {
-    setActionMessage(null);
-    setLoading(true);
-    try {
-      const result = await requestJson(
-        `/api/admin/request-email-notifications/${encodeURIComponent(notificationId)}/retry`,
-        { method: 'POST', headers: getAuthHeaders() },
-      );
-      setActionMessage({
-        type: result.success ? 'success' : 'error',
-        text: result.message || 'Request email retry completed.',
-      });
-      await loadRequestEmailNotifications();
-    } catch (error) {
-      setActionMessage({ type: 'error', text: error instanceof Error ? error.message : 'Unable to retry request email.' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const updateEditingProgramFee = <K extends keyof ProgramFeeConfiguration,>(
-    key: K,
-    value: ProgramFeeConfiguration[K],
-  ) => {
-    setEditingProgram((current) => current ? {
-      ...current,
-      feeConfiguration: {
-        ...emptyProgramFeeConfiguration(current.id),
-        ...current.feeConfiguration,
-        [key]: value,
-      },
-    } : current);
-  };
-
   // Action: Save Program
   const handleSaveProgram = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1578,7 +1156,7 @@ const moveOfficialSection = (section: OfficialSection, offset: -1 | 1) => {
       const method = editingProgram.id ? 'PUT' : 'POST';
       const url = editingProgram.id ? `/api/admin/programs/${editingProgram.id}` : '/api/admin/programs';
       // The Worker manages image_object_key; never send it from the browser.
-const { image_object_key: _imageObjectKey, feeConfiguration, ...programPayload } = editingProgram;
+const { image_object_key: _imageObjectKey, ...programPayload } = editingProgram;
 
 const res = await fetchAdmin(url, {
   method,
@@ -1587,36 +1165,14 @@ const res = await fetchAdmin(url, {
 });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save program');
-      const savedProgramId = editingProgram.id || data.id;
-      if (savedProgramId) {
-        setEditingProgram((current) => current ? {
-          ...current,
-          id: savedProgramId,
-          image_url: data.image_url || current.image_url,
-          image_file_base64: undefined,
-        } : current);
-      }
-      if (!savedProgramId || !feeConfiguration) {
-        throw new Error('Program details were saved, but the course fee configuration is unavailable.');
-      }
-      const feeResponse = await fetchAdmin(`/api/admin/programs/${savedProgramId}/fee`, {
-        method: 'PUT',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          tuition_fee: feeConfiguration.tuition_fee,
-          registration_fee: feeConfiguration.registration_fee,
-          study_material_fee: feeConfiguration.study_material_fee,
-          other_charges: feeConfiguration.other_charges,
-          discount_type: feeConfiguration.discount_type,
-          discount_value: feeConfiguration.discount_value,
-        }),
-      });
-      const feeResult = await feeResponse.json();
-      if (!feeResponse.ok) {
-        throw new Error(`Program details were saved, but course fees were not saved: ${feeResult.error || 'Unknown error.'}`);
-      }
+      setEditingProgram((current) => current ? {
+        ...current,
+        id: current.id || data.id,
+        image_url: data.image_url || current.image_url,
+        image_file_base64: undefined,
+      } : current);
       setEditingProgram(null);
-      setActionMessage({ type: 'success', text: 'Program details and course fees were saved successfully.' });
+      setActionMessage({ type: 'success', text: 'Program details were saved successfully.' });
       notifyPublicDataChanged();
       await fetchAllData();
     } catch (err: any) {
@@ -2118,7 +1674,7 @@ const res = await fetchAdmin(url, {
     { id: 'announcements', label: 'Announcements', icon: Volume2, minRole: 'admin' },
     { id: 'branding', label: 'Site Branding & Assets', icon: Palette, minRole: 'admin' },
     { id: 'faqs', label: 'FAQs Management', icon: HelpCircle, minRole: 'super_admin' },
-    { id: 'notifications', label: 'Email Outbox & Retries', icon: Send, minRole: 'super_admin' },
+    { id: 'notifications', label: 'Email History', icon: Send, minRole: 'super_admin' },
     { id: 'roles', label: 'Admin Roles & Access', icon: ShieldCheck, minRole: 'super_admin' },
     { id: 'settings', label: 'Settings & PDF Config', icon: Settings, minRole: 'super_admin' },
   ];
@@ -2754,11 +2310,10 @@ const res = await fetchAdmin(url, {
 
               <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
                 <h2 className="mb-4 text-sm font-bold text-slate-900">Integration status & connectivity</h2>
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                   <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs"><span className="font-semibold text-slate-700">Database & persistence</span><span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${integrationStatusClass(systemStatus?.supabase)}`}>{integrationStatusLabel(systemStatus?.supabase, 'Supabase Not Configured')}</span></div>
                   <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs"><span className="font-semibold text-slate-700">Resend transactional email</span><span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${integrationStatusClass(systemStatus?.resend)}`}>{integrationStatusLabel(systemStatus?.resend, 'API key missing')}</span></div>
                   <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs"><span className="font-semibold text-slate-700">Cloudflare R2 storage</span><span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${integrationStatusClass(systemStatus?.r2_storage)}`}>{integrationStatusLabel(systemStatus?.r2_storage, 'R2 Not Configured')}</span></div>
-                  <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs"><span className="font-semibold text-slate-700">Official fee structure PDF</span><span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${integrationStatusClass(systemStatus?.official_pdf)}`}>{systemStatus?.official_pdf?.available ? 'PDF Ready' : integrationStatusLabel(systemStatus?.official_pdf, 'Configure PDF')}</span></div>
                 </div>
               </section>
             </div>
@@ -2829,35 +2384,6 @@ const res = await fetchAdmin(url, {
                   {applicationsError}
                   <button type="button" onClick={() => void loadApplications()} className="ml-3 font-bold underline">Retry</button>
                 </div>
-              )}
-
-              {isSuperAdmin && applicationPhotoCleanupJobs.length > 0 && (
-                <section aria-label="Application photo cleanup retries" className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
-                  <div>
-                    <h2 className="text-sm font-bold text-amber-950">Application photo cleanup needs attention</h2>
-                    <p className="mt-1 text-xs text-amber-800">Application records were deleted; retry these private R2 photo cleanups.</p>
-                  </div>
-                  {applicationPhotoCleanupJobs.map((job) => (
-                    <div key={job.id} className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-white p-3 sm:flex-row sm:items-center sm:justify-between">
-                      <div className="min-w-0">
-                        <p className="text-xs font-bold text-slate-800">{job.application_reference}</p>
-                        <p className="mt-1 text-[11px] text-slate-600">
-                          {job.status} · {job.attempt_count} attempt{job.attempt_count === 1 ? '' : 's'}
-                          {job.error_message ? ` · ${job.error_message}` : ''}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={loading}
-                        onClick={() => void handleRetryApplicationPhotoCleanup(job.id)}
-                        className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-amber-700 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
-                      >
-                        <RefreshCw className="h-4 w-4" aria-hidden="true" />
-                        Retry photo cleanup
-                      </button>
-                    </div>
-                  ))}
-                </section>
               )}
 
               <div className="space-y-4">
@@ -2947,11 +2473,12 @@ const res = await fetchAdmin(url, {
                           </button>
                           <button
                             type="button"
-                            disabled={loading || paymentLoading}
+                            disabled={loading || paymentLoading || app.status !== 'Accepted'}
                             onClick={() => void loadApplicationPaymentData(app)}
                             className="min-h-10 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+                            title={app.status !== 'Accepted' ? 'Approve this application first' : 'Open payment and receipt management'}
                           >
-                            Payment
+                            Payment &amp; receipts
                           </button>
                           {app.status === 'Pending' && (
                             <button
@@ -2962,18 +2489,6 @@ const res = await fetchAdmin(url, {
                               title="Open review and complete joining information before approval"
                             >
                               Review &amp; Approve
-                            </button>
-                          )}
-                          {isSuperAdmin && (
-                            <button
-                              type="button"
-                              disabled={loading}
-                              onClick={() => handleDeleteApplication(app.id)}
-                              className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:opacity-50"
-                              title="Permanently Delete Application (Super Admin only)"
-                            >
-                              <Trash2 className="h-4 w-4" aria-hidden="true" />
-                              Delete application
                             </button>
                           )}
                           {isAdminOrHigher && !app.archived_at && (
@@ -3267,7 +2782,6 @@ const res = await fetchAdmin(url, {
                       level: 'Foundation to Advanced',
                       target_audience: 'Students, job seekers, professionals',
                       is_published: true,
-                      feeConfiguration: emptyProgramFeeConfiguration(),
                     })
                   }
                   className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
@@ -3303,9 +2817,6 @@ const res = await fetchAdmin(url, {
                       <div className="mt-3 text-xs text-slate-500 space-y-1">
                         <p><strong>Audience:</strong> {prog.target_audience}</p>
                         {prog.duration && <p><strong>Duration:</strong> {prog.duration}</p>}
-                        <p><strong>Fee:</strong> {programFeeConfigurations[prog.id]?.final_payable == null
-                          ? 'Not configured'
-                          : `INR ${Number(programFeeConfigurations[prog.id].final_payable).toLocaleString('en-IN')}`}</p>
                       </div>
                     </div>
 
@@ -3321,10 +2832,7 @@ const res = await fetchAdmin(url, {
                       <button
                         type="button"
                         disabled={loading}
-                        onClick={() => setEditingProgram({
-                          ...prog,
-                          feeConfiguration: programFeeConfigurations[prog.id] || emptyProgramFeeConfiguration(prog.id),
-                        })}
+                        onClick={() => setEditingProgram(prog)}
                         className="text-xs font-bold text-orange-600 hover:underline cursor-pointer disabled:opacity-50"
                       >
                         Edit Details
@@ -3811,57 +3319,17 @@ const res = await fetchAdmin(url, {
             </div>
           )}
 
-          {/* TAB 7: EMAIL OUTBOX & RETRIES */}
+          {/* TAB 7: EMAIL HISTORY */}
           {activeTab === 'notifications' && (
             <div className="space-y-6">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
-                  <h1 className="text-xl sm:text-2xl font-extrabold text-slate-950 leading-tight">Email Notification Monitoring</h1>
+                  <h1 className="text-xl sm:text-2xl font-extrabold text-slate-950 leading-tight">Email Notification History</h1>
                   <p className="text-xs text-slate-500 mt-1">
-                    Track transactional emails dispatched via Resend, monitor status, and trigger retries for failed deliveries.
+                    Read-only records of transactional email delivery results.
                   </p>
                 </div>
               </div>
-
-              <section aria-label="Demo and callback email notifications" className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900">Demo and Callback Notifications</h2>
-                  <p className="mt-1 text-xs text-slate-500">Delivery attempts for requests saved outside the application workflow.</p>
-                </div>
-                {requestEmailError && <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{requestEmailError}</p>}
-                {requestEmailNotifications.length ? (
-                  <div className="divide-y divide-slate-100">
-                    {requestEmailNotifications.map((notification) => (
-                      <article key={notification.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="min-w-0 space-y-1">
-                          <p className="text-xs font-bold text-slate-900">
-                            {notification.request_type === 'demo_class_requests' ? 'Demo class' : 'Callback'} · {notification.notification_type.replace('_', ' ')}
-                          </p>
-                          <p className="break-all text-xs text-slate-600">{notification.recipient_email}</p>
-                          <p className="text-[11px] text-slate-500">
-                            {notification.status} · {notification.attempt_count} attempt{notification.attempt_count === 1 ? '' : 's'}
-                            {notification.error_message ? ` · ${notification.error_message}` : ''}
-                          </p>
-                        </div>
-                        {notification.status !== 'Sent' && (
-                          <button
-                            type="button"
-                            disabled={loading}
-                            onClick={() => void handleRetryRequestEmailNotification(notification.id)}
-                            className="min-h-9 shrink-0 rounded-lg bg-orange-600 px-3 text-xs font-bold text-white hover:bg-orange-700 disabled:opacity-50"
-                          >
-                            Retry email
-                          </button>
-                        )}
-                      </article>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="rounded-xl border border-dashed border-slate-300 px-4 py-8 text-center text-xs text-slate-500">
-                    {loading ? 'Loading request email notifications…' : 'No demo or callback email attempts logged.'}
-                  </p>
-                )}
-              </section>
 
               <div className="bg-transparent sm:bg-white rounded-2xl sm:border sm:border-slate-200 sm:shadow-xs overflow-hidden">
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:hidden">
@@ -3881,15 +3349,9 @@ const res = await fetchAdmin(url, {
                           <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Recipient</p>
                           <p className="mt-1 break-all text-xs text-slate-700">{notif.recipient_email}</p>
                         </div>
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="rounded-xl bg-slate-50 p-3">
-                            <p className="text-[10px] font-semibold text-slate-500">Attempts</p>
-                            <p className="mt-1 text-sm font-bold text-slate-900">{notif.attempt_count}</p>
-                          </div>
-                          <div className="rounded-xl bg-slate-50 p-3">
-                            <p className="text-[10px] font-semibold text-slate-500">PDF attached</p>
-                            <p className={`mt-1 text-xs font-bold ${notif.pdf_attached ? 'text-emerald-700' : 'text-slate-500'}`}>{notif.pdf_attached ? 'Yes' : 'No'}</p>
-                          </div>
+                        <div className="rounded-xl bg-slate-50 p-3">
+                          <p className="text-[10px] font-semibold text-slate-500">PDF attached</p>
+                          <p className={`mt-1 text-xs font-bold ${notif.pdf_attached ? 'text-emerald-700' : 'text-slate-500'}`}>{notif.pdf_attached ? 'Yes' : 'No'}</p>
                         </div>
                         {(notif.error_message || notif.provider_message_id) && (
                           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
@@ -3897,15 +3359,10 @@ const res = await fetchAdmin(url, {
                             <p className="mt-1 break-words text-xs text-slate-600">{notif.error_message || notif.provider_message_id}</p>
                           </div>
                         )}
-                        {notif.status === 'Failed' && (
-                          <button type="button" onClick={() => handleRetryNotification(notif.id)} className="w-full rounded-xl bg-orange-600 px-4 py-3 text-sm font-bold text-white hover:bg-orange-700 active:bg-orange-800">
-                            Retry email
-                          </button>
-                        )}
                       </article>
                     ))
                   ) : (
-                    <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-400">No notifications logged in outbox.</div>
+                    <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-400">No notification history available.</div>
                   )}
                 </div>
                 <div className="hidden overflow-x-auto overscroll-x-contain 2xl:block">
@@ -3915,10 +3372,8 @@ const res = await fetchAdmin(url, {
                       <th className="px-4 sm:px-5 py-3.5">Type</th>
                       <th className="px-5 py-3.5">Recipient</th>
                       <th className="px-5 py-3.5">Status</th>
-                      <th className="px-5 py-3.5">Attempts</th>
                       <th className="px-5 py-3.5">PDF Attached</th>
                       <th className="px-5 py-3.5">Error / Details</th>
-                      <th className="px-5 py-3.5 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700">
@@ -3942,7 +3397,6 @@ const res = await fetchAdmin(url, {
                               {notif.status}
                             </span>
                           </td>
-                          <td className="px-5 py-4">{notif.attempt_count}</td>
                           <td className="px-5 py-4">
                             {notif.pdf_attached ? (
                               <span className="text-emerald-700 font-semibold">Yes (Official PDF)</span>
@@ -3953,22 +3407,12 @@ const res = await fetchAdmin(url, {
                           <td className="px-5 py-4 text-slate-500 text-[11px] max-w-xs truncate">
                             {notif.error_message || notif.provider_message_id || 'Delivered to gateway'}
                           </td>
-                          <td className="px-5 py-4 text-right">
-                            {notif.status === 'Failed' && (
-                              <button
-                                onClick={() => handleRetryNotification(notif.id)}
-                                className="px-3 py-1 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-lg cursor-pointer"
-                              >
-                                Retry
-                              </button>
-                            )}
-                          </td>
                         </tr>
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={7} className="text-center py-12 text-slate-400">
-                          No notifications logged in outbox.
+                        <td colSpan={5} className="text-center py-12 text-slate-400">
+                          No notification history available.
                         </td>
                       </tr>
                     )}
@@ -4344,18 +3788,18 @@ const res = await fetchAdmin(url, {
               <section className="space-y-4 rounded-xl border border-blue-100 bg-white p-4 shadow-sm sm:p-5" aria-labelledby="official-student-preview-heading">
                 <div>
                   <h2 id="official-student-preview-heading" className="font-bold text-[#0B1F4D]">Template preview</h2>
-                  <p className="mt-1 text-xs text-slate-500">Preview PDFs use clearly marked placeholder details only. They are never issued or emailed to applicants.</p>
+                  <p className="mt-1 text-xs text-slate-500">Preview uses the actual data from the approved application selected below. It is marked preview-only and is never issued or emailed.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <button type="button" disabled={loading} onClick={() => void previewOfficialDocumentPdf()} className="min-h-11 rounded-xl bg-[#0B1F4D] px-4 py-2.5 text-xs font-bold text-white transition-colors hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-50">Preview PDF</button>
-                  <button type="button" disabled={loading} onClick={() => void previewOfficialDocumentPdf(true)} className="min-h-11 rounded-xl border border-orange-300 bg-white px-4 py-2.5 text-xs font-bold text-orange-800 transition-colors hover:bg-orange-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-50">Download Preview PDF</button>
+                  <button type="button" disabled={loading || !applications.some((item) => item.id === officialPdfApplicationId && item.status === 'Accepted' && item.student_id)} onClick={() => void previewOfficialDocumentPdf()} className="min-h-11 rounded-xl bg-[#0B1F4D] px-4 py-2.5 text-xs font-bold text-white transition-colors hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-50">Preview PDF</button>
+                  <button type="button" disabled={loading || !applications.some((item) => item.id === officialPdfApplicationId && item.status === 'Accepted' && item.student_id)} onClick={() => void previewOfficialDocumentPdf(true)} className="min-h-11 rounded-xl border border-orange-300 bg-white px-4 py-2.5 text-xs font-bold text-orange-800 transition-colors hover:bg-orange-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-50">Download Preview PDF</button>
                 </div>
               </section>
 
               <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5" aria-labelledby="official-issued-document-heading">
                 <div>
                   <h2 id="official-issued-document-heading" className="font-bold text-[#0B1F4D]">Issued student document</h2>
-                  <p className="mt-1 text-xs text-slate-500">Select an approved application to inspect its real data and download its issued PDF. This selection is not used by the template preview.</p>
+                  <p className="mt-1 text-xs text-slate-500">Select an approved application to preview its real data, inspect document history, or download its issued PDF.</p>
                 </div>
                 <label className="block max-w-2xl text-xs font-semibold text-slate-700">
                   Application history
@@ -4405,8 +3849,15 @@ const res = await fetchAdmin(url, {
                       <div key={version.version_number} className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5 text-xs">
                         <div className="min-w-0">
                           <p className="font-bold text-[#0B1F4D]">Version {version.version_number} · {version.issuance_type.replace('_', ' ')}</p>
-                          <p className="mt-1 text-slate-500">PDF: {version.status} · Email: {version.email_status} · Payment: {version.payment_status.replaceAll('_', ' ')}</p>
-                          <p className="mt-1 text-slate-500">Paid: INR {Number(version.total_paid).toLocaleString('en-IN', { minimumFractionDigits: 2 })}{version.generated_at ? ` · Generated ${new Date(version.generated_at).toLocaleString('en-IN')}` : ''}</p>
+                          <p className="mt-1 text-slate-500">PDF: {version.status} · Email: {version.email_status}</p>
+                          {version.issuance_type === 'payment_update' && (
+                            <p className="mt-1 text-slate-500">
+                              {version.payment_count} payment record{version.payment_count === 1 ? '' : 's'} · Total recorded: INR {Number(version.total_paid).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                            </p>
+                          )}
+                          {version.generated_at && (
+                            <p className="mt-1 text-slate-500">Generated {new Date(version.generated_at).toLocaleString('en-IN')}</p>
+                          )}
                         </div>
                         <button type="button" disabled={loading || version.status !== 'ready'} onClick={() => void downloadIssuedOfficialDocument(version.version_number)} className="min-h-9 rounded-lg border border-emerald-300 px-3 font-bold text-emerald-800 disabled:cursor-not-allowed disabled:opacity-50">Download V{version.version_number}</button>
                       </div>
@@ -4487,48 +3938,12 @@ const res = await fetchAdmin(url, {
                     </label>
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2">
-                    {(Object.entries(officialDocumentSettings.sectionHeadings) as [OfficialSection, string][]).map(([section, heading]) => (
+                    {(['student', 'course', 'joining', 'payment'] as OfficialSection[]).map((section) => (
                       <label key={section} className="text-xs font-semibold text-slate-700">{section} section heading
-                        <input value={heading} onChange={(event) => setOfficialDocumentSettings((current) => ({ ...current, sectionHeadings: { ...current.sectionHeadings, [section]: event.target.value } }))} className="mt-1 min-h-10 w-full rounded-lg border border-slate-200 px-3" />
+                        <input value={officialDocumentSettings.sectionHeadings[section]} onChange={(event) => setOfficialDocumentSettings((current) => ({ ...current, sectionHeadings: { ...current.sectionHeadings, [section]: event.target.value } }))} className="mt-1 min-h-10 w-full rounded-lg border border-slate-200 px-3" />
                       </label>
                     ))}
                   </div>
-                </section>
-
-                <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div><h2 className="font-bold text-[#0B1F4D]">Terms and conditions</h2><p className="mt-1 text-xs text-slate-500">Edit, remove, and reorder terms. Preview the saved terms in the PDF above.</p></div>
-                    <button type="button" disabled={officialDocumentSettings.terms.length >= 100} onClick={() => setOfficialDocumentSettings((current) => ({ ...current, terms: [...current.terms, ''] }))} className="min-h-9 rounded-lg border border-orange-200 px-3 text-xs font-bold text-orange-800 disabled:opacity-50">Add term</button>
-                  </div>
-                  {officialDocumentSettings.terms.map((term, index) => (
-                    <div key={`term-${index}`} className="flex items-start gap-2">
-                      <span className="pt-3 text-xs font-bold text-slate-500">{index + 1}.</span>
-                      <textarea aria-label={`Term ${index + 1}`} rows={2} maxLength={1000} value={term} onChange={(event) => updateOfficialTerm(index, event.target.value)} className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" />
-                      <div className="flex flex-col gap-1">
-                        <button type="button" aria-label={`Move term ${index + 1} up`} disabled={index === 0} onClick={() => moveOfficialTerm(index, -1)} className="rounded border px-2 py-1 text-xs disabled:opacity-40">Up</button>
-                        <button type="button" aria-label={`Move term ${index + 1} down`} disabled={index === officialDocumentSettings.terms.length - 1} onClick={() => moveOfficialTerm(index, 1)} className="rounded border px-2 py-1 text-xs disabled:opacity-40">Up</button>
-                        <button type="button" aria-label={`Delete term ${index + 1}`} onClick={() => setOfficialDocumentSettings((current) => ({ ...current, terms: current.terms.filter((_, termIndex) => termIndex !== index) }))} className="rounded border border-rose-200 px-2 py-1 text-xs text-rose-700">Delete</button>
-                      </div>
-                    </div>
-                  ))}
-                </section>
-
-                <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-                  <h2 className="font-bold text-[#0B1F4D]">Payment configuration</h2>
-                  <label className="block text-xs font-semibold text-slate-700">Payment instructions
-                    <textarea rows={2} value={officialDocumentSettings.paymentInstructions} onChange={(event) => setOfficialDocumentSettings((current) => ({ ...current, paymentInstructions: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2" />
-                  </label>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <label className="text-xs font-semibold text-slate-700">Payment methods (one per line)
-                      <textarea rows={3} value={officialDocumentSettings.paymentMethods.join('\n')} onChange={(event) => setOfficialDocumentSettings((current) => ({ ...current, paymentMethods: event.target.value.split('\n').map((method) => method.trim()).filter(Boolean) }))} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2" />
-                    </label>
-                    <label className="text-xs font-semibold text-slate-700">Bank or UPI details
-                      <textarea rows={3} value={officialDocumentSettings.bankDetails} onChange={(event) => setOfficialDocumentSettings((current) => ({ ...current, bankDetails: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2" />
-                    </label>
-                  </div>
-                  <label className="block text-xs font-semibold text-slate-700">Additional payment notes
-                    <textarea rows={2} value={officialDocumentSettings.additionalPaymentNotes} onChange={(event) => setOfficialDocumentSettings((current) => ({ ...current, additionalPaymentNotes: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2" />
-                  </label>
                 </section>
 
                 <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
@@ -4547,17 +3962,6 @@ const res = await fetchAdmin(url, {
                       ['showDecorations', 'Show decorations'], ['showFooter', 'Show branded footer'],
                     ] as const).map(([key, label]) => (
                       <label key={key} className="flex min-h-10 items-center gap-2 rounded-lg border border-slate-100 px-3 text-xs font-semibold text-slate-700"><input type="checkbox" checked={officialDocumentSettings.layout[key]} onChange={(event) => setOfficialDocumentSettings((current) => ({ ...current, layout: { ...current.layout, [key]: event.target.checked } }))} />{label}</label>
-                    ))}
-                  </div>
-                  <div className="space-y-2">
-                    <h3 className="text-xs font-bold text-slate-700">Section visibility and order</h3>
-                    {officialDocumentSettings.layout.sectionOrder.map((section, index) => (
-                      <div key={section} className="flex min-h-10 items-center gap-2 rounded-lg border border-slate-100 px-3">
-                        <input type="checkbox" aria-label={`Show ${section} section`} checked={officialDocumentSettings.layout.visibleSections.includes(section)} onChange={(event) => setOfficialDocumentSettings((current) => ({ ...current, layout: { ...current.layout, visibleSections: event.target.checked ? [...current.layout.visibleSections, section] : current.layout.visibleSections.filter((item) => item !== section) } }))} />
-                        <span className="flex-1 text-xs font-semibold capitalize text-slate-700">{section}</span>
-                        <button type="button" aria-label={`Move ${section} section up`} disabled={index === 0} onClick={() => moveOfficialSection(section, -1)} className="rounded border px-2 py-1 text-xs disabled:opacity-40">Up</button>
-                        <button type="button" aria-label={`Move ${section} section down`} disabled={index === officialDocumentSettings.layout.sectionOrder.length - 1} onClick={() => moveOfficialSection(section, 1)} className="rounded border px-2 py-1 text-xs disabled:opacity-40">Up</button>
-                      </div>
                     ))}
                   </div>
                 </section>
@@ -4810,18 +4214,6 @@ const res = await fetchAdmin(url, {
               </span>
 
               <div className="flex items-center gap-2">
-                {isSuperAdmin && (
-                  <button
-                    type="button"
-                    disabled={loading}
-                    onClick={() => handleDeleteApplication(selectedApp.id)}
-                    className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>Delete Record</span>
-                  </button>
-                )}
-
                 {selectedApp.status === 'Pending' && (
                   <button
                     type="button"
@@ -4909,99 +4301,16 @@ const res = await fetchAdmin(url, {
 
             {!paymentLoading && paymentData && (
               <>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div className="rounded-2xl bg-slate-50 border border-slate-100 p-4">
-                    <p className="text-xs text-slate-500">Agreed total fee</p>
-                    <p className="text-xl font-extrabold text-slate-900 mt-1">
-                      {paymentData.feeAgreement
-                        ? `₹${Number(paymentData.feeAgreement.agreed_total).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                        : 'Not set'}
-                    </p>
-                  </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="rounded-2xl bg-emerald-50 border border-emerald-100 p-4">
                     <p className="text-xs text-emerald-700">Total paid</p>
                     <p className="text-xl font-extrabold text-emerald-800 mt-1">
                       ₹{Number(paymentData.totalPaid).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </p>
                   </div>
-                  <div className="rounded-2xl bg-amber-50 border border-amber-100 p-4">
-                    <p className="text-xs text-amber-700">Remaining balance</p>
-                    <p className="text-xl font-extrabold text-amber-800 mt-1">
-                      {paymentData.remainingBalance == null
-                        ? 'Set fee first'
-                        : `₹${Number(paymentData.remainingBalance).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-                    </p>
-                  </div>
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4">
-                  <div>
-                    <p className="font-bold text-slate-900">Student Enrollment & Fee Confirmation</p>
-                    <p className="mt-1 text-xs text-slate-600">Downloads a separate PDF for this student and selected course using saved fee/payment records.</p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={paymentLoading || paymentSaving || paymentApp.status !== 'Accepted' || !paymentData}
-                    onClick={() => void generateStudentConfirmationPdf()}
-                    className="inline-flex items-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
-                    title={paymentApp.status !== 'Accepted' ? 'Approve this application first' : 'Download student confirmation PDF'}
-                  >
-                    <FileCheck className="h-4 w-4" />
-                    Download Student PDF
-                  </button>
-                </div>
-
-                <div className="rounded-2xl border border-slate-200 p-4 space-y-3">
-                  <h3 className="font-bold text-slate-900">Agreed fee</h3>
-                  {isAdminOrHigher ? (
-                    <>
-                      <label className="block text-xs font-semibold text-slate-600">
-                        Total fee agreed with this student (INR)
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={feeTotalInput}
-                          onChange={(event) => setFeeTotalInput(event.target.value)}
-                          disabled={paymentSaving}
-                          placeholder="Enter the manually agreed fee"
-                          className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
-                        />
-                      </label>
-                      <label className="block text-xs font-semibold text-slate-600">
-                        Fee notes (optional)
-                        <textarea
-                          value={feeNotesInput}
-                          onChange={(event) => setFeeNotesInput(event.target.value)}
-                          disabled={paymentSaving}
-                          maxLength={2000}
-                          rows={2}
-                          placeholder="Notes about the agreed fee"
-                          className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        disabled={paymentSaving || paymentLoading || !feeTotalInput.trim()}
-                        onClick={() => void saveAgreedFee()}
-                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm disabled:opacity-50"
-                      >
-                        {paymentSaving ? 'Saving…' : 'Save agreed fee'}
-                      </button>
-                    </>
-                  ) : (
-                    <p className="text-sm text-slate-600">
-                      Only admins and super admins can change the agreed fee.
-                    </p>
-                  )}
-                  {paymentData.feeAgreement?.notes && (
-                    <p className="text-xs text-slate-600">
-                      <span className="font-semibold">Saved notes:</span> {paymentData.feeAgreement.notes}
-                    </p>
-                  )}
-                </div>
-
-                {isAdminOrHigher && paymentData.feeAgreement && (
+                {isAdminOrHigher && (
                   <div className="rounded-2xl border border-blue-200 bg-blue-50/50 p-4 space-y-3">
                     <h3 className="font-bold text-slate-900">
                       {editingPaymentId ? 'Edit payment' : 'Record payment'}
@@ -5044,8 +4353,8 @@ const res = await fetchAdmin(url, {
                           disabled={paymentSaving}
                           className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
                         >
-                          <option value="first_fee">First fee</option>
-                          <option value="second_fee">Second fee</option>
+                          <option value="first_payment">First payment</option>
+                          <option value="second_payment">Second payment</option>
                           <option value="installment">Installment</option>
                           <option value="final_payment">Final payment</option>
                         </select>
@@ -5121,7 +4430,7 @@ const res = await fetchAdmin(url, {
                             <th className="px-3 py-3 font-bold text-right">Amount</th>
                             <th className="px-3 py-3 font-bold">Reference / notes</th>
                             <th className="px-3 py-3 font-bold">Recorded by</th>
-                            {isAdminOrHigher && <th className="px-3 py-3 font-bold">Actions</th>}
+                            <th className="px-3 py-3 font-bold">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -5131,7 +4440,11 @@ const res = await fetchAdmin(url, {
                                 {new Date(payment.recorded_at).toLocaleString('en-IN')}
                               </td>
                               <td className="px-3 py-3 text-slate-700">
-                                {payment.payment_stage.replaceAll('_', ' ')}
+                                {payment.payment_stage === 'first_fee'
+                                  ? 'first payment'
+                                  : payment.payment_stage === 'second_fee'
+                                    ? 'second payment'
+                                    : payment.payment_stage.replaceAll('_', ' ')}
                               </td>
                               <td className="px-3 py-3 text-slate-700">
                                 {payment.payment_method.replaceAll('_', ' ')}
@@ -5146,28 +4459,46 @@ const res = await fetchAdmin(url, {
                               <td className="px-3 py-3 text-slate-600">
                                 {payment.recorded_by_name || payment.recorded_by || '—'}
                               </td>
-                              {isAdminOrHigher && (
-                                <td className="px-3 py-3">
-                                  <div className="flex flex-wrap gap-2">
-                                    <button
-                                      type="button"
-                                      disabled={paymentSaving || paymentLoading}
-                                      onClick={() => beginEditPayment(payment)}
-                                      className="rounded-lg border border-slate-300 px-2.5 py-1.5 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                                    >
-                                      Edit
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={paymentSaving || paymentLoading}
-                                      onClick={() => void removePaymentEntry(payment)}
-                                      className="rounded-lg border border-red-200 px-2.5 py-1.5 font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
-                                    >
-                                      Delete
-                                    </button>
-                                  </div>
-                                </td>
-                              )}
+                              <td className="px-3 py-3">
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={receiptBusyId === payment.id || paymentSaving || paymentLoading}
+                                    onClick={() => void generatePaymentReceipt(payment.id)}
+                                    className="rounded-lg border border-emerald-200 px-2.5 py-1.5 font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                                  >
+                                    {receiptBusyId === payment.id ? 'Working…' : 'Download receipt'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={receiptBusyId === payment.id || paymentSaving || paymentLoading}
+                                    onClick={() => void generatePaymentReceipt(payment.id, true)}
+                                    className="rounded-lg border border-blue-200 px-2.5 py-1.5 font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                                  >
+                                    Send receipt email
+                                  </button>
+                                  {isAdminOrHigher && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        disabled={paymentSaving || paymentLoading}
+                                        onClick={() => beginEditPayment(payment)}
+                                        className="rounded-lg border border-slate-300 px-2.5 py-1.5 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={paymentSaving || paymentLoading}
+                                        onClick={() => void removePaymentEntry(payment)}
+                                        className="rounded-lg border border-red-200 px-2.5 py-1.5 font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+                                      >
+                                        Delete
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -5241,10 +4572,7 @@ const res = await fetchAdmin(url, {
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setViewingProgram(null)} className="px-4 py-2 border rounded-xl text-slate-600">Close</button>
               <button type="button" onClick={() => {
-                setEditingProgram({
-                  ...viewingProgram,
-                  feeConfiguration: programFeeConfigurations[viewingProgram.id] || emptyProgramFeeConfiguration(viewingProgram.id),
-                });
+                setEditingProgram(viewingProgram);
                 setViewingProgram(null);
               }} className="px-4 py-2 bg-orange-600 text-white font-bold rounded-xl">Edit Program</button>
             </div>
@@ -5344,54 +4672,6 @@ const res = await fetchAdmin(url, {
                   className="w-full px-3 py-2 border rounded-xl"
                 />
               </div>
-              <fieldset className="space-y-3 rounded-xl border border-orange-100 bg-orange-50/40 p-4">
-                <legend className="px-1 font-bold text-[#0B1F4D]">Course fees (INR)</legend>
-                <p className="text-[11px] leading-relaxed text-slate-600">Fee changes are recorded as history and do not alter any existing application’s agreed fee.</p>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {([
-                    ['tuition_fee', 'Course fee'],
-                    ['registration_fee', 'Registration fee'],
-                    ['study_material_fee', 'Study material fee'],
-                    ['other_charges', 'Other charges'],
-                  ] as const).map(([field, label]) => (
-                    <label key={field} className="font-semibold text-slate-700">{label}
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={editingProgram.feeConfiguration?.[field] ?? ''}
-                        onChange={(event) => {
-                          const value = event.target.value === '' && field === 'tuition_fee' ? null : Number(event.target.value);
-                          updateEditingProgramFee(field, value);
-                        }}
-                        className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2"
-                      />
-                    </label>
-                  ))}
-                  <label className="font-semibold text-slate-700">Discount type
-                    <select
-                      value={editingProgram.feeConfiguration?.discount_type || 'amount'}
-                      onChange={(event) => updateEditingProgramFee('discount_type', event.target.value as ProgramFeeConfiguration['discount_type'])}
-                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2"
-                    >
-                      <option value="amount">Fixed amount (INR)</option>
-                      <option value="percent">Percentage</option>
-                    </select>
-                  </label>
-                  <label className="font-semibold text-slate-700">Discount
-                    <input
-                      type="number"
-                      min="0"
-                      max={editingProgram.feeConfiguration?.discount_type === 'percent' ? 100 : undefined}
-                      step="0.01"
-                      value={editingProgram.feeConfiguration?.discount_value ?? 0}
-                      onChange={(event) => updateEditingProgramFee('discount_value', Number(event.target.value))}
-                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2"
-                    />
-                  </label>
-                </div>
-                <p className="text-sm font-extrabold text-[#0B1F4D]">Final payable: {calculateProgramFinalPayable(editingProgram.feeConfiguration) === null ? 'Set a course fee to calculate' : `INR ${calculateProgramFinalPayable(editingProgram.feeConfiguration)?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}</p>
-              </fieldset>
               <div className="flex items-center gap-2 pt-2">
                 <input
                   type="checkbox"

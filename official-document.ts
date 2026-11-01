@@ -9,7 +9,7 @@ import {
 
 export type OfficialFontFamily = 'Helvetica' | 'TimesRoman' | 'Courier';
 export type OfficialPageSize = 'A4' | 'Letter';
-export type OfficialSection = 'student' | 'course' | 'fees' | 'joining' | 'payment' | 'terms';
+export type OfficialSection = 'student' | 'course' | 'joining' | 'payment';
 
 export interface OfficialDocumentSettings {
   academyName: string;
@@ -24,12 +24,7 @@ export interface OfficialDocumentSettings {
   sectionHeadings: Record<OfficialSection, string>;
   footerText: string;
   motivationalTagline: string;
-  paymentInstructions: string;
-  paymentMethods: string[];
-  bankDetails: string;
-  additionalPaymentNotes: string;
   joiningInstructions?: string[];
-  terms: string[];
   logoObjectKey: string | null;
   graphicObjectKey: string | null;
   colors: {
@@ -83,15 +78,6 @@ export interface OfficialCourse {
   duration: string | null;
   mode?: string | null;
   level: string | null;
-  tuitionFee: number | null;
-  registrationFee: number;
-  studyMaterialFee: number;
-  otherCharges: number;
-  discountType: 'amount' | 'percent';
-  discountValue: number;
-  discountAmount: number;
-  finalPayable: number | null;
-  agreedTotal: number | null;
 }
 
 export interface OfficialPaymentRecord {
@@ -104,10 +90,7 @@ export interface OfficialPaymentRecord {
 }
 
 export interface OfficialPaymentSummary {
-  totalPayable: number | null;
   totalPaid: number;
-  outstandingBalance: number | null;
-  status: 'pending' | 'partially_paid' | 'fully_paid';
   payments: OfficialPaymentRecord[];
 }
 
@@ -126,6 +109,16 @@ export interface OfficialDocumentInput {
   assets?: OfficialDocumentAssets;
   versionNumber?: number;
   previewOnly?: boolean;
+  includePaymentDetails?: boolean;
+}
+
+export interface PaymentReceiptInput {
+  settings: OfficialDocumentSettings;
+  student: OfficialStudent;
+  course: OfficialCourse | null;
+  payment: OfficialPaymentRecord;
+  totalPaid: number;
+  logo?: { bytes: Uint8Array; mime: 'image/png' | 'image/jpeg' };
 }
 
 export const DEFAULT_OFFICIAL_DOCUMENT_SETTINGS: OfficialDocumentSettings = {
@@ -141,19 +134,12 @@ export const DEFAULT_OFFICIAL_DOCUMENT_SETTINGS: OfficialDocumentSettings = {
   sectionHeadings: {
     student: 'STUDENT INFORMATION',
     course: 'SELECTED COURSE',
-    fees: 'FEE BREAKDOWN',
     joining: 'JOINING INFORMATION',
     payment: 'PAYMENT INFORMATION',
-    terms: 'TERMS & CONDITIONS',
   },
   footerText: "Uptrend's English Academy - Davangere",
   motivationalTagline: 'Learn English • Build Confidence • Achieve More',
-  paymentInstructions: '',
-  paymentMethods: [],
-  bankDetails: '',
-  additionalPaymentNotes: '',
   joiningInstructions: [],
-  terms: [],
   logoObjectKey: null,
   graphicObjectKey: null,
   colors: {
@@ -175,26 +161,16 @@ export const DEFAULT_OFFICIAL_DOCUMENT_SETTINGS: OfficialDocumentSettings = {
     showStudentPhoto: true,
     showDecorations: true,
     showFooter: true,
-    visibleSections: ['student', 'course', 'fees', 'joining', 'payment', 'terms'],
-    sectionOrder: ['student', 'course', 'fees', 'payment', 'joining', 'terms'],
+    visibleSections: ['student', 'course', 'joining'],
+    sectionOrder: ['student', 'course', 'joining', 'payment'],
   },
 };
 
 export const summarizeOfficialPayments = (
-  totalPayable: number | null,
   payments: OfficialPaymentRecord[],
 ): OfficialPaymentSummary => {
   const totalPaid = Math.round(payments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
-  const outstandingBalance = totalPayable === null
-    ? null
-    : Math.round(Math.max(0, totalPayable - totalPaid) * 100) / 100;
-  const status = payments.length === 0
-    ? 'pending'
-    : totalPayable !== null && totalPaid >= totalPayable
-      ? 'fully_paid'
-      : 'partially_paid';
-
-  return { totalPayable, totalPaid, outstandingBalance, status, payments };
+  return { totalPaid, payments };
 };
 
 const printable = (value: unknown): string =>
@@ -202,6 +178,12 @@ const printable = (value: unknown): string =>
     .replace(/[’‘]/g, "'")
     .replace(/[–—]/g, '-')
     .replace(/[^\x20-\x7E\u2022\u00B7]/g, '?');
+
+const printablePaymentStage = (value: string): string => {
+  if (value === 'first_fee') return 'first payment';
+  if (value === 'second_fee') return 'second payment';
+  return value.replaceAll('_', ' ');
+};
 
 const colorFromHex = (value: string) => {
   const hex = value.replace('#', '');
@@ -221,6 +203,94 @@ const formatAmount = (value: number | null): string =>
 const pageDimensions = (pageSize: OfficialPageSize): [number, number] =>
   pageSize === 'Letter' ? [612, 792] : [595.28, 841.89];
 
+export async function generatePaymentReceiptPdf({
+  settings,
+  logo,
+  student,
+  course,
+  payment,
+  totalPaid,
+}: PaymentReceiptInput): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const regular = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const [pageWidth, pageHeight] = pageDimensions(settings.layout.pageSize);
+  const page = pdf.addPage([pageWidth, pageHeight]);
+  const margin = 42;
+  const ink = rgb(0.13, 0.17, 0.23);
+  const muted = rgb(0.38, 0.42, 0.48);
+  const navy = colorFromHex(settings.colors.navy);
+  const orange = colorFromHex(settings.colors.orange);
+  const green = colorFromHex(settings.colors.green);
+  const line = rgb(0.82, 0.86, 0.9);
+  let y = pageHeight - 48;
+
+  page.drawRectangle({ x: 0, y: pageHeight - 9, width: pageWidth, height: 9, color: orange });
+  if (logo) {
+    const image = logo.mime === 'image/png'
+      ? await pdf.embedPng(logo.bytes)
+      : await pdf.embedJpg(logo.bytes);
+    const scale = Math.min(58 / image.width, 48 / image.height);
+    page.drawImage(image, {
+      x: pageWidth - margin - image.width * scale,
+      y: pageHeight - 78,
+      width: image.width * scale,
+      height: image.height * scale,
+    });
+  }
+  page.drawText(printable(settings.academyName), {
+    x: margin,
+    y,
+    size: 18,
+    font: bold,
+    color: navy,
+    maxWidth: pageWidth - margin * 2,
+  });
+  y -= 22;
+  page.drawText(printable(settings.address), { x: margin, y, size: 8, font: regular, color: muted, maxWidth: pageWidth - margin * 2 });
+  y -= 14;
+  page.drawText(`${printable(settings.phone)} | ${printable(settings.email)}`, { x: margin, y, size: 8, font: regular, color: muted, maxWidth: pageWidth - margin * 2 });
+  y -= 38;
+  page.drawLine({ start: { x: margin, y }, end: { x: pageWidth - margin, y }, thickness: 1, color: line });
+  y -= 34;
+  page.drawText('PAYMENT RECEIPT', { x: margin, y, size: 18, font: bold, color: orange });
+  y -= 30;
+
+  const drawRow = (label: string, value: string) => {
+    page.drawText(printable(label), { x: margin, y, size: 9, font: bold, color: muted, maxWidth: 150 });
+    page.drawText(printable(value || '-'), { x: margin + 155, y, size: 10, font: regular, color: ink, maxWidth: pageWidth - margin * 2 - 155 });
+    y -= 22;
+  };
+  drawRow('Receipt reference', payment.id);
+  drawRow('Payment date', payment.recordedAt ? new Date(payment.recordedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) : 'Not available');
+  drawRow('Student name', student.fullName);
+  drawRow('Application number', student.applicationNumber);
+  drawRow('Student ID', student.studentId);
+  drawRow('Selected program', course?.name || student.programName);
+  drawRow('Payment stage', printablePaymentStage(payment.paymentStage));
+  drawRow('Payment method', payment.paymentMethod.replaceAll('_', ' '));
+  drawRow('Transaction/reference', payment.referenceNumber || 'Not provided');
+  y -= 8;
+  page.drawRectangle({ x: margin, y: y - 58, width: pageWidth - margin * 2, height: 58, color: rgb(0.92, 0.98, 0.94), borderColor: green, borderWidth: 1 });
+  page.drawText('AMOUNT RECEIVED', { x: margin + 14, y: y - 20, size: 9, font: bold, color: green });
+  page.drawText(formatAmount(payment.amount), { x: margin + 14, y: y - 43, size: 16, font: bold, color: navy });
+  y -= 84;
+  drawRow('Total paid to date', formatAmount(totalPaid));
+  if (payment.paymentStage || payment.referenceNumber) y -= 6;
+  page.drawText('This receipt confirms the payment entry recorded in the academy payment register.', {
+    x: margin,
+    y,
+    size: 9,
+    font: regular,
+    color: muted,
+    maxWidth: pageWidth - margin * 2,
+  });
+  y -= 38;
+  page.drawLine({ start: { x: margin, y: 58 }, end: { x: pageWidth - margin, y: 58 }, thickness: 0.8, color: line });
+  page.drawText(printable(settings.footerText), { x: margin, y: 40, size: 8, font: regular, color: muted, maxWidth: pageWidth - margin * 2 });
+  return pdf.save();
+}
+
 export async function generateOfficialPdf({
   settings,
   student,
@@ -230,6 +300,7 @@ export async function generateOfficialPdf({
   assets,
   versionNumber,
   previewOnly = false,
+  includePaymentDetails = false,
 }: OfficialDocumentInput): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const fontFamily = settings.typography.fontFamily;
@@ -559,88 +630,14 @@ export async function generateOfficialPdf({
     y -= 71 * spacing;
   };
 
-  const drawFees = () => {
-    drawSectionTitle(settings.sectionHeadings.fees);
-    if (!course) {
-      drawWrapped('Fee details are not configured for the selected course.');
-      return;
-    }
-    const payable = course.agreedTotal ?? course.finalPayable;
-    const rows: Array<[string, number | null]> = [
-      ['Course fee', course.tuitionFee],
-      ['Registration fee', course.registrationFee],
-      ['Study material fee', course.studyMaterialFee],
-      ['Other charges', course.otherCharges],
-      ['Discount', course.discountAmount ? -course.discountAmount : 0],
-      ['Net Payable Amount', payable],
-    ];
-    for (const [label, amount] of rows) {
-      ensureRoom(18 * spacing);
-      if (label === 'Net Payable Amount') {
-        page.drawRectangle({ x: margin, y: y - 18 * spacing, width: contentWidth, height: 18 * spacing, color: colors.paleOrange });
-      }
-      page.drawText(printable(label), {
-        x: margin + 4,
-        y,
-        size: bodySize,
-        font: regular,
-        color: label === 'Net Payable Amount' ? colors.navy : colors.ink,
-        maxWidth: contentWidth - 155,
-      });
-      const formatted = amount === null
-        ? 'To be confirmed'
-        : `${amount < 0 ? '- ' : ''}${formatAmount(Math.abs(amount))}`;
-      const amountWidth = regular.widthOfTextAtSize(printable(formatted), bodySize);
-      page.drawText(printable(formatted), {
-        x: pageWidth - margin - amountWidth - 4,
-        y,
-        size: bodySize,
-        font: regular,
-        color: label === 'Net Payable Amount' ? colors.navy : colors.ink,
-        maxWidth: 145,
-      });
-      page.drawLine({
-        start: { x: margin + 4, y: y - 5 },
-        end: { x: pageWidth - margin - 4, y: y - 5 },
-        thickness: 0.4,
-        color: colors.line,
-      });
-      y -= 18 * spacing;
-    }
-    y -= 8 * spacing;
-  };
-
   const drawPayment = () => {
     drawSectionTitle(settings.sectionHeadings.payment);
-    const summary = paymentSummary || summarizeOfficialPayments(
-      course?.agreedTotal ?? course?.finalPayable ?? null,
-      [],
-    );
-    const paidStatus = summary.status === 'fully_paid';
-    const statusColor = paidStatus ? colors.green : summary.status === 'partially_paid' ? colors.orange : colors.navy;
-    const statusBackground = paidStatus ? colors.paleGreen : summary.status === 'partially_paid' ? colors.paleOrange : colors.paleBlue;
-    ensureRoom(78);
-    page.drawRectangle({ x: margin, y: y - 58, width: contentWidth, height: 58, color: statusBackground, borderColor: statusColor, borderWidth: 1 });
-    const summaryItems: Array<[string, string]> = [
-      ['Total Payable', formatAmount(summary.totalPayable)],
-      ['Total Paid', formatAmount(summary.totalPaid)],
-      ['Outstanding Balance', formatAmount(summary.outstandingBalance)],
-    ];
-    const summaryWidth = contentWidth / summaryItems.length;
-    summaryItems.forEach(([label, value], index) => {
-      const x = margin + index * summaryWidth + 9;
-      page.drawText(printable(label), { x, y: y - 17, size: 7, font: bold, color: colors.muted, maxWidth: summaryWidth - 14 });
-      page.drawText(printable(value), { x, y: y - 37, size: bodySize + 1, font: bold, color: colors.navy, maxWidth: summaryWidth - 14 });
-    });
-    page.drawText(summary.status === 'fully_paid' ? 'FULLY PAID' : summary.status === 'partially_paid' ? 'PARTIALLY PAID' : 'PAYMENT PENDING', {
-      x: margin + 10,
-      y: y - 52,
-      size: 7,
-      font: bold,
-      color: statusColor,
-      maxWidth: contentWidth - 20,
-    });
-    y -= 68;
+    const summary = paymentSummary || summarizeOfficialPayments([]);
+    ensureRoom(48);
+    page.drawRectangle({ x: margin, y: y - 38, width: contentWidth, height: 38, color: colors.paleBlue, borderColor: colors.navy, borderWidth: 1 });
+    page.drawText('Total paid to date', { x: margin + 10, y: y - 15, size: 8, font: bold, color: colors.muted });
+    page.drawText(formatAmount(summary.totalPaid), { x: margin + 10, y: y - 30, size: bodySize + 1, font: bold, color: colors.navy });
+    y -= 48;
 
     if (!summary.payments.length) {
       drawWrapped('No payments have been recorded.');
@@ -690,7 +687,6 @@ export async function generateOfficialPdf({
         ], false, index);
       });
     }
-    if (settings.paymentInstructions) drawWrapped(settings.paymentInstructions, margin, { size: bodySize - 1, color: colors.muted });
   };
 
   const drawJoining = () => {
@@ -711,19 +707,6 @@ export async function generateOfficialPdf({
       drawPair('Class schedule', joiningInformation.classSchedule, margin, contentWidth);
       drawPair('Class timings', joiningInformation.classTimings, margin, contentWidth);
       drawPair('Venue', joiningInformation.venue, margin, contentWidth);
-    }
-  };
-
-  const drawTerms = () => {
-    drawSectionTitle(settings.sectionHeadings.terms);
-    if (!settings.terms.length) {
-      drawWrapped('No terms and conditions are configured.');
-      return;
-    }
-    for (const [index, term] of settings.terms.entries()) {
-      ensureRoom(20 * spacing);
-      page.drawText(`${index + 1}.`, { x: margin + 3, y, size: bodySize, font: bold, color: colors.navy });
-      y = drawWrapped(term, margin + 20, { maxWidth: contentWidth - 20 });
     }
   };
 
@@ -760,162 +743,21 @@ export async function generateOfficialPdf({
     return lines.length ? lines : [''];
   };
 
-  const drawCourseAndFees = () => {
-    const gap = 10;
-    const columnWidth = (contentWidth - gap) / 2;
-    const textSize = Math.max(6.5, bodySize - 1);
-    const labelWidth = columnWidth * 0.38;
-    const valueWidth = columnWidth - labelWidth - 18;
-    const courseRows: Array<[string, string]> = [
-      ['Program', course?.name || 'Not configured'],
-      ['Duration', course?.duration || 'Not configured'],
-      ['Course Mode', course?.mode || 'Not configured'],
-    ];
-    const courseFee = course?.tuitionFee === null || !course
-      ? null
-      : course.tuitionFee + course.registrationFee + course.studyMaterialFee + course.otherCharges;
-    const feeRows: Array<[string, string]> = [
-      ['Course Fee', formatAmount(courseFee)],
-      ['Discount', course ? formatAmount(course.discountAmount) : 'To be confirmed'],
-      ['Net Payable Amount', formatAmount(course ? course.agreedTotal ?? course.finalPayable : null)],
-    ];
-    const sizeRows = (rows: Array<[string, string]>) => rows.map(([label, value]) => {
-      const labelLines = wrapTextLines(label, bold, textSize, labelWidth);
-      const valueLines = wrapTextLines(value, regular, textSize, valueWidth);
-      return { label, value, labelLines, valueLines, height: Math.max(labelLines.length, valueLines.length) * (textSize + 2) + 7 };
-    });
-    const leftRows = sizeRows(courseRows);
-    const rightRows = sizeRows(feeRows);
-    const headerHeight = 22;
-    const cardHeight = Math.max(
-      headerHeight + 8 + leftRows.reduce((sum, row) => sum + row.height, 0),
-      headerHeight + 8 + rightRows.reduce((sum, row) => sum + row.height, 0),
-    );
-    ensureRoom(cardHeight + 10);
-    const top = y;
-    const drawCard = (
-      title: string,
-      x: number,
-      rows: ReturnType<typeof sizeRows>,
-      highlightLast: boolean,
-    ) => {
-      page.drawRectangle({ x, y: top - cardHeight, width: columnWidth, height: cardHeight, color: colors.white, borderColor: colors.navy, borderWidth: 0.8 });
-      page.drawRectangle({ x, y: top - headerHeight, width: columnWidth, height: headerHeight, color: colors.navy });
-      page.drawText(printable(title), { x: x + 8, y: top - 15, size: headingSize - 1, font: bold, color: colors.white, maxWidth: columnWidth - 16 });
-      let rowTop = top - headerHeight - 5;
-      rows.forEach((row, index) => {
-        if (highlightLast && index === rows.length - 1) {
-          page.drawRectangle({ x: x + 1, y: rowTop - row.height + 2, width: columnWidth - 2, height: row.height, color: colors.paleOrange });
-        }
-        row.labelLines.forEach((line, lineIndex) => page.drawText(line, {
-          x: x + 6,
-          y: rowTop - textSize - lineIndex * (textSize + 2),
-          size: textSize,
-          font: bold,
-          color: colors.navy,
-          maxWidth: labelWidth - 7,
-        }));
-        row.valueLines.forEach((line, lineIndex) => page.drawText(line, {
-          x: x + 6 + labelWidth,
-          y: rowTop - textSize - lineIndex * (textSize + 2),
-          size: textSize,
-          font: index === rows.length - 1 && highlightLast ? bold : regular,
-          color: colors.ink,
-          maxWidth: valueWidth,
-        }));
-        page.drawLine({ start: { x: x + 5, y: rowTop - row.height }, end: { x: x + columnWidth - 5, y: rowTop - row.height }, thickness: 0.35, color: colors.line });
-        rowTop -= row.height;
-      });
-    };
-    drawCard(settings.sectionHeadings.course, margin, leftRows, false);
-    drawCard(settings.sectionHeadings.fees, margin + columnWidth + gap, rightRows, true);
-    y = top - cardHeight - 10;
-  };
-
-  const drawJoiningAndTerms = () => {
-    const joiningRows = (settings.joiningInstructions || []).map((instruction, index) => `${index + 1}. ${instruction}`);
-    if (!joiningRows.length) joiningRows.push('No joining instructions are configured.');
-    if (joiningInformation) {
-      joiningRows.push(`Joining date: ${joiningInformation.joiningDate}`);
-      joiningRows.push(`Class schedule: ${joiningInformation.classSchedule}`);
-      joiningRows.push(`Class timings: ${joiningInformation.classTimings}`);
-      joiningRows.push(`Venue: ${joiningInformation.venue}`);
-    }
-    const termsRows = settings.terms.length
-      ? settings.terms.map((term, index) => `${index + 1}. ${term}`)
-      : ['No terms and conditions are configured.'];
-    const gap = 10;
-    const columnWidth = (contentWidth - gap) / 2;
-    const textSize = Math.max(6.5, bodySize - 1);
-    const lineHeight = textSize + 2;
-    const rowLayout = (items: string[]) => items.map((item) => {
-      const lines = wrapTextLines(item, regular, textSize, columnWidth - 16);
-      return { lines, height: lines.length * lineHeight + 4 };
-    });
-    const leftRows = rowLayout(joiningRows);
-    const rightRows = rowLayout(termsRows);
-    const headerHeight = 22;
-    const contentHeight = Math.max(
-      leftRows.reduce((sum, row) => sum + row.height, 0),
-      rightRows.reduce((sum, row) => sum + row.height, 0),
-    );
-    const cardHeight = headerHeight + 8 + contentHeight;
-    if (cardHeight > pageHeight - 240) {
-      drawJoining();
-      drawTerms();
-      return;
-    }
-    ensureRoom(cardHeight + 10);
-    const top = y;
-    const drawCard = (
-      title: string,
-      x: number,
-      rows: ReturnType<typeof rowLayout>,
-      headingColor: ReturnType<typeof rgb>,
-    ) => {
-      page.drawRectangle({ x, y: top - cardHeight, width: columnWidth, height: cardHeight, color: colors.white, borderColor: colors.line, borderWidth: 0.8 });
-      page.drawRectangle({ x, y: top - headerHeight, width: columnWidth, height: headerHeight, color: headingColor });
-      page.drawText(printable(title), { x: x + 8, y: top - 15, size: headingSize - 1, font: bold, color: colors.white, maxWidth: columnWidth - 16 });
-      let rowTop = top - headerHeight - 5;
-      rows.forEach((row, index) => {
-        if (index % 2 === 0) page.drawRectangle({ x: x + 1, y: rowTop - row.height + 2, width: columnWidth - 2, height: row.height, color: colors.paleBlue });
-        row.lines.forEach((line, lineIndex) => page.drawText(line, {
-          x: x + 7,
-          y: rowTop - textSize - lineIndex * lineHeight,
-          size: textSize,
-          font: regular,
-          color: colors.ink,
-          maxWidth: columnWidth - 14,
-        }));
-        rowTop -= row.height;
-      });
-    };
-    drawCard(settings.sectionHeadings.joining, margin, leftRows, colors.orange);
-    drawCard(settings.sectionHeadings.terms, margin + columnWidth + gap, rightRows, colors.navy);
-    y = top - cardHeight - 10;
-  };
-
   const sectionDrawers: Record<OfficialSection, () => void> = {
     student: drawStudent,
     course: drawCourse,
-    fees: drawFees,
     joining: drawJoining,
     payment: drawPayment,
-    terms: drawTerms,
   };
-  const visibleOrder = settings.layout.sectionOrder.filter((section) => settings.layout.visibleSections.includes(section));
+  const approvalAndPaymentSections: OfficialSection[] = includePaymentDetails
+    ? ['student', 'course', 'joining', 'payment']
+    : ['student', 'course', 'joining'];
+  const visibleOrder = settings.layout.sectionOrder.filter((section) =>
+    approvalAndPaymentSections.includes(section) && settings.layout.visibleSections.includes(section),
+  );
   for (let index = 0; index < visibleOrder.length; index += 1) {
     const section = visibleOrder[index];
-    const nextSection = visibleOrder[index + 1];
-    if (section === 'course' && nextSection === 'fees') {
-      drawCourseAndFees();
-      index += 1;
-    } else if (section === 'joining' && nextSection === 'terms') {
-      drawJoiningAndTerms();
-      index += 1;
-    } else {
-      sectionDrawers[section]();
-    }
+    sectionDrawers[section]();
   }
 
   if (settings.welcomeMessage) {
@@ -971,7 +813,7 @@ export const isValidOfficialDocumentSettings = (
   const settings = value as Partial<OfficialDocumentSettings>;
   const isHexColor = (color: unknown): color is string =>
     typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color);
-  const sections: OfficialSection[] = ['student', 'course', 'fees', 'joining', 'payment', 'terms'];
+  const sections: OfficialSection[] = ['student', 'course', 'joining', 'payment'];
   return typeof settings.academyName === 'string' &&
     typeof settings.address === 'string' &&
     typeof settings.phone === 'string' &&
@@ -982,15 +824,8 @@ export const isValidOfficialDocumentSettings = (
     typeof settings.welcomeMessage === 'string' &&
     typeof settings.footerText === 'string' &&
     typeof settings.motivationalTagline === 'string' &&
-    typeof settings.paymentInstructions === 'string' &&
-    Array.isArray(settings.paymentMethods) &&
-    settings.paymentMethods.every((method) => typeof method === 'string') &&
-    typeof settings.bankDetails === 'string' &&
-    typeof settings.additionalPaymentNotes === 'string' &&
     Array.isArray(settings.joiningInstructions ?? []) &&
     (settings.joiningInstructions ?? []).every((instruction) => typeof instruction === 'string') &&
-    Array.isArray(settings.terms) &&
-    settings.terms.every((term) => typeof term === 'string') &&
     settings.sectionHeadings !== undefined &&
     sections.every((section) => typeof settings.sectionHeadings?.[section] === 'string') &&
     settings.colors !== undefined &&
@@ -1025,26 +860,45 @@ export const mergeOfficialDocumentSettings = (
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const saved = value as Record<string, unknown>;
   const savedWithoutLegacyCourses = { ...saved };
-  delete savedWithoutLegacyCourses.courses;
-  const oldTerms = typeof saved.terms === 'string'
-    ? saved.terms.split(/\r?\n/).map((term) => term.trim()).filter(Boolean)
-    : saved.terms;
+  for (const legacyField of [
+    'courses',
+    'terms',
+    'paymentInstructions',
+    'paymentMethods',
+    'bankDetails',
+    'additionalPaymentNotes',
+  ]) {
+    delete savedWithoutLegacyCourses[legacyField];
+  }
+  const sectionHeadings = saved.sectionHeadings && typeof saved.sectionHeadings === 'object'
+    ? saved.sectionHeadings as Record<string, unknown>
+    : {};
+  const savedLayout = saved.layout && typeof saved.layout === 'object'
+    ? saved.layout as Record<string, unknown>
+    : {};
+  const sections: OfficialSection[] = ['student', 'course', 'joining', 'payment'];
+  const visibleSections = Array.isArray(savedLayout.visibleSections)
+    ? savedLayout.visibleSections.filter((section): section is OfficialSection => sections.includes(section as OfficialSection))
+    : DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.layout.visibleSections;
+  const orderedSections = Array.isArray(savedLayout.sectionOrder)
+    ? savedLayout.sectionOrder.filter((section): section is OfficialSection => sections.includes(section as OfficialSection))
+    : [];
+  const sectionOrder = orderedSections.length === sections.length
+    ? orderedSections
+    : DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.layout.sectionOrder;
   const merged: OfficialDocumentSettings = {
     ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
     ...savedWithoutLegacyCourses,
     sectionHeadings: {
       ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.sectionHeadings,
-      ...(saved.sectionHeadings && typeof saved.sectionHeadings === 'object'
-        ? saved.sectionHeadings
-        : {}),
+      student: typeof sectionHeadings.student === 'string' ? sectionHeadings.student : DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.sectionHeadings.student,
+      course: typeof sectionHeadings.course === 'string' ? sectionHeadings.course : DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.sectionHeadings.course,
+      joining: typeof sectionHeadings.joining === 'string' ? sectionHeadings.joining : DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.sectionHeadings.joining,
+      payment: typeof sectionHeadings.payment === 'string' ? sectionHeadings.payment : DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.sectionHeadings.payment,
     },
-    terms: Array.isArray(oldTerms) ? oldTerms as string[] : [],
     joiningInstructions: Array.isArray(saved.joiningInstructions)
       ? saved.joiningInstructions as string[]
       : [],
-    paymentMethods: Array.isArray(saved.paymentMethods)
-      ? saved.paymentMethods as string[]
-      : DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.paymentMethods,
     colors: {
       ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.colors,
       ...(saved.colors && typeof saved.colors === 'object' ? saved.colors : {}),
@@ -1055,7 +909,9 @@ export const mergeOfficialDocumentSettings = (
     },
     layout: {
       ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.layout,
-      ...(saved.layout && typeof saved.layout === 'object' ? saved.layout : {}),
+      ...savedLayout,
+      visibleSections,
+      sectionOrder,
     },
     logoObjectKey: typeof saved.logoObjectKey === 'string' ? saved.logoObjectKey : null,
     graphicObjectKey: typeof saved.graphicObjectKey === 'string' ? saved.graphicObjectKey : null,

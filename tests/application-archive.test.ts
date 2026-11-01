@@ -131,7 +131,7 @@ test('archive action rejects staff accounts', async () => {
   });
 });
 
-test('unapplied migration retains RESTRICT payments and queues photo cleanup atomically', () => {
+test('archive migration preserves payment restrictions and forwards a photo cleanup queue', () => {
   const migration = readFileSync(
     new URL('../supabase/migrations/20261030000008_application_archive_and_photo_cleanup.sql', import.meta.url),
     'utf8',
@@ -168,4 +168,23 @@ test('unapplied migration retains RESTRICT payments and queues photo cleanup ato
   assert.match(migration, /GRANT EXECUTE ON FUNCTION public\.delete_application_without_payments\(UUID\)[\s\S]*TO service_role/i);
   assert.doesNotMatch(migration, /DELETE FROM public\.(application_payments|application_fee_agreements|official_document_issuances)/i);
   assert.doesNotMatch(migration, /application_payments[\s\S]{0,100}ON DELETE CASCADE/i);
+});
+
+test('lifecycle removal drops automation while retaining notification and business history', () => {
+  const migration = readFileSync(
+    new URL('../supabase/migrations/20261101000007_remove_lifecycle_automation.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(migration, /cron\.unschedule\(retention_job_id\)/);
+  assert.match(migration, /uptrends-email-notification-retention/);
+  assert.match(migration, /DROP FUNCTION IF EXISTS public\.claim_official_document_issuance/);
+  assert.match(migration, /DROP FUNCTION IF EXISTS public\.reconcile_payment_document_versions/);
+  assert.match(migration, /DROP TABLE IF EXISTS public\.application_photo_cleanup_jobs/);
+  assert.match(migration, /DROP COLUMN IF EXISTS generation_claim_token/);
+  assert.match(migration, /DROP COLUMN IF EXISTS claim_token/);
+  assert.match(migration, /REVOKE INSERT, UPDATE, DELETE, TRUNCATE[\s\S]*request_email_notifications/);
+  assert.match(migration, /REVOKE INSERT, UPDATE, DELETE, TRUNCATE[\s\S]*official_approval_email_state/);
+  assert.match(migration, /GRANT SELECT ON TABLE public\.official_approval_email_state TO service_role/);
+  assert.doesNotMatch(migration, /CASCADE/i);
+  assert.doesNotMatch(migration, /DELETE\s+FROM\s+public\.(applications|application_payments|application_payment_audit|certificate_events|official_document_issuances)/i);
 });

@@ -139,17 +139,14 @@ test('the same email and mobile are accepted when present only in another form t
   }
 });
 
-test('callback remains successfully saved when Resend delivery fails and records a retryable outbox row', async () => {
+test('callback remains saved when Resend delivery fails without creating a retry row', async () => {
   const backend = setupContactBackend();
   try {
     const response = await handleApiRequest(callbackRequest('student@example.com'), env);
     assert.equal(response.status, 202);
     assert.equal((await response.json() as { success: boolean }).success, true);
     assert.equal(backend.insertedCallbacks, 1);
-    assert.equal(backend.notifications.length, 1);
-    assert.equal(backend.notifications[0].request_type, 'callback_requests');
-    assert.equal(backend.notifications[0].notification_type, 'academy_notification');
-    assert.equal(backend.notifications[0].status, 'Failed');
+    assert.equal(backend.notifications.length, 0);
   } finally {
     backend.restore();
   }

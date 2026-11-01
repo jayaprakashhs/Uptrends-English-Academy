@@ -73,7 +73,6 @@ export interface ApplicationNotification {
   notification_type: NotificationType;
   recipient_email: string;
   status: NotificationStatus;
-  attempt_count: number;
   provider_message_id?: string | null;
   error_message?: string | null;
   pdf_attached?: boolean;
@@ -151,6 +150,5 @@ export interface SiteBranding {
   primary_green?: string;
   primary_color?: string;
   secondary_color?: string;
-  official_pdf_url?: string;
   updated_at?: string;
 }

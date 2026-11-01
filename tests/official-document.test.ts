@@ -5,6 +5,8 @@ import { inflateSync } from 'node:zlib';
 import { PDFDocument } from 'pdf-lib';
 import {
   DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+  mergeOfficialDocumentSettings,
+  generatePaymentReceiptPdf,
   generateOfficialPdf,
   summarizeOfficialPayments,
   type OfficialCourse,
@@ -36,16 +38,46 @@ const selectedCourse: OfficialCourse = {
   name: 'IELTS Preparation',
   duration: '12 weeks',
   level: 'Intermediate',
-  tuitionFee: 12000,
-  registrationFee: 500,
-  studyMaterialFee: 750,
-  otherCharges: 250,
-  discountType: 'amount',
-  discountValue: 500,
-  discountAmount: 500,
-  finalPayable: 13000,
-  agreedTotal: null,
 };
+
+test('payment receipt PDF uses the configured private logo asset', async () => {
+  const withoutLogo = await generatePaymentReceiptPdf({
+    settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+    student,
+    course: selectedCourse,
+    payment: {
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      amount: 12500,
+      paymentMethod: 'bank_transfer',
+      paymentStage: 'registration',
+      recordedAt: '2026-01-02T03:04:05.000Z',
+      referenceNumber: 'REF-1',
+    },
+    totalPaid: 12500,
+  });
+
+  const withLogo = await generatePaymentReceiptPdf({
+    settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+    logo: { bytes: pngBytes, mime: 'image/png' },
+    student,
+    course: selectedCourse,
+    payment: {
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      amount: 12500,
+      paymentMethod: 'bank_transfer',
+      paymentStage: 'registration',
+      recordedAt: '2026-01-02T03:04:05.000Z',
+      referenceNumber: 'REF-1',
+    },
+    totalPaid: 12500,
+  });
+  assert.ok(withLogo.length > withoutLogo.length);
+  const document = await PDFDocument.load(withLogo);
+  assert.equal(document.getPages().length, 1);
+  const text = decodePdfText(withLogo);
+  assert.match(text, /Total paid to date/);
+  assert.doesNotMatch(text, /Agreed payment total|Outstanding balance/i);
+});
 
 const decodePdfText = (bytes: Uint8Array): string => {
   const source = Buffer.from(bytes).toString('latin1');
@@ -126,11 +158,14 @@ const authorizedRequest = (path: string, method = 'GET', body?: unknown) =>
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 
-test('official PDF contains the approved student and only the selected course', async () => {
+test('admission approval PDF contains real student details without fee or payment content', async () => {
   const bytes = await generateOfficialPdf({
-    settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+    settings: {
+      ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+    },
     student,
     course: selectedCourse,
+    paymentSummary: summarizeOfficialPayments([]),
   });
   const pdf = await PDFDocument.load(bytes);
   assert.equal(pdf.getPageCount(), 1);
@@ -140,8 +175,8 @@ test('official PDF contains the approved student and only the selected course', 
   assert.match(text, /IELTS Preparation/);
   assert.match(text, /UEA-STU-2026-0001/);
   assert.match(text, /UEA-APP-2026-0001/);
-  assert.match(text, /PAYMENT PENDING/);
-  assert.match(text, /INR 0\.00/);
+  assert.doesNotMatch(text, /FEE BREAKDOWN|Course Fee|Net Payable Amount|TERMS & CONDITIONS|Fictional fee conditions/);
+  assert.doesNotMatch(text, /PAYMENT PENDING|INR 0\.00|Net Payable Amount/);
   assert.doesNotMatch(text, /Spoken English|Business English|Other Course/);
 });
 
@@ -168,14 +203,12 @@ test('graduate and working PDFs use applicant contacts and never parent contacts
   }
 });
 
-test('missing photo and long document content produce a readable multipage PDF', async () => {
-  const longTerm = `Attendance terms ${'with detailed conditions '.repeat(28)}`;
+test('missing photo and long joining details produce a readable multipage PDF', async () => {
   const longStudent = `${'Long Applicant Name '.repeat(10)}End`;
   const bytes = await generateOfficialPdf({
     settings: {
       ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
-      joiningInstructions: [`${'Joining instruction '.repeat(25)}Last instruction detail`],
-      terms: [longTerm],
+      joiningInstructions: [`${'Joining instruction '.repeat(140)}Last instruction detail`],
     },
     student: { ...student, fullName: longStudent },
     course: selectedCourse,
@@ -185,34 +218,49 @@ test('missing photo and long document content produce a readable multipage PDF',
   assert.ok(pdf.getPageCount() > 1);
   assert.match(text, /End/);
   assert.match(text, /Last instruction/);
-  assert.match(text, /Attendance terms/);
 });
 
-test('payment summary handles pending, partial, fully paid, and multiple records', () => {
-  assert.deepEqual(summarizeOfficialPayments(1500, []), {
-    totalPayable: 1500,
+test('payment summary totals recorded payments without inferring fees or balances', () => {
+  assert.deepEqual(summarizeOfficialPayments([]), {
     totalPaid: 0,
-    outstandingBalance: 1500,
-    status: 'pending',
     payments: [],
+  });
+
+  test('legacy fee and terms settings are excluded from admission document settings', () => {
+    const legacySettings = mergeOfficialDocumentSettings({
+      ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+      terms: ['Old fee condition'],
+      paymentInstructions: 'Old fee instructions',
+      sectionHeadings: {
+        ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.sectionHeadings,
+        fees: 'Old fee heading',
+        terms: 'Old terms heading',
+      },
+      layout: {
+        ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.layout,
+        visibleSections: ['student', 'fees', 'terms'],
+        sectionOrder: ['student', 'fees', 'course', 'terms', 'joining', 'payment'],
+      },
+    });
+    assert.ok(legacySettings);
+    assert.deepEqual(legacySettings.layout.visibleSections, ['student']);
+    assert.deepEqual(legacySettings.layout.sectionOrder, DEFAULT_OFFICIAL_DOCUMENT_SETTINGS.layout.sectionOrder);
+    assert.equal('terms' in legacySettings, false);
+    assert.equal('paymentInstructions' in legacySettings, false);
+    assert.equal('fees' in legacySettings.sectionHeadings, false);
   });
 
   const payments = [
     { id: 'payment-1', amount: 400, paymentMethod: 'upi', paymentStage: 'first_fee', recordedAt: '2026-10-30T10:00:00Z', referenceNumber: 'REF-1' },
     { id: 'payment-2', amount: 300, paymentMethod: 'cash', paymentStage: 'installment', recordedAt: '2026-10-31T10:00:00Z', referenceNumber: null },
   ];
-  assert.deepEqual(summarizeOfficialPayments(1500, payments), {
-    totalPayable: 1500,
+  assert.deepEqual(summarizeOfficialPayments(payments), {
     totalPaid: 700,
-    outstandingBalance: 800,
-    status: 'partially_paid',
     payments,
   });
-  assert.equal(summarizeOfficialPayments(700, payments).status, 'fully_paid');
-  assert.equal(summarizeOfficialPayments(650, payments).outstandingBalance, 0);
 });
 
-test('official preview uses marked placeholder data without reading student records or photos', async () => {
+test('admission document preview uses the selected approved application data', async () => {
   const photoReads: string[] = [];
   const application = {
     id: applicationId,
@@ -249,12 +297,31 @@ test('official preview uses marked placeholder data without reading student reco
     },
   });
 
-  await withAdminFetch('admin', async (_request, url) => {
+  const applicationSnapshot = {
+    application: {
+      ...application,
+      qualification_category: 'Graduate',
+      parent_phone: null,
+      parent_email: null,
+    },
+    program: { name: selectedCourse.name, duration: selectedCourse.duration, mode: 'Regular classroom' },
+    payment_summary: { total_payable: 13000, total_paid: 500, payments: [] },
+    document_settings: {},
+    joining_information: {},
+  };
+  await withAdminFetch('admin', async (request, url) => {
     if (url.pathname.endsWith('/official_document_settings')) return Response.json([]);
+    if (url.pathname.endsWith('/applications')) {
+      return Response.json([{ id: applicationId, status: 'Accepted', student_id: student.studentId }]);
+    }
+    if (url.pathname.endsWith('/rpc/build_official_document_snapshot')) {
+      assert.equal(request.method, 'POST');
+      return Response.json(applicationSnapshot);
+    }
     throw new Error(`Unexpected Supabase request: ${url.pathname}`);
   }, async () => {
     const response = await handleApiRequest(
-      authorizedRequest('/api/admin/official-document/preview', 'POST', {}),
+      authorizedRequest('/api/admin/official-document/preview', 'POST', { application_id: applicationId }),
       env,
     );
     assert.equal(response.status, 200);
@@ -265,17 +332,18 @@ test('official preview uses marked placeholder data without reading student reco
     assert.equal((await PDFDocument.load(bytes)).getPageCount(), 1);
     const text = decodePdfText(bytes);
     assert.match(text, /PREVIEW ONLY - NOT AN OFFICIAL STUDENT DOCUMENT/);
-    assert.match(text, /PREVIEW APPLICANT/);
-    assert.match(text, /Selected program \(preview\)/);
-    assert.doesNotMatch(text, /Test Learner|IELTS Preparation|UEA-STU-2026-0001/);
+    assert.match(text, /Test Learner/);
+    assert.match(text, /IELTS Preparation/);
+    assert.match(text, /UEA-STU-2026-0001/);
+    assert.doesNotMatch(text, /PREVIEW APPLICANT|FEE BREAKDOWN|Net Payable Amount|PAYMENT PENDING|INR 500/);
   });
-  assert.deepEqual(photoReads, []);
+  assert.deepEqual(photoReads, [photoKey]);
 });
 
 test('approval attaches and stores the PDF generated from the immutable issuance snapshot', async () => {
   const uploaded: Array<{ key: string; bytes: Uint8Array; contentType?: string }> = [];
   const emailPayloads: Record<string, unknown>[] = [];
-  const completedDeliveries: Record<string, unknown>[] = [];
+  const notificationWrites: Record<string, unknown>[] = [];
   const snapshot = {
     application: {
       id: applicationId,
@@ -296,17 +364,6 @@ test('approval attaches and stores the PDF generated from the immutable issuance
       name: selectedCourse.name,
       duration: selectedCourse.duration,
       level: selectedCourse.level,
-    },
-    fee: {
-      tuition_fee: selectedCourse.tuitionFee,
-      registration_fee: selectedCourse.registrationFee,
-      study_material_fee: selectedCourse.studyMaterialFee,
-      other_charges: selectedCourse.otherCharges,
-      discount_type: selectedCourse.discountType,
-      discount_value: selectedCourse.discountValue,
-      discount_amount: selectedCourse.discountAmount,
-      final_payable: selectedCourse.finalPayable,
-      agreed_total: null,
     },
     document_settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
     joining_information: {
@@ -374,16 +431,9 @@ test('approval attaches and stores the PDF generated from the immutable issuance
       assert.deepEqual(rpcPayload.p_joining_information, snapshot.joining_information);
       return Response.json(approvalResult);
     }
-    if (url.pathname.endsWith('/rpc/claim_student_approval_notification')) {
-      return Response.json([{
-        notification_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
-        claimed: true,
-        status: 'Pending',
-        attempt_count: 1,
-      }]);
-    }
-    if (url.pathname.endsWith('/rpc/complete_student_approval_notification')) {
-      completedDeliveries.push(await request.json() as Record<string, unknown>);
+    if (url.pathname.endsWith('/application_notifications')) {
+      if (request.method === 'GET') return Response.json([]);
+      notificationWrites.push(await request.json() as Record<string, unknown>);
       return new Response(null, { status: 204 });
     }
     if (url.pathname.endsWith('/official_document_issuances')) {
@@ -410,8 +460,8 @@ test('approval attaches and stores the PDF generated from the immutable issuance
   assert.equal(uploaded[0].key, `official-documents/${applicationId}/v1-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.pdf`);
   assert.equal(uploaded[0].contentType, 'application/pdf');
   assert.equal(new TextDecoder().decode(uploaded[0].bytes.slice(0, 5)), '%PDF-');
-  assert.equal(completedDeliveries.length, 1);
-  assert.equal(completedDeliveries[0].p_success, true);
+  assert.equal(notificationWrites.length, 1);
+  assert.equal(notificationWrites[0].status, 'Sent');
   const emailPayload = emailPayloads[0];
   assert.ok(emailPayload);
   const attachments = emailPayload.attachments as Array<{ filename: string; content: string }>;
@@ -421,17 +471,17 @@ test('approval attaches and stores the PDF generated from the immutable issuance
   const attachedText = decodePdfText(attachedPdf);
   assert.match(attachedText, /IELTS Preparation/);
   assert.match(attachedText, /UEA-STU-2026-0001/);
-  assert.match(attachedText, /PAYMENT PENDING/);
-  assert.match(attachedText, /INR 0\.00/);
+  assert.doesNotMatch(attachedText, /PAYMENT PENDING|Total Paid|Outstanding Balance|Payment Mode|INR 0\.00/);
   assert.doesNotMatch(attachedText, /Other Course|Spoken English|Business English/);
 });
 
-test('approval retries failed delivery once and reuses the saved issuance on repeated approvals', async () => {
+test('approval records a failed delivery without exposing an automatic retry endpoint', async () => {
+  const logoKey = 'official-document-assets/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.png';
   const uploadedPdfs: string[] = [];
+  const assetReads: string[] = [];
   let storedPdf: Uint8Array | null = null;
   let notificationCount = 0;
   let deliveryStatus: 'Pending' | 'Failed' | 'Sent' | null = null;
-  let attemptCount = 0;
   let emailAttempts = 0;
   let approvalCalls = 0;
   const resendPayloads: Record<string, unknown>[] = [];
@@ -456,18 +506,7 @@ test('approval retries failed delivery once and reuses the saved issuance on rep
       duration: selectedCourse.duration,
       level: selectedCourse.level,
     },
-    fee: {
-      tuition_fee: selectedCourse.tuitionFee,
-      registration_fee: selectedCourse.registrationFee,
-      study_material_fee: selectedCourse.studyMaterialFee,
-      other_charges: selectedCourse.otherCharges,
-      discount_type: selectedCourse.discountType,
-      discount_value: selectedCourse.discountValue,
-      discount_amount: selectedCourse.discountAmount,
-      final_payable: selectedCourse.finalPayable,
-      agreed_total: null,
-    },
-    document_settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+    document_settings: { ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS, logoObjectKey: logoKey },
     joining_information: {
       joiningDate: '2026-02-01',
       classSchedule: 'Monday to Saturday',
@@ -496,8 +535,9 @@ test('approval retries failed delivery once and reuses the saved issuance on rep
   const env = makeWorkerEnv({
     APPLICATION_MEDIA: {
       get: async (key: string) => {
+        assetReads.push(key);
         const versionedPdfKey = `official-documents/${applicationId}/v1-${issuance.id}.pdf`;
-        const bytes = key === photoKey ? pngBytes : key === versionedPdfKey ? storedPdf : null;
+        const bytes = key === photoKey || key === logoKey ? pngBytes : key === versionedPdfKey ? storedPdf : null;
         if (!bytes) return null;
         return {
           body: new ReadableStream<Uint8Array>({
@@ -506,7 +546,7 @@ test('approval retries failed delivery once and reuses the saved issuance on rep
               controller.close();
             },
           }),
-          httpMetadata: { contentType: key === photoKey ? 'image/png' : 'application/pdf' },
+          httpMetadata: { contentType: key === photoKey || key === logoKey ? 'image/png' : 'application/pdf' },
         };
       },
       put: async (key: string, value: ArrayBuffer | ArrayBufferView) => {
@@ -541,40 +581,17 @@ test('approval retries failed delivery once and reuses the saved issuance on rep
       assert.deepEqual(requestBody.p_joining_information, snapshot.joining_information);
       return Response.json({ application, issuance });
     }
-    if (url.pathname.endsWith('/rpc/claim_student_approval_notification')) {
-      const requestBody = await request.json() as Record<string, unknown>;
-      assert.equal(requestBody.p_application_id, applicationId);
-      if (deliveryStatus === 'Sent' || deliveryStatus === 'Pending') {
-        return Response.json([{
-          notification_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
-          claimed: false,
-          status: deliveryStatus,
-          attempt_count: attemptCount,
-        }]);
-      }
-      if (deliveryStatus === null) notificationCount += 1;
-      deliveryStatus = 'Pending';
-      attemptCount += 1;
-      return Response.json([{
-        notification_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
-        claimed: true,
-        status: 'Pending',
-        attempt_count: attemptCount,
-      }]);
-    }
-    if (url.pathname.endsWith('/rpc/complete_student_approval_notification')) {
-      const requestBody = await request.json() as Record<string, unknown>;
-      deliveryStatus = requestBody.p_success ? 'Sent' : 'Failed';
-      return new Response(null, { status: 204 });
-    }
     if (url.pathname.endsWith('/application_notifications')) {
-      return Response.json([{
-        id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
-        application_id: applicationId,
-        notification_type: 'student_approval',
-        recipient_email: 'stale-notification@example.com',
-        attempt_count: attemptCount,
-      }]);
+      if (request.method === 'GET') {
+        return Response.json(deliveryStatus ? [{
+          id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+          status: deliveryStatus,
+        }] : []);
+      }
+      const body = await request.json() as { status: 'Pending' | 'Failed' | 'Sent' };
+      deliveryStatus = body.status;
+      if (request.method === 'POST') notificationCount += 1;
+      return Response.json([{ id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', status: deliveryStatus }]);
     }
     if (url.pathname.endsWith('/applications')) return Response.json([application]);
     if (url.pathname.endsWith('/official_document_issuances')) return Response.json([issuance]);
@@ -602,35 +619,27 @@ test('approval retries failed delivery once and reuses the saved issuance on rep
       }),
       env,
     );
-    assert.equal(retry.status, 200);
-    assert.deepEqual(await retry.json(), {
-      success: true,
-      status: 'Sent',
-      message: 'Notification sent successfully on retry.',
-    });
-
-    const repeatedApproval = await approvalRequest();
-    assert.equal(repeatedApproval.status, 200);
-    const repeatedBody = await repeatedApproval.json() as { email_status: string; student_id: string };
-    assert.equal(repeatedBody.email_status, 'Already sent');
-    assert.equal(repeatedBody.student_id, student.studentId);
+    assert.equal(retry.status, 404);
   });
 
-  assert.equal(approvalCalls, 2);
-  assert.equal(emailAttempts, 2);
-  assert.deepEqual(resendPayloads[1], resendPayloads[0]);
+  assert.equal(approvalCalls, 1);
+  assert.equal(emailAttempts, 1);
+  assert.equal(resendPayloads.length, 1);
   assert.equal(resendPayloads[0].to, student.email);
   assert.match(String(resendPayloads[0].html), /Test Learner/);
   assert.match(String(resendPayloads[0].html), /IELTS Preparation/);
+  assert.match(String(resendPayloads[0].html), /official admission approval document attached/i);
+  assert.doesNotMatch(String(resendPayloads[0].html), /fee|terms and conditions/i);
   assert.doesNotMatch(String(resendPayloads[0].html), /Editable Current Name|Current Editable Course|stale-notification/);
   assert.equal(notificationCount, 1);
-  assert.equal(attemptCount, 2);
   assert.deepEqual(uploadedPdfs, [`official-documents/${applicationId}/v1-${issuance.id}.pdf`]);
-  assert.equal(deliveryStatus, 'Sent');
+  assert.ok(assetReads.includes(logoKey));
+  assert.equal(deliveryStatus, 'Failed');
   assert.ok(storedPdf);
   const savedPdfText = decodePdfText(storedPdf);
   assert.match(savedPdfText, /IELTS Preparation/);
   assert.match(savedPdfText, /UEA-STU-2026-0001/);
+  assert.doesNotMatch(savedPdfText, /FEE BREAKDOWN|Net Payable Amount|TERMS & CONDITIONS/);
   assert.doesNotMatch(savedPdfText, /Current Editable Course|Other Course/);
 });
 
@@ -680,7 +689,6 @@ test('recorded payment creates and emails an immutable PDF version using snapsho
       ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
       logoObjectKey: logoKey,
       joiningInstructions: ['Bring the admission confirmation slip.'],
-      terms: ['Saved attendance terms.'],
     },
     joining_information: {
       joiningDate: '2026-11-02',
@@ -754,28 +762,17 @@ test('recorded payment creates and emails an immutable PDF version using snapsho
       return Response.json(issuanceId);
     }
     if (url.pathname.endsWith('/official_document_issuances')) {
+      if (request.method === 'PATCH') {
+        Object.assign(issuance, await request.json() as Record<string, unknown>);
+        return new Response(null, { status: 204 });
+      }
       if (url.searchParams.has('id')) return Response.json([issuance]);
       return Response.json(issuance.status === 'ready' ? [] : [{ id: issuanceId, version_number: 2, status: 'pending' }]);
     }
-    if (url.pathname.endsWith('/rpc/claim_official_document_issuance')) {
-      return Response.json([{ claimed: true, status: 'processing' }]);
-    }
-    if (url.pathname.endsWith('/rpc/complete_official_document_issuance')) {
-      const body = await request.json() as Record<string, unknown>;
-      assert.equal(body.p_success, true);
-      issuance.pdf_object_key = String(body.p_pdf_object_key);
-      issuance.status = 'ready';
-      return new Response(null, { status: 204 });
-    }
-    if (url.pathname.endsWith('/application_notifications')) return Response.json([notification]);
-    if (url.pathname.endsWith('/rpc/claim_official_document_notification')) {
-      return Response.json([{ claimed: true, status: 'Pending', attempt_count: 1 }]);
-    }
-    if (url.pathname.endsWith('/rpc/complete_official_document_notification')) {
-      const body = await request.json() as Record<string, unknown>;
-      assert.equal(body.p_success, true);
-      notification.status = 'Sent';
-      return new Response(null, { status: 204 });
+    if (url.pathname.endsWith('/application_notifications')) {
+      if (request.method === 'GET') return Response.json([notification]);
+      Object.assign(notification, await request.json() as Record<string, unknown>);
+      return Response.json([notification]);
     }
     throw new Error(`Unexpected Supabase request: ${url.pathname}`);
   }, async () => {
@@ -795,16 +792,16 @@ test('recorded payment creates and emails an immutable PDF version using snapsho
       });
     const response = await handleApiRequest(makePaymentRequest(), env);
     assert.equal(response.status, 201);
-    const body = await response.json() as { document_update: { success: boolean; versions: Array<{ status: string; version_number?: number }> } };
+    const body = await response.json() as { document_update: { success: boolean; status: string; version_number?: number } };
     assert.equal(body.document_update.success, true);
-    assert.equal(body.document_update.versions[0]?.status, 'Sent');
-    assert.equal(body.document_update.versions[0]?.version_number, 2);
+    assert.equal(body.document_update.status, 'Sent');
+    assert.equal(body.document_update.version_number, 2);
 
     const duplicateResponse = await handleApiRequest(makePaymentRequest(), env);
     assert.equal(duplicateResponse.status, 201);
-    const duplicateBody = await duplicateResponse.json() as { document_update: { success: boolean; versions: unknown[] } };
+    const duplicateBody = await duplicateResponse.json() as { document_update: { success: boolean; status: string } };
     assert.equal(duplicateBody.document_update.success, true);
-    assert.equal(duplicateBody.document_update.versions.length, 0);
+    assert.equal(duplicateBody.document_update.status, 'Sent');
   });
 
   assert.equal(paymentCreateCalls, 2);
@@ -813,8 +810,9 @@ test('recorded payment creates and emails an immutable PDF version using snapsho
   assert.ok(assetReads.includes(logoKey));
   assert.equal(paymentEmails.length, 1);
   assert.equal(paymentEmails[0]?.to, 'parent@example.com');
-  assert.match(String(paymentEmails[0]?.subject), /Payment update/);
+  assert.match(String(paymentEmails[0]?.subject), /Payment record updated/);
   assert.doesNotMatch(String(paymentEmails[0]?.subject), /Congratulations|approved/i);
+  assert.doesNotMatch(String(paymentEmails[0]?.html), /outstanding|fully paid|partially paid|payment pending/i);
   const attachments = paymentEmails[0]?.attachments as Array<{ content: string }>;
   assert.equal(attachments.length, 1);
   const pdfText = decodePdfText(new Uint8Array(Buffer.from(attachments[0].content, 'base64')));
@@ -826,13 +824,15 @@ test('recorded payment creates and emails an immutable PDF version using snapsho
   assert.match(pdfText, /Regular classroom/);
   assert.match(pdfText, /UPI-7788/);
   assert.match(pdfText, /BANK-REF-22/);
-  assert.match(pdfText, /PARTIALLY PAID/);
-  assert.match(pdfText, /INR 6,000.00/);
+  assert.match(pdfText, /Total paid to date/);
+  assert.match(pdfText, /INR 4,000.00/);
+  assert.doesNotMatch(pdfText, /PARTIALLY PAID|Outstanding Balance|INR 6,000.00/);
+  assert.doesNotMatch(pdfText, /FEE BREAKDOWN|Course Fee|Net Payable Amount|TERMS & CONDITIONS/);
   assert.match(pdfText, /Bring the admission confirmation slip/);
-  assert.match(pdfText, /Saved attendance terms/);
+  assert.doesNotMatch(pdfText, /Saved attendance terms|TERMS & CONDITIONS/);
 });
 
-test('failed payment email retry reuses the saved PDF version without uploading another copy', async () => {
+test('failed payment email is not automatically retried', async () => {
   const issuanceId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
   const notificationId = '77777777-7777-4777-8777-777777777777';
   const paymentId = '99999999-9999-4999-8999-999999999999';
@@ -879,7 +879,6 @@ test('failed payment email retry reuses the saved PDF version without uploading 
     notification_type: 'student_payment_update',
     recipient_email: student.email,
     status: 'Pending',
-    attempt_count: 0,
   };
   const env = makeWorkerEnv({
     APPLICATION_MEDIA: {
@@ -929,31 +928,21 @@ test('failed payment email retry reuses the saved PDF version without uploading 
       return Response.json(issuanceId);
     }
     if (url.pathname.endsWith('/official_document_issuances')) {
+      if (request.method === 'PATCH') {
+        Object.assign(issuance, await request.json() as Record<string, unknown>);
+        return new Response(null, { status: 204 });
+      }
       if (url.searchParams.has('id')) return Response.json([issuance]);
       return Response.json(issuance.status === 'ready' ? [] : [{ id: issuanceId, version_number: 2, status: issuance.status }]);
     }
-    if (url.pathname.endsWith('/application_notifications')) return Response.json([notification]);
+    if (url.pathname.endsWith('/application_notifications')) {
+      if (request.method === 'GET') return Response.json([notification]);
+      Object.assign(notification, await request.json() as Record<string, unknown>);
+      emailStatus = String(notification.status);
+      return Response.json([notification]);
+    }
     if (url.pathname.endsWith('/applications')) {
       return Response.json([{ application_reference: student.applicationNumber, student_id: student.studentId }]);
-    }
-    if (url.pathname.endsWith('/rpc/claim_official_document_issuance')) {
-      return Response.json([{ claimed: true, status: 'processing' }]);
-    }
-    if (url.pathname.endsWith('/rpc/complete_official_document_issuance')) {
-      const body = await request.json() as Record<string, unknown>;
-      issuance.status = body.p_success ? 'ready' : 'failed';
-      issuance.pdf_object_key = body.p_pdf_object_key;
-      return new Response(null, { status: 204 });
-    }
-    if (url.pathname.endsWith('/rpc/claim_official_document_notification')) {
-      emailStatus = 'Pending';
-      return Response.json([{ claimed: true, status: emailStatus, attempt_count: emailAttempts + 1 }]);
-    }
-    if (url.pathname.endsWith('/rpc/complete_official_document_notification')) {
-      const body = await request.json() as Record<string, unknown>;
-      emailStatus = body.p_success ? 'Sent' : 'Failed';
-      notification.status = emailStatus;
-      return new Response(null, { status: 204 });
     }
     throw new Error(`Unexpected Supabase request: ${url.pathname}`);
   }, async () => {
@@ -964,7 +953,7 @@ test('failed payment email retry reuses the saved PDF version without uploading 
         'Content-Type': 'application/json',
         'Idempotency-Key': idempotencyKey,
       },
-      body: JSON.stringify({ amount: 1000, payment_method: 'upi', payment_stage: 'first_fee' }),
+      body: JSON.stringify({ amount: 1000, payment_method: 'upi', payment_stage: 'first_payment' }),
     });
     const savedPayment = await handleApiRequest(paymentRequest(), env);
     assert.equal(savedPayment.status, 201);
@@ -977,25 +966,20 @@ test('failed payment email retry reuses the saved PDF version without uploading 
       authorizedRequest('/api/retry-notification', 'POST', { notification_id: notificationId }),
       env,
     );
-    assert.equal(retry.status, 200);
-    const retryBody = await retry.json() as { success: boolean; status: string };
-    assert.equal(retryBody.success, true);
-    assert.equal(retryBody.status, 'Sent');
+    assert.equal(retry.status, 404);
   });
 
   assert.deepEqual(uploads, [versionKey]);
-  assert.equal(emailAttempts, 2);
-  assert.equal(emailStatus, 'Sent');
-  assert.equal(resendPayloads[0]?.to, resendPayloads[1]?.to);
-  assert.deepEqual(resendPayloads[0]?.attachments, resendPayloads[1]?.attachments);
+  assert.equal(emailAttempts, 1);
+  assert.equal(emailStatus, 'Failed');
+  assert.equal(resendPayloads.length, 1);
 });
 
-test('a PDF generation failure leaves the recorded payment saved and its version retryable', async () => {
+test('a PDF generation failure leaves the recorded payment saved without automatic retry', async () => {
   const issuanceId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
   const paymentId = '99999999-9999-4999-8999-999999999999';
   const idempotencyKey = '88888888-8888-4888-8888-888888888888';
   let paymentSaved = false;
-  let generationFailureRecorded = false;
   const issuance: Record<string, any> = {
     id: issuanceId,
     application_id: applicationId,
@@ -1047,15 +1031,6 @@ test('a PDF generation failure leaves the recorded payment saved and its version
     if (url.pathname.endsWith('/official_document_issuances')) {
       return Response.json(url.searchParams.has('id') ? [issuance] : [{ id: issuanceId, version_number: 2, status: 'pending' }]);
     }
-    if (url.pathname.endsWith('/rpc/claim_official_document_issuance')) {
-      return Response.json([{ claimed: true, status: 'processing' }]);
-    }
-    if (url.pathname.endsWith('/rpc/complete_official_document_issuance')) {
-      const body = await request.json() as Record<string, unknown>;
-      assert.equal(body.p_success, false);
-      generationFailureRecorded = true;
-      return new Response(null, { status: 204 });
-    }
     throw new Error(`Unexpected Supabase request: ${url.pathname}`);
   }, async () => {
     const response = await handleApiRequest(
@@ -1066,7 +1041,7 @@ test('a PDF generation failure leaves the recorded payment saved and its version
           'Content-Type': 'application/json',
           'Idempotency-Key': idempotencyKey,
         },
-        body: JSON.stringify({ amount: 1000, payment_method: 'upi', payment_stage: 'first_fee' }),
+        body: JSON.stringify({ amount: 1000, payment_method: 'upi', payment_stage: 'first_payment' }),
       }),
       env,
     );
@@ -1077,7 +1052,7 @@ test('a PDF generation failure leaves the recorded payment saved and its version
   });
 
   assert.equal(paymentSaved, true);
-  assert.equal(generationFailureRecorded, true);
+  assert.equal(issuance.status, 'pending');
 });
 
 test('authorized admins can list sanitized history and download an older PDF version', async () => {
@@ -1150,6 +1125,10 @@ test('authorized admins can list sanitized history and download an older PDF ver
     assert.equal(history[0]?.version_number, 1);
     assert.equal(history[1]?.version_number, 2);
     assert.equal('pdf_object_key' in history[0]!, false);
+    assert.equal('payment_status' in history[1]!, false);
+    assert.equal('outstanding_balance' in history[1]!, false);
+    assert.equal(history[1]?.total_paid, 4000);
+    assert.equal(history[1]?.payment_count, 0);
 
     const downloadResponse = await handleApiRequest(
       authorizedRequest(`/api/admin/official-document/issued?application_id=${applicationId}&version=1`),
@@ -1166,6 +1145,7 @@ test('authorized admins can list sanitized history and download an older PDF ver
 
 test('official PDF settings require super-admin and store uploaded assets privately', async () => {
   const savedSettings: Record<string, unknown>[] = [];
+  const savedSettingKeys: string[] = [];
   const uploadedKeys: string[] = [];
   const env = makeWorkerEnv({
     APPLICATION_MEDIA: {
@@ -1179,7 +1159,6 @@ test('official PDF settings require super-admin and store uploaded assets privat
       ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
       heading: 'Updated Admission Confirmation',
       joiningInstructions: ['Bring the admission confirmation slip.'],
-      terms: ['Attendance is required.'],
     },
     logo_file_base64: `data:image/png;base64,${Buffer.from(pngBytes).toString('base64')}`,
   };
@@ -1197,8 +1176,9 @@ test('official PDF settings require super-admin and store uploaded assets privat
       throw new Error(`Unexpected Supabase request: ${url.pathname}`);
     }
     if (request.method === 'GET') return Response.json([]);
-    const body = await request.json() as { document_data: Record<string, unknown> } | Array<{ document_data: Record<string, unknown> }>;
+    const body = await request.json() as { setting_key: string; document_data: Record<string, unknown> } | Array<{ setting_key: string; document_data: Record<string, unknown> }>;
     const row = Array.isArray(body) ? body[0] : body;
+    savedSettingKeys.push(row.setting_key);
     savedSettings.push(row.document_data);
     return Response.json(row);
   }, async () => {
@@ -1210,16 +1190,17 @@ test('official PDF settings require super-admin and store uploaded assets privat
     const body = await response.json() as { settings: Record<string, unknown> };
     assert.equal(body.settings.heading, 'Updated Admission Confirmation');
     assert.deepEqual(body.settings.joiningInstructions, ['Bring the admission confirmation slip.']);
-    assert.deepEqual(body.settings.terms, ['Attendance is required.']);
+    assert.equal('terms' in body.settings, false);
     assert.match(String(body.settings.logoObjectKey), /^official-document-assets\/[0-9a-f-]+\.png$/i);
   });
   assert.equal(savedSettings[0]?.heading, 'Updated Admission Confirmation');
   assert.deepEqual(savedSettings[0]?.joiningInstructions, ['Bring the admission confirmation slip.']);
+  assert.deepEqual(savedSettingKeys, ['admission_approval']);
   assert.equal(uploadedKeys.length, 1);
   assert.match(uploadedKeys[0], /^official-document-assets\/[0-9a-f-]+\.png$/i);
 });
 
-test('enrollment PDF loads the configured private logo through the authenticated asset endpoint', async () => {
+test('official PDF logo assets remain available while fee confirmation PDF is removed', async () => {
   const logoKey = 'official-document-assets/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.png';
   let fetchedKey = '';
   const configuredSettings = { ...DEFAULT_OFFICIAL_DOCUMENT_SETTINGS, logoObjectKey: logoKey };
@@ -1247,7 +1228,7 @@ test('enrollment PDF loads the configured private logo through the authenticated
     if (!url.pathname.endsWith('/official_document_settings')) {
       throw new Error(`Unexpected Supabase request: ${url.pathname}`);
     }
-    return Response.json([{ setting_key: 'official_fee_structure', document_data: configuredSettings }]);
+    return Response.json([{ setting_key: 'admission_approval', document_data: configuredSettings }]);
   }, async () => {
     const response = await handleApiRequest(
       authorizedRequest('/api/admin/official-document/assets?type=logo'),
@@ -1260,7 +1241,8 @@ test('enrollment PDF loads the configured private logo through the authenticated
 
   assert.equal(fetchedKey, logoKey);
   const adminPortal = await readFile(new URL('../src/pages/AdminPortal.tsx', import.meta.url), 'utf8');
-  assert.match(adminPortal, /fetchAdmin\('\/api\/admin\/official-document\/assets\?type=logo'/);
+  assert.match(adminPortal, /api\/admin\/official-document\/assets/);
+  assert.doesNotMatch(adminPortal, /generateStudentConfirmationPdf|Enrollment & Fee Confirmation|FEE SUMMARY/);
   assert.doesNotMatch(adminPortal, /const logoUrl = "https:\/\/gpnfznwqwaokfzmozpxo\.supabase\.co/);
 });
 
@@ -1287,45 +1269,87 @@ test('program course mode is saved as a nullable admin-editable program field', 
   assert.equal(savedCourseMode, 'Regular classroom');
 });
 
-test('course fee endpoint persists editable fee components for an admin', async () => {
-  const submittedRows: Record<string, unknown>[] = [];
-  await withAdminFetch('admin', async (request, url) => {
-    assert.ok(url.pathname.endsWith('/program_fee_configurations'));
-    assert.equal(request.method, 'POST');
-    const payload = await request.json() as Record<string, unknown> | Array<Record<string, unknown>>;
-    const body = Array.isArray(payload) ? payload[0] : payload;
-    submittedRows.push(body);
-    return Response.json({
-      ...body,
-      final_payable: 13000,
-      updated_at: '2026-01-01T00:00:00Z',
-    });
-  }, async () => {
-    const response = await handleApiRequest(
-      authorizedRequest(`/api/admin/programs/${programId}/fee`, 'PUT', {
-        tuition_fee: 12000,
-        registration_fee: 500,
-        study_material_fee: 750,
-        other_charges: 250,
-        discount_type: 'amount',
-        discount_value: 500,
-      }),
-      makeWorkerEnv(),
-    );
-    assert.equal(response.status, 200);
-    const body = await response.json() as { final_payable: number };
-    assert.equal(body.final_payable, 13000);
-  });
-  assert.deepEqual(submittedRows[0], {
-    program_id: programId,
-    tuition_fee: 12000,
-    registration_fee: 500,
-    study_material_fee: 750,
-    other_charges: 250,
-    discount_type: 'amount',
-    discount_value: 500,
-    updated_by: userId,
-  });
+test('course fee configuration API is no longer active', async () => {
+  const response = await handleApiRequest(
+    authorizedRequest('/api/admin/program-fees'),
+    makeWorkerEnv(),
+  );
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: 'API route not found.' });
+});
+
+test('agreed-fee route is absent from both Worker and Express dispatch', async () => {
+  const [worker, server] = await Promise.all([
+    readFile(new URL('../worker-api.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../server.ts', import.meta.url), 'utf8'),
+  ]);
+  assert.doesNotMatch(worker, /\(payments\|fee\)/);
+  assert.doesNotMatch(server, /\/api\/admin\/applications\/:id\/fee/);
+});
+
+test('fee configuration removal migration preserves historical data and approval snapshots', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261101000005_remove_course_fee_configuration.sql', import.meta.url),
+    'utf8',
+  );
+  assert.doesNotMatch(migration, /DROP TABLE|DELETE FROM/i);
+  assert.doesNotMatch(migration, /CASCADE/i);
+  assert.match(migration, /public\.program_fee_history/);
+  assert.match(migration, /public\.program_fee_configurations,[\s\S]*public\.application_fee_agreements[\s\S]*FROM PUBLIC, anon, authenticated, service_role/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.build_official_document_snapshot/);
+  assert.doesNotMatch(migration, /program_fee_configurations%ROWTYPE|FROM public\.program_fee_configurations/);
+  assert.match(migration, /CHECK \(setting_key IN \('admission_approval', 'official_fee_structure'\)\)/);
+  assert.doesNotMatch(migration, /agreed_total|total_payable|outstanding_balance|final_payable/i);
+  assert.match(migration, /GRANT EXECUTE ON FUNCTION public\.build_official_document_snapshot\(uuid, jsonb\)[\s\S]*TO service_role/);
+  assert.match(migration, /SET search_path = pg_catalog, public/);
+});
+
+test('payment RPC migration preserves audited payment entry without agreed-fee dependencies', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261101000008_remove_fee_dependencies_from_payments.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.create_application_payment_idempotent/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.create_application_payment\(/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.update_application_payment/);
+  assert.match(migration, /INSERT INTO public\.application_payment_audit/);
+  assert.match(migration, /FOR UPDATE/);
+  assert.match(migration, /idempotency_key = p_idempotency_key/);
+  assert.match(migration, /first_payment/);
+  assert.match(migration, /second_payment/);
+  assert.doesNotMatch(migration, /application_fee_agreements|agreed_total|remaining balance/i);
+  assert.doesNotMatch(migration, /DROP TABLE|DELETE FROM|CASCADE/i);
+  assert.match(migration, /REVOKE ALL ON FUNCTION public\.create_application_payment_idempotent[\s\S]+FROM PUBLIC, anon, authenticated/);
+  assert.match(migration, /GRANT EXECUTE ON FUNCTION public\.create_application_payment_idempotent[\s\S]+TO service_role/);
+});
+
+test('lifecycle automation migration is valid and retains notification evidence', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261101000007_remove_lifecycle_automation.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(migration, /DO \$\$[\s\S]+END;\s*\$\$;/);
+  assert.match(migration, /cron\.unschedule\(retention_job_id\)/);
+  assert.match(migration, /DROP TABLE IF EXISTS public\.application_photo_cleanup_jobs/);
+  assert.match(migration, /REVOKE INSERT, UPDATE, DELETE, TRUNCATE[\s\S]*official_approval_email_state/);
+  assert.match(migration, /GRANT SELECT ON TABLE public\.official_approval_email_state TO service_role/);
+  assert.match(migration, /GRANT SELECT ON TABLE public\.request_email_notifications TO service_role/);
+  assert.doesNotMatch(migration, /CASCADE|DELETE FROM|TRUNCATE TABLE|DROP TABLE[^;]*application_notifications/i);
+  assert.doesNotMatch(migration, /DROP TABLE[^;]*official_approval_email_state/i);
+});
+
+test('certificate email lifecycle removal preserves certificate records and files', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261101000009_remove_certificate_email_lifecycle.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(migration, /DROP FUNCTION IF EXISTS public\.acquire_certificate_email_lease/);
+  assert.match(migration, /DROP FUNCTION IF EXISTS public\.reconcile_certificate_email_unknown/);
+  assert.match(migration, /DROP FUNCTION IF EXISTS public\.record_certificate_email_delivery/);
+  assert.match(migration, /DROP TABLE IF EXISTS public\.certificate_email_rejection_evidence/);
+  assert.match(migration, /DROP TABLE IF EXISTS public\.certificate_email_attempts/);
+  assert.doesNotMatch(migration, /DROP TABLE[^;]*public\.certificates|DROP TABLE[^;]*public\.certificate_events/i);
+  assert.doesNotMatch(migration, /CASCADE|DELETE FROM|TRUNCATE|R2/i);
 });
 
 test('database migration uses independent yearly sequences and atomic immutable fee snapshots', async () => {
@@ -1414,7 +1438,16 @@ test('payment PDF version migration reuses existing ledgers, issuance, and notif
   assert.match(recoveryMigration, /application_payment_historical_baseline exists with an incompatible definition/);
   assert.match(recoveryMigration, /attribute\.atttypid <> 'int8'::regtype/);
   assert.match(recoveryMigration, /format_type\(attribute\.atttypid, attribute\.atttypmod\) <> 'numeric\(12,2\)'/);
-  assert.match(recoveryMigration, /FOREIGN KEY \(application_id\) REFERENCES public\.applications\(id\) ON DELETE CASCADE/);
+  assert.match(recoveryMigration, /REFERENCES public\.applications\(id\) ON DELETE CASCADE/);
+  assert.match(recoveryMigration, /format_type\(attribute\.atttypid, attribute\.atttypmod\) = expected\.type_name/);
+  for (const column of ['recorded_at', 'created_at', 'updated_at', 'captured_at']) {
+    assert.match(recoveryMigration, new RegExp(`\\('${column}', 'timestamp with time zone', true\\)`));
+  }
+  assert.match(recoveryMigration, /attribute\.atttypid <> 'timestamptz'::regtype/);
+  assert.match(recoveryMigration, /constraint_info\.confrelid = 'public\.applications'::regclass/);
+  assert.match(recoveryMigration, /constraint_info\.confdeltype = 'c'/);
+  assert.match(recoveryMigration, /constraint_info\.conkey = ARRAY\[local_column\.attnum\]::smallint\[\]/);
+  assert.match(recoveryMigration, /constraint_info\.confkey = ARRAY\[referenced_column\.attnum\]::smallint\[\]/);
   assert.match(recoveryMigration, /v_payload_id !~\* '\^\[0-9a-f\]\{8\}/);
   assert.match(recoveryMigration, /v_payload_uuid <> v_audit\.payment_id/);
   assert.match(recoveryMigration, /payment-audit:/);
@@ -1504,7 +1537,7 @@ test('payment PDF version migration reuses existing ledgers, issuance, and notif
 
 test('historical Version 1 recovery is isolated, idempotent, and uses strict payment evidence', async () => {
   const recoveryMigration = await readFile(
-    new URL('../supabase/migrations/20261031000006_historical_official_document_recovery.sql', import.meta.url),
+    new URL('../supabase/migrations/20261102000000_forward_historical_official_document_recovery.sql', import.meta.url),
     'utf8',
   );
   assert.match(recoveryMigration, /create_historical_official_document_version_one/);
@@ -1537,6 +1570,59 @@ test('historical Version 1 recovery is isolated, idempotent, and uses strict pay
   assert.doesNotMatch(recoveryMigration, /UPDATE public\.applications/);
   assert.doesNotMatch(recoveryMigration, /INSERT INTO public\.application_payments/);
   assert.doesNotMatch(recoveryMigration, /UPDATE public\.application_fee_agreements/);
+});
+
+test('committed historical Version 1 recovery retains its original audit reconstruction behavior', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261031000006_historical_official_document_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(migration, /FROM public\.application_payments AS payment/);
+  assert.match(migration, /payment\.created_at <= v_application\.approved_at/);
+  assert.match(migration, /ROW_NUMBER\(\) OVER \([\s\S]+ORDER BY audit\.event_sequence DESC, audit\.id DESC/);
+  assert.match(migration, /action <> 'deleted'/);
+  assert.match(migration, /'historical-recovery:approval:' \|\| p_application_id::text/);
+  assert.match(migration, /ON CONFLICT \(application_id, version_number\) DO NOTHING/);
+  assert.doesNotMatch(migration, /UPDATE public\.applications|INSERT INTO public\.application_payments|DELETE FROM/);
+});
+
+test('historical recovery fixes are forward-only and preserve the committed migrations', async () => {
+  const historicalMigration = await readFile(
+    new URL('../supabase/migrations/20261031000006_historical_official_document_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  const forwardMigration = await readFile(
+    new URL('../supabase/migrations/20261102000000_forward_historical_official_document_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(historicalMigration, /create_historical_official_document_version_one/);
+  assert.match(forwardMigration, /CREATE OR REPLACE FUNCTION public\.create_historical_official_document_version_one/);
+  assert.match(forwardMigration, /FROM public\.application_payment_audit AS payment/);
+  assert.match(forwardMigration, /Payment audit history contains duplicate creation events/);
+  assert.match(forwardMigration, /Payment audit history contains an event after deletion/);
+  assert.match(forwardMigration, /\[1-5\]\[0-9a-f\]\{3\}/);
+  assert.match(forwardMigration, /REVOKE ALL ON FUNCTION public\.create_historical_official_document_version_one\(uuid\)/);
+  assert.match(forwardMigration, /GRANT EXECUTE ON FUNCTION public\.create_historical_official_document_version_one\(uuid\)[\s\S]+TO service_role/);
+  assert.match(forwardMigration, /BEGIN;[\s\S]+COMMIT;/);
+  assert.doesNotMatch(forwardMigration, /CASCADE|DELETE FROM|TRUNCATE/);
+});
+
+test('payment audit baseline timestamp validation supports fresh and existing schemas', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261031000005_payment_document_audit_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(migration, /format_type\(attribute\.atttypid, attribute\.atttypmod\) = expected\.type_name/);
+  assert.match(migration, /\('recorded_at', 'timestamp with time zone', true\)/);
+  assert.match(migration, /\('created_at', 'timestamp with time zone', true\)/);
+  assert.match(migration, /\('updated_at', 'timestamp with time zone', true\)/);
+  assert.match(migration, /\('captured_at', 'timestamp with time zone', true\)/);
+  assert.match(migration, /attribute\.atttypid <> 'timestamptz'::regtype/);
+  assert.match(migration, /constraint_info\.confrelid = 'public\.applications'::regclass/);
+  assert.match(migration, /constraint_info\.confdeltype = 'c'/);
+  assert.match(migration, /constraint_info\.conkey = ARRAY\[local_column\.attnum\]::smallint\[\]/);
+  assert.match(migration, /constraint_info\.confkey = ARRAY\[referenced_column\.attnum\]::smallint\[\]/);
+  assert.doesNotMatch(migration, /DROP TABLE|DELETE FROM public\.(applications|application_payments|application_payment_audit|official_document_issuances)|TRUNCATE/);
 });
 
 test('historical recovery endpoint creates no approval email and reuses an existing issuance', async () => {

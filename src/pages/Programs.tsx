@@ -190,11 +190,11 @@ export const Programs: React.FC<ProgramsProps> = ({
         )}
       </section>
 
-      {/* Info notice about fees & batches */}
+      {/* Admission information */}
       <section className="max-w-4xl mx-auto px-4">
         <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-center text-xs text-slate-500 space-y-1">
           <p>
-            *Admissions are subject to application review. Official fee structure and academy terms are provided in the official document sent upon application acceptance.
+            *Admissions are subject to application review. Approved students receive an official admission document by email.
           </p>
         </div>
       </section>

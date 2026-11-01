@@ -66,10 +66,11 @@ For production Worker configuration, use the exact Production binding names and 
 
 ---
 
-## 5. Official Fee Structure PDF Verification
-1. The official document is located at `public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf`.
-2. When an authorized staff member approves an application, the system automatically checks for this document and attaches it to the student approval email.
-3. If hosting externally, set `APPROVED_FEE_STRUCTURE_PDF_URL` to the public HTTPS URL of the PDF.
+## 5. Student Approval PDF
+When an authorized staff member approves an application, the Worker generates
+the official admission approval PDF from the saved application snapshot and
+attaches it to the student approval email. The approval PDF contains student,
+course, and joining information; payment receipts remain a separate workflow.
 
 ---
 
@@ -96,8 +97,6 @@ RESEND_API_KEY="re_1234567890abcdef"
 RESEND_FROM_EMAIL="admissions@uptrendsacademy.com"
 APPLICATION_NOTIFICATION_EMAIL="uptrendsinstitute@gmail.com"
 
-# Official PDF
-APPROVED_FEE_STRUCTURE_PDF_URL="https://your-domain.com/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf"
 ```
 
 ---
@@ -134,12 +133,11 @@ CLOUDFLARE_R2_PUBLIC_URL="https://media.example.com"
 RESEND_API_KEY="your-resend-key"
 RESEND_FROM_EMAIL="admissions@example.com"
 APPLICATION_NOTIFICATION_EMAIL="test-inbox@example.com"
-APPROVED_FEE_STRUCTURE_PDF_URL="https://example.com/Uptrends_Fee_Structure_and_Terms.pdf"
 ```
 
 Start Wrangler locally with `npx wrangler dev --local --port 8787`. First verify non-mutating requests: public GET endpoints return JSON arrays/objects from Supabase, `GET /api/apply` returns `405` with `Allow: POST`, and an admin GET without a bearer token returns `401` when server credentials are configured. With no credentials, database-dependent endpoints should return JSON `503`, not sample data.
 
-`GET /api/system-status` performs non-mutating health checks: a one-row Supabase read, Resend domain API request, native R2 binding checks for both buckets, and PDF HEAD/file check. It returns only configured/connected flags and safe error categories, never credentials or raw service errors. Resend domain health requires permission to read domain status.
+`GET /api/system-status` performs non-mutating health checks: a one-row Supabase read, Resend domain API request, and native R2 binding checks for both buckets. It returns only configured/connected flags and safe error categories, never credentials or raw service errors. Resend domain health requires permission to read domain status.
 
 The Worker runtime bindings are declared in the root `wrangler.json` and are the same names and buckets expected by the code:
 
@@ -161,7 +159,6 @@ For the Cloudflare Worker Production environment, add text variables and secrets
 | `RESEND_API_KEY` | Secret | Resend email sending and health check |
 | `RESEND_FROM_EMAIL` | Text variable (optional; code has a default sender) | Resend email sender |
 | `CLOUDFLARE_R2_PUBLIC_URL` | Text variable (HTTPS URL) | Required for serving public gallery uploads |
-| `APPROVED_FEE_STRUCTURE_PDF_URL` | Text variable (optional) | External official PDF; otherwise the Worker `ASSETS` binding is checked |
 
 The Worker uses native R2 bindings and does not require R2 API tokens, account ID, or S3 access credentials. The local Express server remains a separate S3-compatible R2 client and continues to read its credential variables from `.env`. `ASSETS` is a separate static-assets binding generated from `wrangler.json`.
 

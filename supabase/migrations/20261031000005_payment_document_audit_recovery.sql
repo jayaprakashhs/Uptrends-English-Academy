@@ -400,11 +400,11 @@ BEGIN
       ('amount', 'numeric(12,2)', true),
       ('payment_method', 'text', true),
       ('payment_stage', 'text', true),
-      ('recorded_at', 'timestamptz', true),
+      ('recorded_at', 'timestamp with time zone', true),
       ('reference_number', 'text', false),
-      ('created_at', 'timestamptz', true),
-      ('updated_at', 'timestamptz', true),
-      ('captured_at', 'timestamptz', true)
+      ('created_at', 'timestamp with time zone', true),
+      ('updated_at', 'timestamp with time zone', true),
+      ('captured_at', 'timestamp with time zone', true)
     ) AS expected(column_name, type_name, required_not_null)
     WHERE NOT EXISTS (
       SELECT 1
@@ -425,10 +425,21 @@ BEGIN
   )
   OR NOT EXISTS (
     SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'public.application_payment_historical_baseline'::regclass
-      AND contype = 'f'
-      AND pg_get_constraintdef(oid) ILIKE 'FOREIGN KEY (application_id) REFERENCES public.applications(id) ON DELETE CASCADE%'
+    FROM pg_constraint AS constraint_info
+    JOIN pg_attribute AS local_column
+      ON local_column.attrelid = constraint_info.conrelid
+     AND local_column.attname = 'application_id'
+     AND NOT local_column.attisdropped
+    JOIN pg_attribute AS referenced_column
+      ON referenced_column.attrelid = constraint_info.confrelid
+     AND referenced_column.attname = 'id'
+     AND NOT referenced_column.attisdropped
+    WHERE constraint_info.conrelid = 'public.application_payment_historical_baseline'::regclass
+      AND constraint_info.contype = 'f'
+      AND constraint_info.confrelid = 'public.applications'::regclass
+      AND constraint_info.confdeltype = 'c'
+      AND constraint_info.conkey = ARRAY[local_column.attnum]::smallint[]
+      AND constraint_info.confkey = ARRAY[referenced_column.attnum]::smallint[]
   ) THEN
     RAISE EXCEPTION 'application_payment_historical_baseline exists with an incompatible definition.';
   END IF;

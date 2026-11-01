@@ -38,7 +38,6 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'admissions@uptrendsacademy.com';
 const APPLICATION_NOTIFICATION_EMAIL = process.env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com';
-const APPROVED_FEE_STRUCTURE_PDF_URL = process.env.APPROVED_FEE_STRUCTURE_PDF_URL || '';
 
 // Initialize Supabase if keys exist
 export const supabase = (SUPABASE_URL && SUPABASE_SERVICE_KEY)
@@ -487,7 +486,6 @@ const memoryStore: MemoryStore = {
     hero_photo_url: null,
     primary_orange: '#ea580c',
     primary_green: '#16a34a',
-    official_pdf_url: '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf'
   }
 };
 
@@ -706,50 +704,18 @@ async function checkR2Health(): Promise<IntegrationHealth> {
   }
 }
 
-async function checkPdfHealth(): Promise<IntegrationHealth & { available: boolean }> {
-  const localPdfPath = path.resolve(__dirname, 'public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf');
-  if (!APPROVED_FEE_STRUCTURE_PDF_URL) {
-    const available = fs.existsSync(localPdfPath);
-    return {
-      configured: available,
-      connected: available,
-      available,
-      ...(available ? {} : { error_category: 'file_not_found' }),
-    };
-  }
-  try {
-    const url = new URL(APPROVED_FEE_STRUCTURE_PDF_URL);
-    if (url.protocol !== 'https:') {
-      return { configured: true, connected: false, available: false, error_category: 'invalid_configuration' };
-    }
-    const response = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
-    return response.ok
-      ? { configured: true, connected: true, available: true }
-      : { configured: true, connected: false, available: false, error_category: `http_${response.status}` };
-  } catch (error) {
-    return {
-      configured: true,
-      connected: false,
-      available: false,
-      error_category: error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'unreachable',
-    };
-  }
-}
-
 // System Diagnostics & Configuration Status
 app.get('/api/system-status', async (_req, res) => {
-  const [supabaseHealth, resendHealth, r2Health, pdfHealth] = await Promise.all([
+  const [supabaseHealth, resendHealth, r2Health] = await Promise.all([
     checkSupabaseHealth(),
     checkResendHealth(),
     checkR2Health(),
-    checkPdfHealth(),
   ]);
 
   res.json({
     supabase: supabaseHealth,
     resend: resendHealth,
     r2_storage: r2Health,
-    official_pdf: pdfHealth,
     server_time: new Date().toISOString(),
   });
 });
@@ -1498,72 +1464,6 @@ app.post('/api/apply', dispatchWorkerApi);
 
 app.post('/api/approve-application', dispatchWorkerApi);
 
-// POST Retry Failed Notification
-app.post('/api/retry-notification', async (req, res) => {
-  const admin = await requireAdminAuth(req, res, 'super_admin');
-  if (!admin) return;
-
-  try {
-    const { notification_id } = req.body;
-    let notif: any = null;
-
-    if (supabase) {
-      const { data } = await supabase
-        .from('application_notifications')
-        .select('*, applications(*)')
-        .eq('id', notification_id)
-        .single();
-      notif = data;
-    } else {
-      notif = memoryStore.notifications.find(n => n.id === notification_id);
-    }
-
-    if (!notif) {
-      return res.status(404).json({ error: 'Notification record not found.' });
-    }
-
-    const localPdfPath = path.resolve(__dirname, 'public/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf');
-    const pdfBuffer = fs.existsSync(localPdfPath) ? fs.readFileSync(localPdfPath) : undefined;
-    const attachments = (notif.notification_type === 'student_approval' && pdfBuffer)
-      ? [{ filename: 'Uptrends_Fee_Structure_and_Terms.pdf', content: pdfBuffer }]
-      : undefined;
-
-    const emailResult = await sendEmailViaResend({
-      to: notif.recipient_email,
-      subject: notif.notification_type === 'student_approval'
-        ? "Congratulations! Your Application Has Been Approved — Uptrend's English Academy"
-        : "Application Received — Uptrend's English Academy",
-      html: `<p>Notification retry for application reference: ${notif.application_id}</p>`,
-      attachments,
-    });
-
-    if (supabase) {
-      await supabase
-        .from('application_notifications')
-        .update({
-          status: emailResult.success ? 'Sent' : 'Failed',
-          attempt_count: (notif.attempt_count || 1) + 1,
-          provider_message_id: emailResult.provider_message_id,
-          error_message: emailResult.error || null,
-          sent_at: emailResult.success ? new Date().toISOString() : null,
-        })
-        .eq('id', notification_id);
-    } else {
-      notif.status = emailResult.success ? 'Sent' : 'Failed';
-      notif.attempt_count = (notif.attempt_count || 1) + 1;
-      notif.error_message = emailResult.error || null;
-      notif.provider_message_id = emailResult.provider_message_id;
-    }
-
-    res.json({
-      success: emailResult.success,
-      status: emailResult.success ? 'Sent' : 'Failed',
-      message: emailResult.success ? 'Notification sent successfully on retry.' : emailResult.error,
-    });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // POST Callback Request (Public)
 app.post('/api/callback-request', async (req, res) => {
@@ -1629,24 +1529,18 @@ app.post('/api/callback-request', async (req, res) => {
   }
 });
 
-// Route document, fee, and demo-request workflows through the shared Worker handlers.
+// Route document, payment, and demo-request workflows through the shared Worker handlers.
 app.all(
   [
     '/api/admin/applications',
     '/api/admin/applications/:id',
     '/api/admin/applications/:id/archive',
-    '/api/admin/application-photo-cleanup-jobs',
-    '/api/admin/application-photo-cleanup-jobs/:id/retry',
-    '/api/admin/applications/:id/fee',
     '/api/admin/applications/:id/payments',
     '/api/admin/payments/:paymentId',
     '/api/demo-class-requests',
     '/api/admin/demo-class-requests',
     '/api/admin/demo-class-requests/:id',
     '/api/admin/demo-class-requests/:id/photo',
-    '/api/admin/program-fees',
-    '/api/admin/programs/:id/fee',
-    '/api/admin/programs/:id/fee/history',
     '/api/admin/official-document',
     '/api/admin/official-document/preview',
     '/api/admin/official-document/issued',
@@ -1798,7 +1692,6 @@ app.put('/api/admin/branding', async (req, res) => {
     primary_green,
     primary_color,
     secondary_color,
-    official_pdf_url,
     logo_file_base64,
     favicon_file_base64,
     footer_logo_file_base64,
@@ -1826,7 +1719,6 @@ app.put('/api/admin/branding', async (req, res) => {
       ...(req.body.hero_photo_url !== undefined ? { hero_photo_url: req.body.hero_photo_url } : {}),
       primary_orange: resolvedPrimaryColor || '#ea580c',
       primary_green: resolvedSecondaryColor || '#16a34a',
-      official_pdf_url: official_pdf_url || '/assets/docs/Uptrends_Fee_Structure_and_Terms.pdf',
       updated_at: new Date().toISOString(),
     };
   const uploadedAssets: Array<{

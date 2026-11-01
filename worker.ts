@@ -1,4 +1,4 @@
-import { handleApiRequest, runPaymentDocumentRecovery } from './worker-api';
+import { handleApiRequest } from './worker-api';
 import type { R2BucketBinding } from './worker-r2';
 
 interface Env {
@@ -13,7 +13,6 @@ interface Env {
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
   APPLICATION_NOTIFICATION_EMAIL?: string;
-  APPROVED_FEE_STRUCTURE_PDF_URL?: string;
 }
 
 export default {
@@ -36,11 +35,4 @@ export default {
     return env.ASSETS.fetch(new Request(new URL('/index.html', request.url)));
   },
 
-  async scheduled(
-    _controller: unknown,
-    env: Env,
-    context: { waitUntil(promise: Promise<unknown>): void },
-  ): Promise<void> {
-    context.waitUntil(runPaymentDocumentRecovery(env));
-  },
 };

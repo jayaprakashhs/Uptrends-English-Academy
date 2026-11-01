@@ -6,7 +6,6 @@ const validStatus: SystemStatus = {
   supabase: { configured: true, connected: true, error_category: null },
   resend: { configured: false, connected: false, error_category: 'missing_configuration' },
   r2_storage: { configured: true, connected: false, error_category: 'permission_denied' },
-  official_pdf: { configured: true, connected: true, available: true, error_category: null },
   server_time: '2026-10-25T07:09:21.865Z',
 };
 
@@ -28,7 +27,6 @@ test('settles with an unauthorized category for authentication failures', async 
   const status = await fetchSystemStatus(undefined, fetcher);
   assert.equal(status.supabase.error_category, 'unauthorized');
   assert.equal(status.resend.error_category, 'unauthorized');
-  assert.equal(status.official_pdf.available, false);
 });
 
 test('settles with a safe category for failed connections', async () => {
@@ -50,7 +48,6 @@ test('settles with timeout when the request exceeds the time limit', async () =>
     });
   const status = await fetchSystemStatus(undefined, fetcher, 5);
   assert.equal(status.supabase.error_category, 'timeout');
-  assert.equal(status.official_pdf.error_category, 'timeout');
 });
 
 test('settles with a safe category for unexpected response formats', async () => {

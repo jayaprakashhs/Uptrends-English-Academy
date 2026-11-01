@@ -9,11 +9,10 @@ export interface SystemStatus {
   supabase: IntegrationHealth;
   resend: IntegrationHealth;
   r2_storage: IntegrationHealth;
-  official_pdf: IntegrationHealth & { available: boolean };
   server_time: string;
 }
 
-const integrationNames = ['supabase', 'resend', 'r2_storage', 'official_pdf'] as const;
+const integrationNames = ['supabase', 'resend', 'r2_storage'] as const;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -28,17 +27,12 @@ const isIntegrationHealth = (value: unknown): value is IntegrationHealth =>
 export const isSystemStatus = (value: unknown): value is SystemStatus =>
   isRecord(value) &&
   integrationNames.every((name) => isIntegrationHealth(value[name])) &&
-  typeof value.official_pdf === 'object' &&
-  value.official_pdf !== null &&
-  'available' in value.official_pdf &&
-  typeof value.official_pdf.available === 'boolean' &&
   typeof value.server_time === 'string';
 
 const unavailableStatus = (errorCategory: string): SystemStatus => ({
   supabase: { configured: false, connected: false, error_category: errorCategory },
   resend: { configured: false, connected: false, error_category: errorCategory },
   r2_storage: { configured: false, connected: false, error_category: errorCategory },
-  official_pdf: { configured: false, connected: false, available: false, error_category: errorCategory },
   server_time: new Date().toISOString(),
 });
 

@@ -14,7 +14,7 @@ It creates:
   1. `admin_profiles` (Admin & Staff roles, activation status, audit timestamps)
   2. `programs` (English courses, levels, duration, target audience)
   3. `applications` (Student admission submissions with reference codes, contact, qualification, passport photo key)
-  4. `application_notifications` (Transactional email logs, retry counter, PDF attachment flags)
+  4. `application_notifications` (Transactional email delivery history and PDF attachment flags)
   5. `callback_requests` (Immediate student call-back requests)
   6. `contact_enquiries` (General inquiries, message details, read status)
   7. `reviews` (Student testimonials, ratings, published status)
@@ -95,17 +95,39 @@ After applying `20261031000003_application_qualification_category.sql`, apply
 It adds nullable `programs.course_mode`, payment-create idempotency metadata, and
 version/status fields to the existing `official_document_issuances` table.
 The authorized payment RPCs write audit rows in the same transaction as the
-payment mutation; the Worker and service-role reconciliation RPC create
-immutable PDF-version snapshots and `student_payment_update` outbox rows. It
-does not create duplicate payment, issuance, or notification tables and does
-not delete historical records.
+payment mutation; the Worker creates immutable PDF-version snapshots and
+delivery-history rows for `student_payment_update` emails. It does not create
+duplicate payment, issuance, or notification tables and does not delete
+historical records.
 
 The existing private `APPLICATION_MEDIA` R2 binding stores PDFs under
 version-specific keys. The Worker generates each PDF and sends a separate
-payment-update email; failed generation or delivery remains retryable from the
-admin notification workflow. Joining instructions remain in the existing
-`official_document_settings.document_data` JSON configuration. No additional
-environment variables are required.
+payment-update email synchronously after a payment mutation. Failed generation
+or ambiguous delivery is not automatically retried. Forward-only migration
+`20261101000007_remove_lifecycle_automation.sql` removes claim/reconciliation
+automation while preserving payment, audit, issuance, and delivery-history
+records. Approval-email state is retained as read-only delivery evidence.
+Migration `20261101000008_remove_fee_dependencies_from_payments.sql`
+keeps payment RPCs and their audit/idempotency behavior without agreed-fee
+validation. Fee configuration and agreement records are retained but no longer
+available to the application. Migration
+`20261101000009_remove_certificate_email_lifecycle.sql` removes certificate
+email attempt/rejection-evidence history and its RPCs without touching
+certificate records, events, PDFs, or storage objects. Joining instructions
+remain in the existing `official_document_settings.document_data` JSON
+configuration. No additional environment variables are required.
+
+Migration `20261102000000_forward_historical_official_document_recovery.sql`
+replaces the Version 1 historical recovery function with stricter audit-stream
+validation for deployments where the original recovery migration has already
+run. It does not update application, payment, or document records.
+
+The timestamp type validation in
+`20261031000005_payment_document_audit_recovery.sql` compares PostgreSQL's
+canonical `format_type` output (`timestamp with time zone`) while accepting
+the equivalent `timestamptz` catalog type on existing schemas. Its foreign-key
+validation checks catalog relation, column, and delete-action identity rather
+than relying on display-formatted constraint text.
 
 ### Historical Version 1 recovery
 
@@ -186,8 +208,6 @@ CLOUDFLARE_R2_SECRET_ACCESS_KEY=<server-only-secret-access-key>
 CLOUDFLARE_R2_BUCKET_NAME=uptrends-academy-media
 CLOUDFLARE_R2_PUBLIC_URL=https://media.uptrendsenglishacademy.in
 
-# Optional: use a hosted official PDF instead of the bundled public asset
-APPROVED_FEE_STRUCTURE_PDF_URL=https://<your-host>/Uptrends_Fee_Structure_and_Terms.pdf
 ```
 
 For Cloudflare Workers, configure `SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as Worker variables and `SUPABASE_SERVICE_ROLE_KEY` as an encrypted Worker secret. Use encrypted secrets for R2 access and Resend credentials as well. `SUPABASE_URL` must point to the same Supabase project as the service-role key. The Worker accepts `VITE_SUPABASE_URL` as a backward-compatible runtime URL binding, but use `SUPABASE_URL` for new configuration. Worker runtime settings are separate from the Vite build environment: the browser requires `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` at build time, while the service-role key must never enter the browser bundle. Missing client Supabase settings disable admin login with a visible configuration message; missing server credentials cause protected API requests to fail closed.
