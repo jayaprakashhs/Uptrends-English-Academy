@@ -2668,6 +2668,77 @@ const restoreApplication = async (request: Request, env: Env, id: string): Promi
   return restored ? json(restored) : errorResponse('Application not found.', 404);
 };
 
+const deleteApplication = async (request: Request, env: Env, id: string): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'admin');
+  if (isResponse(auth)) return auth;
+
+  const body = await parseJson(request);
+  if (isResponse(body)) return body;
+  if (body.confirmation !== 'DELETE') {
+    return errorResponse('Type DELETE to confirm permanent application deletion.', 400);
+  }
+
+  const { data, error } = await auth.supabase.rpc('delete_application_preserving_history', {
+    p_application_id: id,
+  });
+  if (error) {
+    if (error.code === '23503') {
+      return errorResponse(
+        'Deletion is blocked because retained financial, notification, or official email history references this application. No records were deleted.',
+        409,
+      );
+    }
+    return errorResponse(`Unable to delete application: ${error.message}`, 500);
+  }
+
+  const deletion = Array.isArray(data) ? data[0] : null;
+  if (!deletion) return errorResponse('Application not found.', 404);
+
+  let photoCleanup: 'not_required' | 'deleted' | 'retained_for_official_history' | 'requires_attention' =
+    deletion.photo_retained_for_official_history
+      ? 'retained_for_official_history'
+      : 'not_required';
+  let warning: string | undefined = deletion.photo_retained_for_official_history
+    ? 'Application deleted, but its photo was retained because an official document history snapshot references it.'
+    : undefined;
+
+  if (typeof deletion.photo_object_key === 'string') {
+    const key = deletion.photo_object_key;
+    const validPhotoKey = managedR2ObjectKeyFromMetadata(key, undefined, 'applications') === key &&
+      /^applications\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|png|webp)$/i.test(key);
+    if (!validPhotoKey) {
+      photoCleanup = 'requires_attention';
+      warning = 'Application deleted, but its photo key was not safe to remove. Private storage needs review.';
+      logApiDiagnostic('admin.applications.delete', 'invalid_photo_key');
+    } else {
+      try {
+        const bucket = env.APPLICATION_MEDIA;
+        if (!bucket?.get) throw new Error('Private application photo storage is unavailable.');
+        const object = await bucket.get(key);
+        if (!object?.body) {
+          photoCleanup = 'requires_attention';
+          warning = 'Application deleted, but its photo was not found during cleanup. Verify private storage.';
+          logApiDiagnostic('admin.applications.delete', 'photo_not_found');
+        } else {
+          await object.body.cancel();
+          await deleteFromR2(env, key, 'applications');
+          photoCleanup = 'deleted';
+        }
+      } catch {
+        photoCleanup = 'requires_attention';
+        warning = 'Application deleted, but photo cleanup failed. An administrator must review private storage.';
+        logApiDiagnostic('admin.applications.delete', 'photo_cleanup_failed');
+      }
+    }
+  }
+
+  return json({
+    deleted: true,
+    photo_cleanup: photoCleanup,
+    ...(warning ? { warning } : {}),
+  });
+};
+
 const updateApplicationStatus = async (request: Request, env: Env, id: string): Promise<Response> => {
   const auth = await requireAdmin(request, env, 'staff');
   if (isResponse(auth)) return auth;
@@ -3896,7 +3967,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       }
       if (resource === 'applications') {
         if (method === 'PUT') return updateApplicationStatus(request, env, id);
-        return methodNotAllowed(['PUT']);
+        if (method === 'DELETE') return deleteApplication(request, env, id);
+        return methodNotAllowed(['PUT', 'DELETE']);
       }
       if (resource === 'demo-class-requests') {
         if (method === 'PUT') return updateDemoClassRequestStatus(request, env, id);

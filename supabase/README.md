@@ -147,6 +147,30 @@ and document settings are not historically verified. The recovery PDF loads the
 current configured `site_branding.logo_url` dynamically and fails visibly if
 that logo is missing or invalid.
 
+### Safe permanent application deletion
+
+Before deploying the application Delete API, apply
+`supabase/migrations/20261102000001_safe_application_deletion.sql` to the same
+Supabase project as the application. This forward-only migration replaces
+cascading application references on notification, fee-agreement, approval-email,
+and historical payment-baseline records with `RESTRICT`. It stops if other
+cascading application foreign keys remain or if application photo keys are
+duplicated. Review any migration failure before retrying; do not remove records
+to make it pass.
+
+The API is available only to Admin and Super Admin. A matching payment,
+notification, fee-agreement, approval-email, or historical-baseline record
+blocks deletion with HTTP 409; no related records are deleted. Payment audit
+and official document issuance rows are retained and their application link is
+set to null. Official PDFs and receipt PDFs are never removed. An application
+photo is removed only when its key is unique and no official document snapshot
+references it. Storage cleanup failures are reported for review after the
+application row has been deleted.
+
+Use the normal reviewed Supabase migration process to apply the migration
+before deploying the API and Admin Portal changes. Do not apply it from the
+application runtime or as part of a production deployment without approval.
+
 ---
 
 ## 3. Provisioning the Super Admin (Target UID: `59bbb687-4e0d-47f7-b458-5a91955f915d`)
@@ -235,4 +259,4 @@ For Cloudflare Workers, configure `SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as
    - Open **Admin Roles & Access** tab (visible only to Super Admin).
    - Test changing a team member's role between Staff, Admin, and Super Admin.
    - Confirm unauthenticated requests to `/api/admin/*` receive HTTP 401.
-   - Confirm non-super-admin users are blocked from deleting applications or accessing role management.
+   - Confirm Staff cannot delete applications, Admin and Super Admin can, and only Super Admin can access role management.

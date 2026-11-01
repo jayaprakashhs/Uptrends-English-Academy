@@ -387,6 +387,9 @@ useEffect(() => {
 
   // Selected item modal preview states
   const [selectedApp, setSelectedApp] = useState<StudentApplication | null>(null);
+  const [deleteApplicationCandidate, setDeleteApplicationCandidate] = useState<StudentApplication | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deletingApplicationId, setDeletingApplicationId] = useState<string | null>(null);
   const [applicationJoiningInfo, setApplicationJoiningInfo] = useState<JoiningInformationSettings>({ ...DEFAULT_JOINING_INFORMATION });
   const [paymentApp, setPaymentApp] = useState<StudentApplication | null>(null);
   const [paymentData, setPaymentData] = useState<ApplicationPaymentData | null>(null);
@@ -1097,6 +1100,49 @@ const resetOfficialDocumentSettings = () => {
       });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleApplicationDelete = async () => {
+    const app = deleteApplicationCandidate;
+    if (!app || !isAdminOrHigher || deleteConfirmation !== 'DELETE' || deletingApplicationId) return;
+
+    setDeletingApplicationId(app.id);
+    setActionMessage(null);
+    try {
+      const result = await requestJson(`/api/admin/applications/${encodeURIComponent(app.id)}`, {
+        method: 'DELETE',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmation: 'DELETE' }),
+      }) as { photo_cleanup?: string; warning?: string };
+
+      setDeleteApplicationCandidate(null);
+      setDeleteConfirmation('');
+      const listRefreshed = await loadApplications(applicationArchiveFilter === 'Archived');
+      if (!listRefreshed) {
+        setActionMessage({
+          type: 'warning',
+          text: `Application deleted, but the list could not be refreshed.${result.warning ? ` ${result.warning}` : ''}`,
+        });
+        return;
+      }
+
+      if (result.warning || result.photo_cleanup === 'requires_attention' ||
+        result.photo_cleanup === 'retained_for_official_history') {
+        setActionMessage({
+          type: 'warning',
+          text: result.warning || 'Application deleted, but its photo requires storage review.',
+        });
+      } else {
+        setActionMessage({ type: 'success', text: 'Student application permanently deleted.' });
+      }
+    } catch (error) {
+      setActionMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Unable to delete the student application.',
+      });
+    } finally {
+      setDeletingApplicationId(null);
     }
   };
 
@@ -2538,6 +2584,19 @@ const res = await fetchAdmin(url, {
                               }`}
                             >
                               {app.archived_at ? 'Unarchive' : 'Archive'}
+                            </button>
+                          )}
+                          {isAdminOrHigher && (
+                            <button
+                              type="button"
+                              disabled={Boolean(deletingApplicationId)}
+                              onClick={() => {
+                                setDeleteConfirmation('');
+                                setDeleteApplicationCandidate(app);
+                              }}
+                              className="col-span-2 inline-flex min-h-10 items-center justify-center rounded-lg border border-rose-200 bg-rose-600 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-rose-700 disabled:opacity-50"
+                            >
+                              Delete
                             </button>
                           )}
                         </div>
@@ -4584,6 +4643,71 @@ const res = await fetchAdmin(url, {
               className="mx-auto max-h-[420px] max-w-[320px] rounded-lg object-contain shadow-inner"
             />
           </div>
+        </div>
+      )}
+
+      {deleteApplicationCandidate && isAdminOrHigher && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-application-title"
+            aria-describedby="delete-application-warning"
+            className="w-full max-w-lg space-y-5 rounded-2xl border border-rose-200 bg-white p-5 shadow-2xl sm:p-6"
+          >
+            <div>
+              <h2 id="delete-application-title" className="text-lg font-bold text-slate-950">
+                Permanently delete application?
+              </h2>
+              <p id="delete-application-warning" className="mt-2 text-sm leading-6 text-slate-700">
+                This action cannot be undone. Financial records, receipts, payment audit history, and official document history will be preserved. Deletion will be blocked if retained records prevent safe removal.
+              </p>
+            </div>
+            <dl className="grid gap-3 rounded-xl bg-slate-50 p-4 text-sm">
+              <div>
+                <dt className="text-xs font-semibold text-slate-500">Student</dt>
+                <dd className="font-semibold text-slate-900">{deleteApplicationCandidate.student_name}</dd>
+              </div>
+              <div>
+                <dt className="text-xs font-semibold text-slate-500">Application reference</dt>
+                <dd className="break-all font-mono font-semibold text-slate-900">{deleteApplicationCandidate.application_reference}</dd>
+              </div>
+            </dl>
+            <label htmlFor="delete-application-confirmation" className="block text-sm font-semibold text-slate-800">
+              Type DELETE to confirm
+            </label>
+            <input
+              id="delete-application-confirmation"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              value={deleteConfirmation}
+              onChange={(event) => setDeleteConfirmation(event.target.value)}
+              disabled={deletingApplicationId === deleteApplicationCandidate.id}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-200 disabled:bg-slate-100"
+            />
+            <div className="flex flex-col-reverse justify-end gap-2 sm:flex-row">
+              <button
+                type="button"
+                disabled={deletingApplicationId === deleteApplicationCandidate.id}
+                onClick={() => {
+                  setDeleteApplicationCandidate(null);
+                  setDeleteConfirmation('');
+                }}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deleteConfirmation !== 'DELETE' || deletingApplicationId === deleteApplicationCandidate.id}
+                onClick={() => void handleApplicationDelete()}
+                className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {deletingApplicationId === deleteApplicationCandidate.id ? 'Deleting…' : 'Delete permanently'}
+              </button>
+            </div>
+          </section>
         </div>
       )}
 

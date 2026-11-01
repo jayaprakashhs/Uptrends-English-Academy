@@ -940,15 +940,17 @@ test('program update continues to reject malformed resource IDs', async () => {
   });
 });
 
-test('permanent application deletion is unavailable and leaves application data untouched', async () => {
+test('permanent application deletion requires configured authenticated admin access', async () => {
   const response = await handleApiRequest(
     new Request('https://academy.example/api/admin/applications/11111111-1111-1111-1111-111111111103', {
       method: 'DELETE',
     }),
     {},
   );
-  assert.equal(response.status, 405);
-  assert.deepEqual(await response.json(), { error: 'Method not allowed for this API route.' });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: 'Admin APIs are unavailable because Supabase service credentials are not configured.',
+  });
 });
 
 test('gallery deletion uses only PUBLIC_MEDIA and validates its managed key', async () => {
