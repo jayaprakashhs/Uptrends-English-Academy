@@ -305,6 +305,52 @@ const optionalString = (value: unknown, field: string, maxLength = 5000): string
 };
 
 const isResponse = (value: unknown): value is Response => value instanceof Response;
+
+const withApplicationErasureWriteLease = async <T>(
+  supabase: SupabaseClient,
+  applicationId: string,
+  operation: () => Promise<T>,
+): Promise<T | Response> => {
+  const { data: leaseId, error: leaseError } = await supabase.rpc(
+    'acquire_application_erasure_write_lease',
+    { p_application_id: applicationId },
+  );
+  if (leaseError || typeof leaseId !== 'string') {
+    if (leaseError?.message.includes('application_erasure_in_progress')) {
+      return errorResponse('Application deletion is in progress; this operation is blocked.', 409);
+    }
+    if (leaseError?.message.includes('application_not_found')) {
+      return errorResponse('Application not found.', 404);
+    }
+    return errorResponse('Unable to reserve the application for this document operation.', 503);
+  }
+
+  let result!: T;
+  let operationError: unknown;
+  try {
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+
+  const { error: releaseError } = await supabase.rpc(
+    'release_application_erasure_write_lease',
+    { p_lease_id: leaseId },
+  );
+  if (releaseError) {
+    console.error('Unable to release an application document write lease.', {
+      operation: 'application_erasure.write_lease.release',
+      error_code: releaseError.code || 'database_query_failed',
+    });
+    if (operationError) throw operationError;
+    return errorResponse(
+      'The document operation completed, but its storage lease could not be released. Retry after the lease expires.',
+      503,
+    );
+  }
+  if (operationError) throw operationError;
+  return result;
+};
 const validEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 320;
 const validId = (value: string) => UUID_PATTERN.test(value);
 
@@ -894,13 +940,22 @@ const ensurePaymentReceiptPdf = async (
     },
     totalPaid: context.totalPaid,
   });
-  if (!env.APPLICATION_MEDIA) return errorResponse('Private receipt storage is not configured.', 503);
-  try {
-    await env.APPLICATION_MEDIA.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } });
-  } catch (error) {
-    console.error('Unable to store payment receipt PDF.', { operation: 'payment.receipt.store', error: messageOf(error) });
-    return errorResponse('The payment receipt could not be stored.', 502);
-  }
+  const bucket = env.APPLICATION_MEDIA;
+  if (!bucket) return errorResponse('Private receipt storage is not configured.', 503);
+  const storageResult = await withApplicationErasureWriteLease(
+    supabase,
+    context.application.id,
+    async () => {
+      try {
+        await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } });
+      } catch (error) {
+        console.error('Unable to store payment receipt PDF.', { operation: 'payment.receipt.store', error: messageOf(error) });
+        return errorResponse('The payment receipt could not be stored.', 502);
+      }
+      return null;
+    },
+  );
+  if (isResponse(storageResult)) return storageResult;
   return { bytes, key, context };
 };
 
@@ -1183,28 +1238,30 @@ const ensureIssuedOfficialPdf = async (
   const bucket = env.APPLICATION_MEDIA;
   if (!bucket) return errorResponse('Private official document storage is not configured.', 503);
   const key = `official-documents/${applicationId}/v${versionNumber}-${issuance.id}.pdf`;
-  try {
-    await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } });
-  } catch (error) {
-    console.error('Unable to store generated official PDF.', {
-      operation: 'official_document.pdf.store',
-      error: messageOf(error),
-    });
-    return errorResponse('The official PDF could not be stored in private R2 storage.', 502);
-  }
+  return withApplicationErasureWriteLease(supabase, applicationId, async () => {
+    try {
+      await bucket.put(key, bytes, { httpMetadata: { contentType: 'application/pdf' } });
+    } catch (error) {
+      console.error('Unable to store generated official PDF.', {
+        operation: 'official_document.pdf.store',
+        error: messageOf(error),
+      });
+      return errorResponse('The official PDF could not be stored in private R2 storage.', 502);
+    }
 
-  const { error } = await supabase
-    .from('official_document_issuances')
-    .update({ pdf_object_key: key, status: 'ready', generated_at: new Date().toISOString() })
-    .eq('id', issuance.id);
-  if (error) {
-    console.error('Unable to record generated official PDF storage key.', {
-      operation: 'official_document.issuance.update',
-      error_code: error.code || 'database_query_failed',
-    });
-    return errorResponse('The official PDF was stored but its issuance record could not be updated.', 502);
-  }
-  return bytes;
+    const { error } = await supabase
+      .from('official_document_issuances')
+      .update({ pdf_object_key: key, status: 'ready', generated_at: new Date().toISOString() })
+      .eq('id', issuance.id);
+    if (error) {
+      console.error('Unable to record generated official PDF storage key.', {
+        operation: 'official_document.issuance.update',
+        error_code: error.code || 'database_query_failed',
+      });
+      return errorResponse('The official PDF was stored but its issuance record could not be updated.', 502);
+    }
+    return bytes;
+  });
 };
 
 type PaymentDocumentDeliveryResult = {
@@ -1250,26 +1307,41 @@ const processPaymentDocumentIssuance = async (
     if (!mediaBucket?.put) {
       return { success: false, status: 'failed', version_number: issuance.version_number, error: 'Payment saved; private PDF storage is not configured.' };
     }
-    try {
-      await mediaBucket.put(objectKey, bytes, { httpMetadata: { contentType: 'application/pdf' } });
-    } catch (error) {
-      console.error('Payment PDF storage failed after the payment was saved.', {
-        operation: 'official_document.payment_version.store',
-        error: messageOf(error),
-      });
-      return { success: false, status: 'failed', version_number: issuance.version_number, error: 'Payment saved; PDF storage failed.' };
-    }
+    const storageResult = await withApplicationErasureWriteLease(
+      supabase,
+      issuance.application_id,
+      async () => {
+        try {
+          await mediaBucket.put(objectKey, bytes, { httpMetadata: { contentType: 'application/pdf' } });
+        } catch (error) {
+          console.error('Payment PDF storage failed after the payment was saved.', {
+            operation: 'official_document.payment_version.store',
+            error: messageOf(error),
+          });
+          return errorResponse('Payment saved; PDF storage failed.', 502);
+        }
 
-    const { error: updateError } = await supabase
-      .from('official_document_issuances')
-      .update({ pdf_object_key: objectKey, status: 'ready', generated_at: new Date().toISOString() })
-      .eq('id', issuance.id);
-    if (updateError) {
-      console.error('Generated payment PDF could not be marked ready.', {
-        operation: 'official_document.payment_version.complete',
-        error_code: updateError.code || 'database_query_failed',
-      });
-      return { success: false, status: 'pending', version_number: issuance.version_number, error: 'Payment saved; its PDF record could not be updated.' };
+        const { error: updateError } = await supabase
+          .from('official_document_issuances')
+          .update({ pdf_object_key: objectKey, status: 'ready', generated_at: new Date().toISOString() })
+          .eq('id', issuance.id);
+        if (updateError) {
+          console.error('Generated payment PDF could not be marked ready.', {
+            operation: 'official_document.payment_version.complete',
+            error_code: updateError.code || 'database_query_failed',
+          });
+          return errorResponse('Payment saved; its PDF record could not be updated.', 502);
+        }
+        return null;
+      },
+    );
+    if (isResponse(storageResult)) {
+      return {
+        success: false,
+        status: 'failed',
+        version_number: issuance.version_number,
+        error: 'Payment saved, but the application is being deleted or its PDF could not be stored.',
+      };
     }
     issuance = { ...issuance, status: 'ready', pdf_object_key: objectKey };
   }
@@ -1301,28 +1373,49 @@ const processPaymentDocumentIssuance = async (
   const paymentEmail = buildPaymentUpdateEmail(issuance.snapshot, pdfBytes, issuance.version_number);
   if (isResponse(paymentEmail)) return { success: false, status: 'Failed', version_number: issuance.version_number, pdf_ready: true, error: 'Payment email could not be built.' };
 
-  const emailResult = await sendEmail(env, {
-    ...paymentEmail,
-    idempotencyKey: `student-payment-update-${issuance.id}`,
-  });
-  const { error: updateNotificationError } = await supabase
-    .from('application_notifications')
-    .update({
-      status: emailResult.success ? 'Sent' : 'Failed',
-      provider_message_id: emailResult.provider_message_id,
-      error_message: emailResult.error || null,
-      sent_at: emailResult.success ? new Date().toISOString() : null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', notification.id);
-  if (updateNotificationError) {
+  const notificationResult = await withApplicationErasureWriteLease(
+    supabase,
+    issuance.application_id,
+    async () => {
+      const emailResult = await sendEmail(env, {
+        ...paymentEmail,
+        idempotencyKey: `student-payment-update-${issuance.id}`,
+      });
+      const { error: updateNotificationError } = await supabase
+        .from('application_notifications')
+        .update({
+          status: emailResult.success ? 'Sent' : 'Failed',
+          provider_message_id: emailResult.provider_message_id,
+          error_message: emailResult.error || null,
+          sent_at: emailResult.success ? new Date().toISOString() : null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', notification.id);
+      if (updateNotificationError) {
+        return errorResponse('Email was processed, but its result could not be recorded.', 502);
+      }
+      return emailResult;
+    },
+  );
+  if (isResponse(notificationResult)) {
+    return {
+      success: false,
+      status: 'Failed',
+      version_number: issuance.version_number,
+      pdf_ready: true,
+      error: notificationResult.status === 409
+        ? 'Application deletion is in progress; the payment email was not sent.'
+        : 'Payment email was processed, but its result could not be recorded.',
+    };
+  }
+  if (!notificationResult) {
     return { success: false, status: 'Failed', version_number: issuance.version_number, pdf_ready: true, error: 'Email was processed, but its result could not be recorded.' };
   }
   return {
-    success: emailResult.success,
-    status: emailResult.success ? 'Sent' : 'Failed',
+    success: notificationResult.success,
+    status: notificationResult.success ? 'Sent' : 'Failed',
     version_number: issuance.version_number,
-    ...(emailResult.error ? { error: emailResult.error } : {}),
+    ...(notificationResult.error ? { error: notificationResult.error } : {}),
   };
 };
 
@@ -2179,6 +2272,10 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
       created_at: now,
     },
   ];
+  const notificationResult = await withApplicationErasureWriteLease(
+    supabase,
+    applicationId,
+    async () => {
   let applicationNotificationQueueAvailable = false;
   let applicationNotificationQueueErrorCode: string | undefined;
   try {
@@ -2254,6 +2351,15 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
         error_code: (error as { code?: string }).code || 'request_failed',
       });
     }
+  }
+      return null;
+    },
+  );
+  if (isResponse(notificationResult)) {
+    console.error('Application emails were not sent because its deletion workflow is active.', {
+      operation: 'applications.submit.erasure_guard',
+      status: notificationResult.status,
+    });
   }
 
   return contactAcknowledgement();
@@ -2471,6 +2577,10 @@ const approveApplication = async (request: Request, env: Env): Promise<Response>
   if (isResponse(pdfBytes)) return pdfBytes;
   const approvalEmail = buildApprovalEmail(issuance.snapshot, pdfBytes);
   if (isResponse(approvalEmail)) return approvalEmail;
+  const approvalDelivery = await withApplicationErasureWriteLease(
+    auth.supabase,
+    applicationId,
+    async () => {
   const { data: previousNotification, error: previousNotificationError } = await auth.supabase
     .from('application_notifications')
     .select('id,status')
@@ -2529,6 +2639,10 @@ const approveApplication = async (request: Request, env: Env): Promise<Response>
     application_reference: application.application_reference,
     student_id: application.student_id,
   });
+    },
+  );
+  if (isResponse(approvalDelivery)) return approvalDelivery;
+  return approvalDelivery;
 };
 
 const recoverHistoricalOfficialDocument = async (request: Request, env: Env): Promise<Response> => {
@@ -2668,6 +2782,98 @@ const restoreApplication = async (request: Request, env: Env, id: string): Promi
   return restored ? json(restored) : errorResponse('Application not found.', 404);
 };
 
+type ApplicationErasureJob = {
+  job_id: string;
+  application_id: string;
+  status: 'storage_pending' | 'storage_failed' | 'database_failed' | 'completed';
+  object_keys: string[];
+};
+
+const isApplicationErasureObjectKey = (applicationId: string, key: string): boolean => {
+  const id = applicationId.toLowerCase();
+  return /^applications\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp)$/i.test(key) ||
+    new RegExp(`^official-documents/${id}\\.pdf$`, 'i').test(key) ||
+    new RegExp(`^official-documents/${id}/(v[0-9]+-[0-9a-f-]+|receipt(-v2)?-[0-9a-f-]+)\\.pdf$`, 'i').test(key);
+};
+
+const listApplicationErasureObjects = async (
+  bucket: NonNullable<Env['APPLICATION_MEDIA']>,
+  applicationId: string,
+): Promise<string[]> => {
+  const prefixes = [
+    `official-documents/${applicationId}/`,
+    `official-documents/${applicationId}.pdf`,
+  ];
+  const objectKeys = new Set<string>();
+  for (const prefix of prefixes) {
+    let cursor: string | undefined;
+    do {
+      const page = await bucket.list({ limit: 1000, prefix, ...(cursor ? { cursor } : {}) });
+      for (const object of page.objects) {
+        if (!object || typeof object.key !== 'string' ||
+          !isApplicationErasureObjectKey(applicationId, object.key)) {
+          throw new Error('unverified_application_object_key');
+        }
+        objectKeys.add(object.key);
+      }
+      if (page.truncated) {
+        if (!page.cursor || page.cursor === cursor) {
+          throw new Error('application_object_listing_incomplete');
+        }
+        cursor = page.cursor;
+      } else {
+        cursor = undefined;
+      }
+    } while (cursor);
+  }
+  return [...objectKeys].sort();
+};
+
+const recordApplicationErasureFailure = async (
+  supabase: SupabaseClient,
+  jobId: string,
+  errorCode: 'storage_listing_failed' | 'storage_cleanup_failed' | 'object_key_unverified' | 'database_finalize_failed',
+  status: 'storage_failed' | 'database_failed',
+): Promise<void> => {
+  const { error } = await supabase.rpc('fail_application_erasure', {
+    p_job_id: jobId,
+    p_error_code: errorCode,
+    p_status: status,
+  });
+  if (error) {
+    console.error('Unable to persist application erasure failure state.', {
+      operation: 'admin.applications.delete.failure_state',
+      error_code: error.code || 'database_query_failed',
+    });
+  }
+};
+
+const deleteApplicationErasureObjects = async (
+  bucket: NonNullable<Env['APPLICATION_MEDIA']>,
+  applicationId: string,
+  keys: string[],
+): Promise<boolean> => {
+  if (!bucket.get) return false;
+  for (const key of keys) {
+    if (!isApplicationErasureObjectKey(applicationId, key)) return false;
+    try {
+      const existing = await bucket.get(key);
+      if (existing) {
+        if (existing.body) await existing.body.cancel();
+        await bucket.delete(key);
+      }
+      const remaining = await bucket.get(key);
+      if (remaining) {
+        if (remaining.body) await remaining.body.cancel();
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return true;
+};
+
 const deleteApplication = async (request: Request, env: Env, id: string): Promise<Response> => {
   const auth = await requireAdmin(request, env, 'admin');
   if (isResponse(auth)) return auth;
@@ -2675,68 +2881,216 @@ const deleteApplication = async (request: Request, env: Env, id: string): Promis
   const body = await parseJson(request);
   if (isResponse(body)) return body;
   if (body.confirmation !== 'DELETE') {
-    return errorResponse('Type DELETE to confirm permanent application deletion.', 400);
+    return errorResponse('Type DELETE to confirm permanent application erasure.', 400);
   }
 
-  const { data, error } = await auth.supabase.rpc('delete_application_preserving_history', {
-    p_application_id: id,
-  });
-  if (error) {
-    if (error.code === '23503') {
+  const { data: started, error: startError } = await auth.supabase.rpc(
+    'begin_application_erasure',
+    { p_application_id: id, p_deleted_by: auth.profile.id },
+  );
+  if (startError) {
+    if (startError.message.includes('application_erasure_dependency_conflict')) {
       return errorResponse(
-        'Deletion is blocked because retained financial, notification, or official email history references this application. No records were deleted.',
+        'Deletion is blocked because application history contains a cross-application reference. No files or records were deleted.',
         409,
       );
     }
-    return errorResponse(`Unable to delete application: ${error.message}`, 500);
-  }
-
-  const deletion = Array.isArray(data) ? data[0] : null;
-  if (!deletion) return errorResponse('Application not found.', 404);
-
-  let photoCleanup: 'not_required' | 'deleted' | 'retained_for_official_history' | 'requires_attention' =
-    deletion.photo_retained_for_official_history
-      ? 'retained_for_official_history'
-      : 'not_required';
-  let warning: string | undefined = deletion.photo_retained_for_official_history
-    ? 'Application deleted, but its photo was retained because an official document history snapshot references it.'
-    : undefined;
-
-  if (typeof deletion.photo_object_key === 'string') {
-    const key = deletion.photo_object_key;
-    const validPhotoKey = managedR2ObjectKeyFromMetadata(key, undefined, 'applications') === key &&
-      /^applications\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|png|webp)$/i.test(key);
-    if (!validPhotoKey) {
-      photoCleanup = 'requires_attention';
-      warning = 'Application deleted, but its photo key was not safe to remove. Private storage needs review.';
-      logApiDiagnostic('admin.applications.delete', 'invalid_photo_key');
-    } else {
-      try {
-        const bucket = env.APPLICATION_MEDIA;
-        if (!bucket?.get) throw new Error('Private application photo storage is unavailable.');
-        const object = await bucket.get(key);
-        if (!object?.body) {
-          photoCleanup = 'requires_attention';
-          warning = 'Application deleted, but its photo was not found during cleanup. Verify private storage.';
-          logApiDiagnostic('admin.applications.delete', 'photo_not_found');
-        } else {
-          await object.body.cancel();
-          await deleteFromR2(env, key, 'applications');
-          photoCleanup = 'deleted';
-        }
-      } catch {
-        photoCleanup = 'requires_attention';
-        warning = 'Application deleted, but photo cleanup failed. An administrator must review private storage.';
-        logApiDiagnostic('admin.applications.delete', 'photo_cleanup_failed');
-      }
+    if (startError.message.includes('application_erasure_photo_not_exclusive')) {
+      return errorResponse(
+        'The application photo cannot be verified as exclusive to this application. No files or records were deleted.',
+        409,
+      );
     }
+    if (startError.message.includes('application_erasure_policy_not_approved')) {
+      return errorResponse(
+        'Permanent erasure is disabled until legal/accounting approval is recorded and R2 versioning and retention settings are verified in the database policy.',
+        409,
+      );
+    }
+    if (startError.message.includes('application_erasure_writes_active')) {
+      return errorResponse('An application payment or document operation is still in progress. Retry deletion shortly.', 409);
+    }
+    if (startError.message.includes('application_erasure_in_progress')) {
+      return errorResponse('Application deletion is already in progress. Retry to resume its cleanup.', 409);
+    }
+    console.error('Unable to start application erasure.', {
+      operation: 'admin.applications.delete.begin',
+      error_code: startError.code || 'database_query_failed',
+    });
+    return errorResponse('Unable to start permanent application erasure.', 500);
   }
 
+  const startedJob = Array.isArray(started) ? started[0] as ApplicationErasureJob | undefined : undefined;
+  if (!startedJob) return errorResponse('Application not found.', 404);
+  if (!validId(startedJob.job_id)) {
+    return errorResponse('The application cleanup job returned an invalid identifier.', 500);
+  }
+  if (!validId(startedJob.application_id) ||
+    !['storage_pending', 'storage_failed', 'database_failed'].includes(startedJob.status) ||
+    !Array.isArray(startedJob.object_keys) ||
+    startedJob.object_keys.some((key) => typeof key !== 'string' ||
+      !isApplicationErasureObjectKey(startedJob.application_id, key))) {
+    await recordApplicationErasureFailure(
+      auth.supabase,
+      startedJob.job_id,
+      'object_key_unverified',
+      'storage_failed',
+    );
+    return json({
+      job_id: startedJob.job_id,
+      status: 'storage_failed',
+      error: 'A stored application file reference could not be verified. No database records were deleted.',
+    }, 202);
+  }
+
+  const bucket = env.APPLICATION_MEDIA;
+  if (!bucket?.get || !bucket.list || !bucket.delete) {
+    await recordApplicationErasureFailure(
+      auth.supabase,
+      startedJob.job_id,
+      'storage_listing_failed',
+      'storage_failed',
+    );
+    return json({
+      job_id: startedJob.job_id,
+      status: 'storage_failed',
+      error: 'Private R2 storage is unavailable. The application and database records remain pending cleanup.',
+    }, 202);
+  }
+
+  let listedKeys: string[];
+  try {
+    listedKeys = await listApplicationErasureObjects(bucket, startedJob.application_id);
+  } catch {
+    await recordApplicationErasureFailure(
+      auth.supabase,
+      startedJob.job_id,
+      'storage_listing_failed',
+      'storage_failed',
+    );
+    return json({
+      job_id: startedJob.job_id,
+      status: 'storage_failed',
+      error: 'Application-owned storage could not be completely inventoried. No database records were deleted.',
+    }, 202);
+  }
+
+  const requestedKeys = [...new Set([...startedJob.object_keys, ...listedKeys])].sort();
+  const { data: recorded, error: recordError } = await auth.supabase.rpc(
+    'record_application_erasure_objects',
+    { p_job_id: startedJob.job_id, p_object_keys: requestedKeys },
+  );
+  if (recordError) {
+    await recordApplicationErasureFailure(
+      auth.supabase,
+      startedJob.job_id,
+      'object_key_unverified',
+      'storage_failed',
+    );
+    return json({
+      job_id: startedJob.job_id,
+      status: 'storage_failed',
+      error: 'Application-owned storage references could not be safely recorded. No files or database rows were deleted.',
+    }, 202);
+  }
+
+  const recordedJob = Array.isArray(recorded) ? recorded[0] as ApplicationErasureJob | undefined : undefined;
+  if (!recordedJob ||
+    recordedJob.job_id !== startedJob.job_id ||
+    recordedJob.application_id !== startedJob.application_id ||
+    !Array.isArray(recordedJob.object_keys) ||
+    recordedJob.object_keys.some((key) => typeof key !== 'string' ||
+      !isApplicationErasureObjectKey(startedJob.application_id, key))) {
+    await recordApplicationErasureFailure(
+      auth.supabase,
+      startedJob.job_id,
+      'object_key_unverified',
+      'storage_failed',
+    );
+    return json({
+      job_id: startedJob.job_id,
+      status: 'storage_failed',
+      error: 'The saved storage inventory could not be verified. No database rows were deleted.',
+    }, 202);
+  }
+
+  const verifiedKeys = [...new Set(recordedJob.object_keys)].sort();
+  if (!await deleteApplicationErasureObjects(bucket, startedJob.application_id, verifiedKeys)) {
+    await recordApplicationErasureFailure(
+      auth.supabase,
+      startedJob.job_id,
+      'storage_cleanup_failed',
+      'storage_failed',
+    );
+    return json({
+      job_id: startedJob.job_id,
+      status: 'storage_failed',
+      error: 'Some application-owned files remain or could not be verified. Retry deletion to resume cleanup; database records remain intact.',
+    }, 202);
+  }
+
+  const { data: completed, error: completeError } = await auth.supabase.rpc(
+    'complete_application_erasure',
+    { p_job_id: startedJob.job_id, p_verified_object_keys: verifiedKeys },
+  );
+  if (completeError) {
+    await recordApplicationErasureFailure(
+      auth.supabase,
+      startedJob.job_id,
+      'database_finalize_failed',
+      'database_failed',
+    );
+    console.error('Application storage cleanup completed but database erasure did not.', {
+      operation: 'admin.applications.delete.database_finalize',
+      error_code: completeError.code || 'database_query_failed',
+    });
+    return json({
+      job_id: startedJob.job_id,
+      status: 'database_failed',
+      error: 'Storage cleanup is verified, but the database transaction failed and was rolled back. Retry deletion to finish.',
+    }, 202);
+  }
+
+  const completedJob = Array.isArray(completed) ? completed[0] as {
+    job_id?: string;
+    status?: string;
+    deleted_counts?: Record<string, number>;
+  } | undefined : undefined;
+  if (completedJob?.job_id !== startedJob.job_id || completedJob.status !== 'completed') {
+    await recordApplicationErasureFailure(
+      auth.supabase,
+      startedJob.job_id,
+      'database_finalize_failed',
+      'database_failed',
+    );
+    return json({
+      job_id: startedJob.job_id,
+      status: 'database_failed',
+      error: 'The database did not confirm completion. Retry deletion to verify and finish cleanup.',
+    }, 202);
+  }
   return json({
-    deleted: true,
-    photo_cleanup: photoCleanup,
-    ...(warning ? { warning } : {}),
+    job_id: startedJob.job_id,
+    status: 'completed',
+    deleted_counts: completedJob.deleted_counts || {},
   });
+};
+
+const getApplicationErasureJob = async (
+  request: Request,
+  env: Env,
+  jobId: string,
+): Promise<Response> => {
+  const auth = await requireAdmin(request, env, 'admin');
+  if (isResponse(auth)) return auth;
+  const { data, error } = await auth.supabase.rpc(
+    'get_application_erasure_job',
+    { p_job_id: jobId },
+  );
+  if (error) return errorResponse('Unable to load application cleanup status.', 500);
+  const job = Array.isArray(data) ? data[0] : null;
+  if (!job) return errorResponse('Application cleanup job not found.', 404);
+  return json(job);
 };
 
 const updateApplicationStatus = async (request: Request, env: Env, id: string): Promise<Response> => {
@@ -3738,25 +4092,32 @@ const emailPaymentReceipt = async (
   if (!email) return errorResponse('The approved student has no email address.', 422);
   const reference = String(receipt.context.application.application_reference || paymentId)
     .replace(/[^A-Za-z0-9_-]/g, '_');
-  const result = await sendEmail(env, {
-    to: email,
-    subject: `Payment receipt — ${receipt.context.application.application_reference}`,
-    content: {
-      title: 'Payment Receipt',
-      greeting: receipt.context.application.student_name,
-      paragraphs: ['Please find your payment receipt attached.'],
-      details: [{
-        label: 'Application Reference',
-        value: receipt.context.application.application_reference,
-      }],
+  const result = await withApplicationErasureWriteLease(
+    auth.supabase,
+    String(receipt.context.application.id),
+    async () => {
+      const emailResult = await sendEmail(env, {
+        to: email,
+        subject: `Payment receipt — ${receipt.context.application.application_reference}`,
+        content: {
+          title: 'Payment Receipt',
+          greeting: receipt.context.application.student_name,
+          paragraphs: ['Please find your payment receipt attached.'],
+          details: [{
+            label: 'Application Reference',
+            value: receipt.context.application.application_reference,
+          }],
+        },
+        attachments: [{ filename: `Payment_Receipt_${reference}.pdf`, content: toBase64(receipt.bytes) }],
+        idempotencyKey: `payment-receipt-v2-${paymentId}`,
+      });
+      if (!emailResult.success) {
+        return errorResponse(emailResult.error || 'The payment receipt email could not be sent.', 502);
+      }
+      return json({ success: true, status: 'sent' });
     },
-    attachments: [{ filename: `Payment_Receipt_${reference}.pdf`, content: toBase64(receipt.bytes) }],
-    idempotencyKey: `payment-receipt-v2-${paymentId}`,
-  });
-  if (!result.success) {
-    return errorResponse(result.error || 'The payment receipt email could not be sent.', 502);
-  }
-  return json({ success: true, status: 'sent' });
+  );
+  return isResponse(result) ? result : errorResponse('The payment receipt email result is invalid.', 500);
 };
 
 
@@ -3848,6 +4209,18 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       return methodNotAllowed(['GET', 'POST']);
     }
 
+    const applicationErasureJobRoute = pathname.match(
+      /^\/api\/admin\/application-erasure-jobs\/([^/]+)$/,
+    );
+    if (applicationErasureJobRoute) {
+      let jobId: string;
+      try { jobId = decodeURIComponent(applicationErasureJobRoute[1]); } catch {
+        return errorResponse('Invalid application cleanup job ID.', 400);
+      }
+      if (!validId(jobId)) return errorResponse('Application cleanup job ID must be a valid UUID.', 400);
+      if (method === 'GET') return getApplicationErasureJob(request, env, jobId);
+      return methodNotAllowed(['GET']);
+    }
 
     // Manual Payment Register routes; independent of application approval.
     const applicationPaymentRoute = pathname.match(

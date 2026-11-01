@@ -343,8 +343,6 @@ test('lifecycle removal drops automation while retaining notification and busine
   assert.doesNotMatch(migration, /DELETE\s+FROM\s+public\.(applications|application_payments|application_payment_audit|certificate_events|official_document_issuances)/i);
 });
 
-const APPLICATION_PHOTO_KEY = 'applications/cccccccc-cccc-4ccc-8ccc-cccccccccccc.jpg';
-
 const deleteApplicationRequest = (
   id = APPLICATION_ID,
   confirmation = 'DELETE',
@@ -353,51 +351,6 @@ const deleteApplicationRequest = (
   method: 'DELETE',
   headers: { ...headers, 'Content-Type': 'application/json' },
   body: JSON.stringify({ confirmation }),
-});
-
-test('Admin and Super Admin can permanently delete only the requested application', async () => {
-  for (const role of ['admin', 'super_admin'] as const) {
-    await mockAdmin(role, async () => {
-      const deletedObjects: string[] = [];
-      const photoBucket = {
-        put: async () => undefined,
-        get: async (key: string) => {
-          assert.equal(key, APPLICATION_PHOTO_KEY);
-          return { body: new Response('private-photo').body };
-        },
-        delete: async (key: string) => {
-          deletedObjects.push(key);
-        },
-        list: async () => ({ objects: [] }),
-      };
-      globalThis.fetch = async (input, init) => {
-        const request = input instanceof Request ? input : new Request(input, init);
-        const url = new URL(request.url);
-        if (url.pathname === '/auth/v1/user') return Response.json({ id: ADMIN_ID });
-        if (url.pathname === '/rest/v1/admin_profiles') {
-          return Response.json([{ id: ADMIN_ID, full_name: 'Test Admin', role, is_active: true }]);
-        }
-        if (url.pathname === '/rest/v1/rpc/delete_application_preserving_history') {
-          assert.equal(request.method, 'POST');
-          assert.deepEqual(await request.json(), { p_application_id: APPLICATION_ID });
-          return Response.json([{
-            deleted_application_id: APPLICATION_ID,
-            photo_object_key: APPLICATION_PHOTO_KEY,
-            photo_retained_for_official_history: false,
-          }]);
-        }
-        throw new Error(`Unexpected request: ${request.method} ${url.pathname}`);
-      };
-
-      const response = await handleApiRequest(
-        deleteApplicationRequest(),
-        { ...testEnv, APPLICATION_MEDIA: photoBucket },
-      );
-      assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { deleted: true, photo_cleanup: 'deleted' });
-      assert.deepEqual(deletedObjects, [APPLICATION_PHOTO_KEY]);
-    });
-  }
 });
 
 test('application deletion rejects staff, unauthenticated users, invalid IDs, and missing confirmation', async () => {
@@ -446,130 +399,6 @@ test('application deletion rejects staff, unauthenticated users, invalid IDs, an
     const missingConfirmation = await handleApiRequest(deleteApplicationRequest(APPLICATION_ID, 'delete'), testEnv);
     assert.equal(missingConfirmation.status, 400);
     assert.equal(deletionCalled, false);
-  });
-});
-
-test('deletion returns 404 for nonexistent applications and 409 when retained history blocks it', async () => {
-  await mockAdmin('admin', async () => {
-    let rpcCount = 0;
-    globalThis.fetch = async (input, init) => {
-      const request = input instanceof Request ? input : new Request(input, init);
-      const url = new URL(request.url);
-      if (url.pathname === '/auth/v1/user') return Response.json({ id: ADMIN_ID });
-      if (url.pathname === '/rest/v1/admin_profiles') {
-        return Response.json([{ id: ADMIN_ID, full_name: 'Test Admin', role: 'admin', is_active: true }]);
-      }
-      if (url.pathname === '/rest/v1/rpc/delete_application_preserving_history') {
-        rpcCount += 1;
-        if (rpcCount === 1) return Response.json([]);
-        return Response.json({ code: '23503', message: 'foreign key violation' }, { status: 409 });
-      }
-      throw new Error(`Unexpected request: ${url.pathname}`);
-    };
-
-    const missing = await handleApiRequest(deleteApplicationRequest(), testEnv);
-    assert.equal(missing.status, 404);
-    const blocked = await handleApiRequest(deleteApplicationRequest(), testEnv);
-    assert.equal(blocked.status, 409);
-    assert.match((await blocked.json() as { error: string }).error, /No records were deleted/);
-    assert.equal(rpcCount, 2);
-  });
-});
-
-test('duplicate deletion requests cannot delete another application', async () => {
-  await mockAdmin('super_admin', async () => {
-    let rpcCount = 0;
-    globalThis.fetch = async (input, init) => {
-      const request = input instanceof Request ? input : new Request(input, init);
-      const url = new URL(request.url);
-      if (url.pathname === '/auth/v1/user') return Response.json({ id: ADMIN_ID });
-      if (url.pathname === '/rest/v1/admin_profiles') {
-        return Response.json([{ id: ADMIN_ID, full_name: 'Test Admin', role: 'super_admin', is_active: true }]);
-      }
-      if (url.pathname === '/rest/v1/rpc/delete_application_preserving_history') {
-        rpcCount += 1;
-        assert.deepEqual(await request.json(), { p_application_id: APPLICATION_ID });
-        return rpcCount === 1
-          ? Response.json([{
-            deleted_application_id: APPLICATION_ID,
-            photo_object_key: null,
-            photo_retained_for_official_history: false,
-          }])
-          : Response.json([]);
-      }
-      throw new Error(`Unexpected request: ${url.pathname}`);
-    };
-
-    const first = await handleApiRequest(deleteApplicationRequest(), testEnv);
-    const duplicate = await handleApiRequest(deleteApplicationRequest(), testEnv);
-    assert.equal(first.status, 200);
-    assert.equal(duplicate.status, 404);
-    assert.equal(rpcCount, 2);
-  });
-});
-
-test('photos referenced by official document snapshots are retained', async () => {
-  await mockAdmin('admin', async () => {
-    globalThis.fetch = async (input, init) => {
-      const request = input instanceof Request ? input : new Request(input, init);
-      const url = new URL(request.url);
-      if (url.pathname === '/auth/v1/user') return Response.json({ id: ADMIN_ID });
-      if (url.pathname === '/rest/v1/admin_profiles') {
-        return Response.json([{ id: ADMIN_ID, full_name: 'Test Admin', role: 'admin', is_active: true }]);
-      }
-      if (url.pathname === '/rest/v1/rpc/delete_application_preserving_history') {
-        return Response.json([{
-          deleted_application_id: APPLICATION_ID,
-          photo_object_key: null,
-          photo_retained_for_official_history: true,
-        }]);
-      }
-      throw new Error(`Unexpected request: ${url.pathname}`);
-    };
-    const response = await handleApiRequest(deleteApplicationRequest(), testEnv);
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {
-      deleted: true,
-      photo_cleanup: 'retained_for_official_history',
-      warning: 'Application deleted, but its photo was retained because an official document history snapshot references it.',
-    });
-  });
-});
-
-test('failed photo cleanup is reported without claiming complete cleanup', async () => {
-  await mockAdmin('admin', async () => {
-    globalThis.fetch = async (input, init) => {
-      const request = input instanceof Request ? input : new Request(input, init);
-      const url = new URL(request.url);
-      if (url.pathname === '/auth/v1/user') return Response.json({ id: ADMIN_ID });
-      if (url.pathname === '/rest/v1/admin_profiles') {
-        return Response.json([{ id: ADMIN_ID, full_name: 'Test Admin', role: 'admin', is_active: true }]);
-      }
-      if (url.pathname === '/rest/v1/rpc/delete_application_preserving_history') {
-        return Response.json([{
-          deleted_application_id: APPLICATION_ID,
-          photo_object_key: APPLICATION_PHOTO_KEY,
-          photo_retained_for_official_history: false,
-        }]);
-      }
-      throw new Error(`Unexpected request: ${url.pathname}`);
-    };
-    const photoBucket = {
-      put: async () => undefined,
-      get: async () => { throw new Error('storage unavailable'); },
-      delete: async () => { throw new Error('must not delete without verification'); },
-      list: async () => ({ objects: [] }),
-    };
-    const response = await handleApiRequest(
-      deleteApplicationRequest(),
-      { ...testEnv, APPLICATION_MEDIA: photoBucket },
-    );
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {
-      deleted: true,
-      photo_cleanup: 'requires_attention',
-      warning: 'Application deleted, but photo cleanup failed. An administrator must review private storage.',
-    });
   });
 });
 

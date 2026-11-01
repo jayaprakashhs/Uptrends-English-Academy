@@ -147,29 +147,55 @@ and document settings are not historically verified. The recovery PDF loads the
 current configured `site_branding.logo_url` dynamically and fails visibly if
 that logo is missing or invalid.
 
-### Safe permanent application deletion
+### Tracked permanent application erasure
 
-Before deploying the application Delete API, apply
-`supabase/migrations/20261102000001_safe_application_deletion.sql` to the same
-Supabase project as the application. This forward-only migration replaces
-cascading application references on notification, fee-agreement, approval-email,
-and historical payment-baseline records with `RESTRICT`. It stops if other
-cascading application foreign keys remain or if application photo keys are
-duplicated. Review any migration failure before retrying; do not remove records
-to make it pass.
+The existing safeguard migration
+`supabase/migrations/20261102000001_safe_application_deletion.sql` must remain
+applied. Apply the forward-only
+`supabase/migrations/20261102000002_tracked_application_erasure.sql` only
+through the reviewed Supabase migration process. It verifies the current
+application, payment, and official-issuance foreign-key dependency map and
+stops if it finds an unreviewed relationship.
 
-The API is available only to Admin and Super Admin. A matching payment,
-notification, fee-agreement, approval-email, or historical-baseline record
-blocks deletion with HTTP 409; no related records are deleted. Payment audit
-and official document issuance rows are retained and their application link is
-set to null. Official PDFs and receipt PDFs are never removed. An application
-photo is removed only when its key is unique and no official document snapshot
-references it. Storage cleanup failures are reported for review after the
-application row has been deleted.
+The new API allows Admin and Super Admin only. A durable job locks the
+application against payment, notification, and document writes; inventories
+its stored photo and application-scoped official-document/receipt keys; and
+deletes only keys matching that application's approved object-key patterns.
+The photo key must be valid and referenced exclusively by that application;
+shared or unverifiable photo references block deletion. Shared academy assets
+and other application prefixes are not included. R2 cleanup is verified before
+one database transaction removes the application,
+payments, payment audit and baseline, fee agreement, notifications,
+approval-email state, and official-document issuance snapshots. A failed
+storage or database phase remains pending and can be resumed by submitting
+Delete again. The database phase rolls back completely on error.
 
-Use the normal reviewed Supabase migration process to apply the migration
-before deploying the API and Admin Portal changes. Do not apply it from the
-application runtime or as part of a production deployment without approval.
+Completed jobs retain only an opaque job ID, the acting admin profile
+reference, timestamps, state, and aggregate deleted-row counts. The
+application reference and object-key inventory are cleared on completion.
+Neither the three previously identified test application IDs nor any other
+application is deleted by applying the migration.
+
+**Financial and tax erasure is disabled by default.** The migration creates
+`public.application_erasure_policy` with `enabled = false` and the storage and
+external-retention verification fields set to false; Delete returns HTTP 409
+until a database owner records legal/accounting approval and verifies the
+bucket's versioning, retention, and deletion behavior, plus the handling or
+exclusion of backups and external copies. Before changing this policy, the
+academy must obtain written advice from its accountant/legal adviser that
+erasing payment, receipt, audit, and official-document evidence is permitted
+for its registrations, open proceedings, and retention obligations. Do not
+enable the policy merely to remove a blocked application. The Worker can verify
+the currently listed R2 keys but cannot enumerate or erase provider-side
+versions, legal holds, backups, copies already delivered to email recipients,
+or other external copies. If those are enabled or in scope, this
+implementation cannot claim complete permanent erasure and must remain
+disabled.
+
+The migration has not been applied as part of this code change. Review the
+migration, schema compatibility, and retention approval before applying it;
+then deploy the Worker and Admin Portal changes through the normal reviewed
+release process.
 
 ---
 

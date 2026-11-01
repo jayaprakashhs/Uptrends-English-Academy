@@ -132,6 +132,12 @@ async function submitPublicContact(
       return Response.json({ id: `test-email-${sentEmails.length}` });
     }
     if (url.hostname !== 'project.example') throw new Error(`Unexpected test request: ${url.hostname}${url.pathname}`);
+    if (url.pathname === '/rest/v1/rpc/acquire_application_erasure_write_lease') {
+      return Response.json('test-erasure-lease-id');
+    }
+    if (url.pathname === '/rest/v1/rpc/release_application_erasure_write_lease') {
+      return Response.json(true);
+    }
     if (url.pathname === '/rest/v1/rpc/check_application_contact_duplicate') {
       const payload = await request.json() as Record<string, unknown>;
       duplicateCheckPayloads.push(payload);

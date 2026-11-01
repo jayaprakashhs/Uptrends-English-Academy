@@ -139,6 +139,12 @@ const withAdminFetch = async (
         is_active: true,
       }]);
     }
+    if (url.hostname === 'project.example' && url.pathname === '/rest/v1/rpc/acquire_application_erasure_write_lease') {
+      return Response.json('test-erasure-lease-id');
+    }
+    if (url.hostname === 'project.example' && url.pathname === '/rest/v1/rpc/release_application_erasure_write_lease') {
+      return Response.json(true);
+    }
     return handleRestRequest(request, url);
   };
   try {

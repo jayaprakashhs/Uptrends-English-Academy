@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import { Resend } from 'resend';
-import { DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, ListObjectsV2Command, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { legacyUploadFilenameFromMetadata, managedR2ObjectKeyFromMetadata } from './application-photo-storage';
 import { handleApiRequest } from './worker-api';
 import type { R2BucketBinding } from './worker-r2';
@@ -118,7 +118,20 @@ const applicationMedia: R2BucketBinding | undefined = r2Client
         await r2Client.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
       },
       get: async (key) => {
-        const object = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+        let object;
+        try {
+          object = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+        } catch (error) {
+          const errorName = error instanceof Error ? error.name : '';
+          const metadata = typeof error === 'object' && error !== null && '$metadata' in error
+            ? error.$metadata
+            : null;
+          const statusCode = typeof metadata === 'object' && metadata !== null && 'httpStatusCode' in metadata
+            ? metadata.httpStatusCode
+            : null;
+          if (errorName === 'NoSuchKey' || errorName === 'NotFound' || statusCode === 404) return null;
+          throw error;
+        }
         if (!object.Body) return null;
         const bytes = await object.Body.transformToByteArray();
         return {
@@ -131,7 +144,21 @@ const applicationMedia: R2BucketBinding | undefined = r2Client
           httpMetadata: { contentType: object.ContentType },
         };
       },
-      list: async () => ({ objects: [] }),
+      list: async (options) => {
+        const page = await r2Client.send(new ListObjectsV2Command({
+          Bucket: R2_BUCKET,
+          Prefix: options?.prefix,
+          ContinuationToken: options?.cursor,
+          MaxKeys: options?.limit,
+        }));
+        return {
+          objects: (page.Contents || []).flatMap((object) =>
+            object.Key ? [{ key: object.Key }] : [],
+          ),
+          truncated: page.IsTruncated,
+          cursor: page.NextContinuationToken,
+        };
+      },
     }
   : undefined;
 
@@ -1575,6 +1602,7 @@ app.all(
     '/api/admin/applications/:id/archive',
     '/api/admin/applications/:id/restore',
     '/api/admin/applications/:id/payments',
+    '/api/admin/application-erasure-jobs/:id',
     '/api/admin/payments/:paymentId',
     '/api/demo-class-requests',
     '/api/admin/demo-class-requests',

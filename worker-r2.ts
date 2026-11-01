@@ -9,5 +9,9 @@ export interface R2BucketBinding {
     body: ReadableStream | null;
     httpMetadata?: { contentType?: string };
   } | null>;
-  list(options?: { limit?: number; prefix?: string }): Promise<{ objects: unknown[] }>;
+  list(options?: { cursor?: string; limit?: number; prefix?: string }): Promise<{
+    truncated?: boolean;
+    cursor?: string;
+    objects: Array<{ key: string }>;
+  }>;
 }
