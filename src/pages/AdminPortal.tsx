@@ -278,7 +278,6 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   // Data states
   const [applications, setApplications] = useState<StudentApplication[]>([]);
-  const [archivedApplications, setArchivedApplications] = useState<StudentApplication[]>([]);
   const [applicationsLoading, setApplicationsLoading] = useState(false);
   const [applicationsError, setApplicationsError] = useState<string | null>(null);
   const [applicationDisplayLimit, setApplicationDisplayLimit] = useState(10);
@@ -414,7 +413,7 @@ useEffect(() => {
 
   // Search and filter states
   const [appSearch, setAppSearch] = useState('');
-  const [appFilterStatus, setAppFilterStatus] = useState<'All' | 'Pending' | 'Accepted' | 'Archived'>('All');
+  const [appFilterStatus, setAppFilterStatus] = useState<'All' | 'Pending' | 'Accepted'>('All');
   const [callbackSearch, setCallbackSearch] = useState('');
   const [callbackFilterStatus, setCallbackFilterStatus] = useState<'All' | CallbackRequest['status']>('All');
   const [notifFilterStatus, setNotifFilterStatus] = useState<'All' | 'Pending' | 'Sent' | 'Failed'>('All');
@@ -620,19 +619,13 @@ useEffect(() => {
 
   const notifyPublicDataChanged = () => window.dispatchEvent(new Event('admin-data-updated'));
 
-  const loadApplications = async (includeArchived = appFilterStatus === 'Archived') => {
+  const loadApplications = async () => {
     setApplicationsLoading(true);
     setApplicationsError(null);
     try {
-      const [activeData, archivedData] = await Promise.all([
-        requestJson('/api/admin/applications', { headers: getAuthHeaders() }),
-        includeArchived
-          ? requestJson('/api/admin/applications?archived=true', { headers: getAuthHeaders() })
-          : Promise.resolve(null),
-      ]);
+      const activeData = await requestJson('/api/admin/applications', { headers: getAuthHeaders() });
       if (!Array.isArray(activeData)) throw new Error('The applications response was invalid.');
       setApplications(activeData);
-      if (Array.isArray(archivedData)) setArchivedApplications(archivedData);
     } catch (error) {
       setApplicationsError(error instanceof Error ? error.message : 'Unable to load applications.');
     } finally {
@@ -1051,34 +1044,10 @@ const resetOfficialDocumentSettings = () => {
     }
   };
 
-  const handleArchiveApplication = async (appId: string) => {
-    if (!confirm('Archive this application? It will remain available in the Archived filter, and its payment records will remain attached.')) return;
-    setActionMessage(null);
-    setLoading(true);
-    try {
-      const response = await fetchAdmin(`/api/admin/applications/${appId}/archive`, {
-        method: 'POST',
-        headers: getAuthHeaders(),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to archive application.');
-      setActionMessage({ type: 'success', text: 'Application archived. Payment records remain attached.' });
-      if (selectedApp?.id === appId) setSelectedApp(null);
-      await fetchAllData();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to archive application.';
-      setActionMessage({ type: 'error', text: message });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleApplicationFilterChange = (status: 'All' | 'Pending' | 'Accepted' | 'Archived') => {
+  const handleApplicationFilterChange = (status: 'All' | 'Pending' | 'Accepted') => {
     setAppFilterStatus(status);
     setApplicationDisplayLimit(10);
     setActionMessage(null);
-    if (status !== 'Archived') return;
-    void loadApplications(true);
   };
 
   const handleMarkApplicationPending = async (appId: string) => {
@@ -1693,7 +1662,7 @@ const res = await fetchAdmin(url, {
   };
 
   // Filtered applications
-  const filteredApplications = (appFilterStatus === 'Archived' ? archivedApplications : applications)
+  const filteredApplications = applications
     .filter((app) => {
       const matchesSearch =
         app.student_name.toLowerCase().includes(appSearch.toLowerCase()) ||
@@ -1701,9 +1670,7 @@ const res = await fetchAdmin(url, {
         app.mobile.includes(appSearch) ||
         app.email.toLowerCase().includes(appSearch.toLowerCase());
 
-      const matchesStatus = appFilterStatus === 'Archived'
-        ? Boolean(app.archived_at)
-        : !app.archived_at && (appFilterStatus === 'All' || app.status === appFilterStatus);
+      const matchesStatus = appFilterStatus === 'All' || app.status === appFilterStatus;
       return matchesSearch && matchesStatus;
     })
     .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
@@ -2334,7 +2301,7 @@ const res = await fetchAdmin(url, {
                     Refresh Applications
                   </button>
                   <span className="col-span-2 sm:col-span-1 text-xs font-semibold text-slate-500">Filter Status:</span>
-                  {(['All', 'Pending', 'Accepted', 'Archived'] as const).map((status) => (
+                  {(['All', 'Pending', 'Accepted'] as const).map((status) => (
                     <button
                       key={status}
                       type="button"
@@ -2408,11 +2375,6 @@ const res = await fetchAdmin(url, {
                           >
                             {app.status}
                           </span>
-                          {app.archived_at && (
-                            <span className="inline-flex w-max items-center rounded-full border border-slate-300 bg-slate-200 px-3 py-1 text-xs font-bold text-slate-700">
-                              Archived
-                            </span>
-                          )}
                           <p className="text-xs text-slate-500">
                             Submitted{' '}
                             <span className="font-semibold text-slate-700">
@@ -2489,17 +2451,6 @@ const res = await fetchAdmin(url, {
                               title="Open review and complete joining information before approval"
                             >
                               Review &amp; Approve
-                            </button>
-                          )}
-                          {isAdminOrHigher && !app.archived_at && (
-                            <button
-                              type="button"
-                              disabled={loading}
-                              onClick={() => void handleArchiveApplication(app.id)}
-                              className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50"
-                              title="Archive this application while preserving linked payments"
-                            >
-                              Archive application
                             </button>
                           )}
                         </div>
