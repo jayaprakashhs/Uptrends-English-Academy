@@ -64,6 +64,11 @@ export interface OfficialStudent {
   parentPhone?: string | null;
   dateOfBirth: string | null;
   address: string | null;
+  schoolName?: string | null;
+  collegeName?: string | null;
+  occupation?: string | null;
+  place?: string | null;
+  city?: string | null;
 }
 
 export interface OfficialJoiningInformation {
@@ -296,11 +301,9 @@ export async function generateOfficialPdf({
   student,
   course,
   joiningInformation,
-  paymentSummary,
   assets,
   versionNumber,
   previewOnly = false,
-  includePaymentDetails = false,
 }: OfficialDocumentInput): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const fontFamily = settings.typography.fontFamily;
@@ -568,6 +571,13 @@ export async function generateOfficialPdf({
       ['Qualification Category', student.qualificationCategory || 'Not provided'],
       ['Qualification', student.qualification || 'Not provided'],
       ...contactRows,
+      ['Date of Birth', student.dateOfBirth || 'Not provided'],
+      ['Address', student.address || 'Not provided'],
+      ...(student.schoolName ? [['School', student.schoolName] as [string, string]] : []),
+      ...(student.collegeName ? [['College', student.collegeName] as [string, string]] : []),
+      ...(student.occupation ? [['Occupation', student.occupation] as [string, string]] : []),
+      ...(student.place ? [['Place', student.place] as [string, string]] : []),
+      ...(student.city ? [['City', student.city] as [string, string]] : []),
       ['Selected Program', student.programName || 'Not provided'],
     ];
     rows.forEach(([label, value], index) => {
@@ -630,65 +640,6 @@ export async function generateOfficialPdf({
     y -= 71 * spacing;
   };
 
-  const drawPayment = () => {
-    drawSectionTitle(settings.sectionHeadings.payment);
-    const summary = paymentSummary || summarizeOfficialPayments([]);
-    ensureRoom(48);
-    page.drawRectangle({ x: margin, y: y - 38, width: contentWidth, height: 38, color: colors.paleBlue, borderColor: colors.navy, borderWidth: 1 });
-    page.drawText('Total paid to date', { x: margin + 10, y: y - 15, size: 8, font: bold, color: colors.muted });
-    page.drawText(formatAmount(summary.totalPaid), { x: margin + 10, y: y - 30, size: bodySize + 1, font: bold, color: colors.navy });
-    y -= 48;
-
-    if (!summary.payments.length) {
-      drawWrapped('No payments have been recorded.');
-    } else {
-      const headings = ['Payment Date', 'Payment Mode', 'Transaction / Reference ID', 'Amount'];
-      const widths = [0.2, 0.22, 0.38, 0.2];
-      const drawPaymentRow = (values: string[], header = false, index = 0) => {
-        const rowSize = header ? 6.5 : 7;
-        const cells = values.map((value, cellIndex) => wrapTextLines(
-          value,
-          header || cellIndex === 3 ? bold : regular,
-          rowSize,
-          contentWidth * widths[cellIndex] - 7,
-        ));
-        const rowHeight = Math.max(18, ...cells.map((lines) => lines.length * (rowSize + 2) + 5));
-        ensureRoom(rowHeight);
-        if (header || index % 2 === 0) {
-          page.drawRectangle({ x: margin, y: y - rowHeight, width: contentWidth, height: rowHeight, color: header ? colors.navy : colors.paleBlue });
-        }
-        let x = margin + 5;
-        cells.forEach((lines, cellIndex) => {
-          const cellWidth = contentWidth * widths[cellIndex];
-          lines.forEach((line, lineIndex) => page.drawText(line, {
-            x,
-            y: y - rowSize - lineIndex * (rowSize + 2),
-            size: rowSize,
-            font: header || cellIndex === 3 ? bold : regular,
-            color: header ? colors.white : colors.ink,
-            maxWidth: cellWidth - 7,
-          }));
-          x += cellWidth;
-        });
-        page.drawLine({ start: { x: margin, y: y - rowHeight }, end: { x: pageWidth - margin, y: y - rowHeight }, thickness: 0.4, color: colors.line });
-        y -= rowHeight;
-      };
-      drawPaymentRow(headings, true);
-      summary.payments.forEach((payment, index) => {
-        const parsedDate = Date.parse(payment.recordedAt);
-        const paymentDate = Number.isFinite(parsedDate)
-          ? new Date(parsedDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })
-          : 'Date unavailable';
-        drawPaymentRow([
-          paymentDate,
-          payment.paymentMethod.replaceAll('_', ' '),
-          payment.referenceNumber || 'Not recorded',
-          formatAmount(payment.amount),
-        ], false, index);
-      });
-    }
-  };
-
   const drawJoining = () => {
     drawSectionTitle(settings.sectionHeadings.joining);
     const instructions = settings.joiningInstructions || [];
@@ -743,17 +694,15 @@ export async function generateOfficialPdf({
     return lines.length ? lines : [''];
   };
 
-  const sectionDrawers: Record<OfficialSection, () => void> = {
+  const sectionDrawers: Record<Exclude<OfficialSection, 'payment'>, () => void> = {
     student: drawStudent,
     course: drawCourse,
     joining: drawJoining,
-    payment: drawPayment,
   };
-  const approvalAndPaymentSections: OfficialSection[] = includePaymentDetails
-    ? ['student', 'course', 'joining', 'payment']
-    : ['student', 'course', 'joining'];
-  const visibleOrder = settings.layout.sectionOrder.filter((section) =>
-    approvalAndPaymentSections.includes(section) && settings.layout.visibleSections.includes(section),
+  const allowedSections: Exclude<OfficialSection, 'payment'>[] = ['student', 'course', 'joining'];
+  const visibleOrder = settings.layout.sectionOrder.filter((section): section is Exclude<OfficialSection, 'payment'> =>
+    allowedSections.includes(section as Exclude<OfficialSection, 'payment'>) &&
+    settings.layout.visibleSections.includes(section),
   );
   for (let index = 0; index < visibleOrder.length; index += 1) {
     const section = visibleOrder[index];

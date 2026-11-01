@@ -88,22 +88,19 @@ data-maintenance process before applying it. Do not remove student records to
 make the migration succeed. No new environment variables are required; the
 existing server-side Supabase service-role key is used for validation.
 
-## 2.3. Official Admission PDF Payment Versions
+## 2.3. Official Admission PDF and Payment Versions
 
 After applying `20261031000003_application_qualification_category.sql`, apply
 `supabase/migrations/20261031000004_official_document_payment_versions.sql`.
 It adds nullable `programs.course_mode`, payment-create idempotency metadata, and
 version/status fields to the existing `official_document_issuances` table.
 The authorized payment RPCs write audit rows in the same transaction as the
-payment mutation; the Worker creates immutable PDF-version snapshots and
-delivery-history rows for `student_payment_update` emails. It does not create
-duplicate payment, issuance, or notification tables and does not delete
-historical records.
+payment mutation; prior versions also created `student_payment_update`
+document snapshots and delivery-history rows. This does not create duplicate
+payment, issuance, or notification tables.
 
 The existing private `APPLICATION_MEDIA` R2 binding stores PDFs under
-version-specific keys. The Worker generates each PDF and sends a separate
-payment-update email synchronously after a payment mutation. Failed generation
-or ambiguous delivery is not automatically retried. Forward-only migration
+version-specific keys. Forward-only migration
 `20261101000007_remove_lifecycle_automation.sql` removes claim/reconciliation
 automation while preserving payment, audit, issuance, and delivery-history
 records. Approval-email state is retained as read-only delivery evidence.
@@ -116,6 +113,42 @@ email attempt/rejection-evidence history and its RPCs without touching
 certificate records, events, PDFs, or storage objects. Joining instructions
 remain in the existing `official_document_settings.document_data` JSON
 configuration. No additional environment variables are required.
+
+After applying `20261102000002_tracked_application_erasure.sql`, apply
+`supabase/migrations/20261102000003_separate_application_and_payment_retention.sql`.
+This forward-only migration adds payment identity and receipt-key snapshots,
+changes payment, fee-agreement, baseline, and notification application links
+to `ON DELETE SET NULL`, and replaces application erasure finalization so
+financial transactions, receipts, payment audits, historical baselines, fee
+agreements, payment-update issuance records, and payment-update email evidence
+are preserved and detached. Admission snapshots omit financial fields, while
+payment-update snapshots retain their separate payment summary.
+
+After migration 03, apply
+`supabase/migrations/20261102000004_preserve_official_documents_during_erasure.sql`.
+It changes issuance references to `ON DELETE SET NULL`, preserves every
+official-document issuance and PDF (including approval and payment-update
+versions), and limits storage cleanup to a verified, exclusively owned
+application photo that is not referenced by retained issuance snapshots.
+Detached document history and original PDF downloads remain accessible to
+Admins and Super Admins by application reference. The Worker fails closed
+until migration 04's preservation-readiness RPC is available. Migration 04
+refuses to install while an application-erasure job is incomplete; resolve
+its storage cleanup through the existing retry workflow before applying it.
+The existing
+legal, accounting, storage-retention, and external-retention approval gate
+remains required. Provider-side object versions/backups, legal holds, and
+already-delivered email copies are outside the erasure guarantee.
+
+The Admin Portal's Payments register is available to Admin and Super Admin
+independently of the Student Applications list. Payment receipts can be
+generated and emailed from saved transaction snapshots after an application
+is erased. Staff cannot browse the independent register. Official admission
+PDF generation and preview render student, course, and joining information
+only; legacy payment-update PDF objects are not modified by the migration, and
+their financial data is never read into newly generated official PDF bytes.
+Already-delivered email copies and provider-side R2 versions/backups are outside
+the erasure guarantee.
 
 Migration `20261102000000_forward_historical_official_document_recovery.sql`
 replaces the Version 1 historical recovery function with stricter audit-stream

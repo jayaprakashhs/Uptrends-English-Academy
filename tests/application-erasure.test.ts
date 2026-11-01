@@ -7,8 +7,11 @@ const APPLICATION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const ADMIN_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const JOB_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const AUTH_HEADERS = { Authorization: 'Bearer test-session' };
-const OBJECT_KEYS = [
+const ERASURE_OBJECT_KEYS = [
   'applications/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jpg',
+];
+const RETAINED_FINANCIAL_OBJECT_KEYS = [
+  `official-documents/${APPLICATION_ID}.pdf`,
   `official-documents/${APPLICATION_ID}/v1-11111111-1111-4111-8111-111111111111.pdf`,
   `official-documents/${APPLICATION_ID}/v2-22222222-2222-4222-8222-222222222222.pdf`,
   `official-documents/${APPLICATION_ID}/receipt-v2-33333333-3333-4333-8333-333333333333.pdf`,
@@ -20,7 +23,7 @@ type Options = {
   missing?: boolean;
   sharedPhoto?: boolean;
   policyDisabled?: boolean;
-  listFailure?: boolean;
+  preservationMigrationMissing?: boolean;
   deleteFailures?: number;
   finalizeFailures?: number;
 };
@@ -37,12 +40,13 @@ const makeRequest = (
 });
 
 const setup = (options: Options = {}) => {
-  const savedObjects = new Set([...OBJECT_KEYS, 'official-document-assets/shared-logo.png']);
+  const savedObjects = new Set([...ERASURE_OBJECT_KEYS, ...RETAINED_FINANCIAL_OBJECT_KEYS, 'official-document-assets/shared-logo.png']);
   const deletedObjects: string[] = [];
   const rpcCalls: string[] = [];
+  let listCalls = 0;
   let applicationExists = !options.missing;
   let jobStatus = 'storage_pending';
-  let objectKeys = [...OBJECT_KEYS];
+  let objectKeys = [...ERASURE_OBJECT_KEYS];
   let deleteFailures = options.deleteFailures || 0;
   let finalizeFailures = options.finalizeFailures || 0;
   const bucket = {
@@ -57,7 +61,7 @@ const setup = (options: Options = {}) => {
       savedObjects.delete(key);
     },
     list: async ({ prefix }: { prefix?: string }) => {
-      if (options.listFailure) throw new Error('test list failure');
+      listCalls += 1;
       return {
         objects: [...savedObjects]
           .filter((key) => key.startsWith(prefix || ''))
@@ -90,6 +94,12 @@ const setup = (options: Options = {}) => {
     rpcCalls.push(rpc);
     const args = await request.json() as Record<string, unknown>;
 
+    if (rpc === 'application_erasure_document_preservation_ready') {
+      if (options.preservationMigrationMissing) {
+        return Response.json({ code: 'PGRST202', message: 'function not found' }, { status: 404 });
+      }
+      return Response.json(true);
+    }
     if (rpc === 'begin_application_erasure') {
       assert.equal(args.p_application_id, APPLICATION_ID);
       assert.equal(args.p_deleted_by, ADMIN_ID);
@@ -134,13 +144,13 @@ const setup = (options: Options = {}) => {
         status: 'completed',
         deleted_counts: {
           applications: 1,
-          payments: 2,
-          payment_audit: 3,
-          payment_baselines: 2,
-          fee_agreements: 1,
-          notifications: 3,
-          approval_email_state: 1,
-          official_document_issuances: 2,
+          payments_preserved: 2,
+          payment_audit_preserved: 3,
+          payment_baselines_preserved: 2,
+          fee_agreements_preserved: 1,
+          notifications_deleted: 2,
+          approval_email_state_deleted: 1,
+          official_document_issuances_preserved: 2,
         },
       }]);
     }
@@ -154,10 +164,10 @@ const setup = (options: Options = {}) => {
     throw new Error(`Unexpected RPC: ${rpc}`);
   };
 
-  return { bucket, env, deletedObjects, rpcCalls, savedObjects };
+  return { bucket, env, deletedObjects, listCalls, rpcCalls, savedObjects };
 };
 
-test('Admin and Super Admin erase application records and all verified scoped files', async () => {
+test('Admin and Super Admin erase application data while retaining payments, receipts, and all official documents', async () => {
   for (const role of ['admin', 'super_admin'] as const) {
     const state = setup({ role });
     const response = await handleApiRequest(
@@ -168,11 +178,14 @@ test('Admin and Super Admin erase application records and all verified scoped fi
     const body = await response.json() as { status: string; deleted_counts: Record<string, number> };
     assert.equal(body.status, 'completed');
     assert.equal(body.deleted_counts.applications, 1);
-    assert.equal(body.deleted_counts.payments, 2);
-    assert.equal(body.deleted_counts.payment_audit, 3);
-    assert.equal(body.deleted_counts.payment_baselines, 2);
-    assert.equal(body.deleted_counts.official_document_issuances, 2);
-    assert.deepEqual(state.deletedObjects.sort(), [...OBJECT_KEYS].sort());
+    assert.equal(body.deleted_counts.payments_preserved, 2);
+    assert.equal(body.deleted_counts.payment_audit_preserved, 3);
+    assert.equal(body.deleted_counts.payment_baselines_preserved, 2);
+    assert.equal(body.deleted_counts.fee_agreements_preserved, 1);
+    assert.equal(body.deleted_counts.official_document_issuances_preserved, 2);
+    assert.deepEqual(state.deletedObjects.sort(), [...ERASURE_OBJECT_KEYS].sort());
+    for (const key of RETAINED_FINANCIAL_OBJECT_KEYS) assert.ok(state.savedObjects.has(key), key);
+    assert.equal(state.listCalls, 0);
     assert.ok(state.savedObjects.has('official-document-assets/shared-logo.png'));
   }
 });
@@ -225,6 +238,19 @@ test('missing applications return 404 and financial erasure stays disabled witho
   assert.deepEqual(disabled.deletedObjects, []);
 });
 
+test('erasure stays unavailable until official-document preservation migration is applied', async () => {
+  const state = setup({ preservationMigrationMissing: true });
+  const response = await handleApiRequest(
+    makeRequest(`/api/admin/applications/${APPLICATION_ID}`, 'DELETE', { confirmation: 'DELETE' }),
+    state.env,
+  );
+  assert.equal(response.status, 503);
+  assert.match((await response.json() as { error: string }).error, /official-document preservation migration/i);
+  assert.ok(state.rpcCalls.includes('application_erasure_document_preservation_ready'));
+  assert.ok(!state.rpcCalls.includes('begin_application_erasure'));
+  assert.deepEqual(state.deletedObjects, []);
+});
+
 test('shared application photos block erasure before storage or database deletion', async () => {
   const state = setup({ sharedPhoto: true });
   const response = await handleApiRequest(
@@ -252,7 +278,7 @@ test('partial R2 failure is recorded and repeated requests retry remaining objec
   );
   assert.equal(retry.status, 200);
   assert.equal((await retry.json() as { status: string }).status, 'completed');
-  assert.deepEqual(state.deletedObjects.sort(), [...OBJECT_KEYS].sort());
+  assert.deepEqual(state.deletedObjects.sort(), [...ERASURE_OBJECT_KEYS].sort());
 });
 
 test('database failure rolls back finalization and the same job can retry after storage cleanup', async () => {
@@ -271,19 +297,7 @@ test('database failure rolls back finalization and the same job can retry after 
   );
   assert.equal(retry.status, 200);
   assert.equal((await retry.json() as { status: string }).status, 'completed');
-  assert.deepEqual(state.deletedObjects.sort(), [...OBJECT_KEYS].sort());
-});
-
-test('incomplete R2 inventory fails closed without deleting data or objects', async () => {
-  const state = setup({ listFailure: true });
-  const response = await handleApiRequest(
-    makeRequest(`/api/admin/applications/${APPLICATION_ID}`, 'DELETE', { confirmation: 'DELETE' }),
-    state.env,
-  );
-  assert.equal(response.status, 202);
-  assert.equal((await response.json() as { status: string }).status, 'storage_failed');
-  assert.deepEqual(state.deletedObjects, []);
-  assert.ok(!state.rpcCalls.includes('complete_application_erasure'));
+  assert.deepEqual(state.deletedObjects.sort(), [...ERASURE_OBJECT_KEYS].sort());
 });
 
 test('completed deletion is idempotent and cleanup status is admin-only', async () => {
@@ -343,4 +357,92 @@ test('forward migration deletes only reviewed dependencies, retains a PII-minima
   assert.match(migration, /unreviewed foreign keys to application_payments/i);
   assert.match(migration, /DROP FUNCTION public\.delete_application_preserving_history\(uuid\)/i);
   assert.doesNotMatch(migration, /CASCADE/i);
+});
+
+test('separation migration unlinks and preserves financial rows, receipt files, and payment document history', () => {
+  const migration = readFileSync(
+    new URL('../supabase/migrations/20261102000003_separate_application_and_payment_retention.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(migration, /application_payments_application_id_retained_fk[\s\S]*ON DELETE SET NULL/i);
+  assert.match(migration, /application_fee_agreements_application_id_retained_fk[\s\S]*ON DELETE SET NULL/i);
+  assert.match(migration, /application_payment_historical_baseline_application_id_retained_fk[\s\S]*ON DELETE SET NULL/i);
+  assert.match(migration, /application_notifications_application_id_retained_fk[\s\S]*ON DELETE SET NULL/i);
+  assert.match(migration, /receipt_object_key text/i);
+  assert.match(migration, /payments_preserved/);
+  assert.match(migration, /payment_audit_preserved/);
+  assert.match(migration, /payment_baselines_preserved/);
+  assert.match(migration, /issuance\.issuance_type = 'approval'/);
+  assert.match(migration, /notification_type <> 'student_payment_update'/);
+  const erasureFinalizer = migration.match(
+    /CREATE OR REPLACE FUNCTION public\.complete_application_erasure\([\s\S]*?\n\$\$;/i,
+  )?.[0];
+  assert.ok(erasureFinalizer);
+  assert.doesNotMatch(erasureFinalizer, /DELETE FROM public\.(application_payments|application_payment_audit|application_payment_historical_baseline|application_fee_agreements)/i);
+  assert.doesNotMatch(migration, /receipt-v2-[^']*FROM public\.application_payments/i);
+});
+
+test('new admission snapshots omit fee and payment values', () => {
+  const migration = readFileSync(
+    new URL('../supabase/migrations/20261102000003_separate_application_and_payment_retention.sql', import.meta.url),
+    'utf8',
+  );
+  const snapshotBuilder = migration.match(
+    /CREATE OR REPLACE FUNCTION public\.build_official_document_snapshot\([\s\S]*?\n\$\$;/i,
+  )?.[0];
+  assert.ok(snapshotBuilder);
+  assert.doesNotMatch(snapshotBuilder, /'fee'|'payment_summary'|'payments'|'total_paid'|'final_payable'/i);
+});
+
+test('official-document preservation migration detaches issuances and inventories only an unreferenced application photo', () => {
+  const migration = readFileSync(
+    new URL('../supabase/migrations/20261102000004_preserve_official_documents_during_erasure.sql', import.meta.url),
+    'utf8',
+  );
+  const erasureFinalizer = migration.match(
+    /CREATE OR REPLACE FUNCTION public\.complete_application_erasure\([\s\S]*?\n\$\$;/i,
+  )?.[0];
+  const erasureStarter = migration.match(
+    /CREATE OR REPLACE FUNCTION public\.begin_application_erasure\([\s\S]*?\n\$\$;/i,
+  )?.[0];
+  assert.ok(erasureFinalizer);
+  assert.ok(erasureStarter);
+  assert.match(migration, /official_document_issuances_application_id_retained_fk[\s\S]*ON DELETE SET NULL/i);
+  assert.match(migration, /status <> 'completed'[\s\S]*Resolve active application-erasure jobs/i);
+  assert.match(migration, /issuance\.snapshot #>> '\{application,photo_object_key\}' = p_object_key/i);
+  assert.match(erasureStarter, /photo_object_key !~\*[\s\S]*application_erasure_photo_not_exclusive/i);
+  assert.match(erasureStarter, /SELECT v_application\.photo_object_key AS key/i);
+  assert.doesNotMatch(erasureStarter, /SELECT issuance\.pdf_object_key/i);
+  assert.match(erasureFinalizer, /UPDATE public\.official_document_issuances\s+SET application_id = NULL/i);
+  assert.match(erasureFinalizer, /official_document_issuances_preserved/i);
+  assert.doesNotMatch(erasureFinalizer, /DELETE FROM public\.official_document_issuances/i);
+  assert.doesNotMatch(erasureFinalizer, /DELETE FROM public\.(application_payments|application_payment_audit|application_payment_historical_baseline|application_fee_agreements)/i);
+  assert.match(migration, /application_erasure_document_preservation_ready[\s\S]*SELECT true/i);
+});
+
+test('payment-update snapshots remain separate from payment-free admission snapshots', () => {
+  const admissionMigration = readFileSync(
+    new URL('../supabase/migrations/20261102000003_separate_application_and_payment_retention.sql', import.meta.url),
+    'utf8',
+  );
+  const paymentMigration = readFileSync(
+    new URL('../supabase/migrations/20261031000005_payment_document_audit_recovery.sql', import.meta.url),
+    'utf8',
+  );
+  const admissionBuilder = admissionMigration.match(
+    /CREATE OR REPLACE FUNCTION public\.build_official_document_snapshot\([\s\S]*?\n\$\$;/i,
+  )?.[0];
+  const paymentBuilder = paymentMigration.match(
+    /CREATE OR REPLACE FUNCTION public\.build_official_document_snapshot_for_payment_event\([\s\S]*?\n\$\$;/i,
+  )?.[0];
+  const paymentEnqueuer = paymentMigration.match(
+    /CREATE OR REPLACE FUNCTION public\.enqueue_official_document_payment_version\([\s\S]*?\n\$\$;/i,
+  )?.[0];
+  assert.ok(admissionBuilder);
+  assert.ok(paymentBuilder);
+  assert.ok(paymentEnqueuer);
+  assert.doesNotMatch(admissionBuilder, /'fee'|'payment_summary'|'payments'|'total_paid'|'final_payable'/i);
+  assert.match(paymentBuilder, /RETURN jsonb_set\([\s\S]*?'\{payment_summary\}'/i);
+  assert.match(paymentBuilder, /'total_paid', v_total_paid/i);
+  assert.match(paymentEnqueuer, /build_official_document_snapshot_for_payment_event\(/i);
 });

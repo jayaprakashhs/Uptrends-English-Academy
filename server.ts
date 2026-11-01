@@ -1603,6 +1603,7 @@ app.all(
     '/api/admin/applications/:id/restore',
     '/api/admin/applications/:id/payments',
     '/api/admin/application-erasure-jobs/:id',
+    '/api/admin/payments',
     '/api/admin/payments/:paymentId',
     '/api/demo-class-requests',
     '/api/admin/demo-class-requests',

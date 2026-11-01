@@ -1449,6 +1449,7 @@ test('payment routes fail closed when privileged Supabase credentials are missin
   const appId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
   const routes = [
     { path: `/api/admin/applications/${appId}/payments`, method: 'GET' },
+    { path: '/api/admin/payments', method: 'GET' },
     { path: `/api/admin/payments/${appId}`, method: 'DELETE' },
   ];
 
@@ -1477,6 +1478,7 @@ test('payment routes require authentication when privileged credentials are conf
 
   const requests = [
     new Request(`https://academy.example/api/admin/applications/${appId}/payments`),
+    new Request('https://academy.example/api/admin/payments'),
     new Request(`https://academy.example/api/admin/payments/${appId}`, {
       method: 'DELETE',
     }),
@@ -1487,6 +1489,85 @@ test('payment routes require authentication when privileged credentials are conf
     assert.equal(response.status, 401, new URL(request.url).pathname);
     const body = await response.json() as { error: string };
     assert.match(body.error, /^Unauthorized:/);
+  }
+});
+
+test('detached retained payments can be updated or deleted without application-document updates', async () => {
+  const paymentId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const userId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const rpcCalls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const path = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+    if (path === '/auth/v1/user') {
+      return Response.json({ id: userId });
+    }
+    if (path === '/rest/v1/admin_profiles') {
+      return Response.json({
+        id: userId,
+        full_name: 'Test Admin',
+        role: 'admin',
+        is_active: true,
+      });
+    }
+    if (path === '/rest/v1/rpc/update_application_payment') {
+      rpcCalls.push('update');
+      return Response.json({
+        id: paymentId,
+        application_id: null,
+        updated_at: '2026-11-03T00:00:00.000Z',
+      });
+    }
+    if (path === '/rest/v1/rpc/delete_application_payment') {
+      rpcCalls.push('delete');
+      return Response.json({
+        deleted: true,
+        payment_id: paymentId,
+        application_id: null,
+      });
+    }
+    throw new Error(`Unexpected Supabase request: ${path}`);
+  };
+
+  try {
+    const env = {
+      SUPABASE_URL: 'https://project.example',
+      SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+    };
+    const updateResponse = await handleApiRequest(
+      new Request(`https://academy.example/api/admin/payments/${paymentId}`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          amount: 125,
+          payment_method: 'upi',
+          payment_stage: 'installment',
+        }),
+      }),
+      env,
+    );
+    assert.equal(updateResponse.status, 200);
+    const updateBody = await updateResponse.json() as {
+      document_update: { success: boolean; status: string };
+    };
+    assert.deepEqual(updateBody.document_update, { success: true, status: 'not_applicable' });
+
+    const deleteResponse = await handleApiRequest(
+      new Request(`https://academy.example/api/admin/payments/${paymentId}`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer test-admin-token' },
+      }),
+      env,
+    );
+    assert.equal(deleteResponse.status, 200);
+    const deleteBody = await deleteResponse.json() as Record<string, unknown>;
+    assert.equal('document_update' in deleteBody, false);
+    assert.deepEqual(rpcCalls, ['update', 'delete']);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

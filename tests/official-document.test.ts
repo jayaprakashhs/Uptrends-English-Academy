@@ -79,6 +79,93 @@ test('payment receipt PDF uses the configured private logo asset', async () => {
   assert.doesNotMatch(text, /Agreed payment total|Outstanding balance/i);
 });
 
+test('payment receipt can be generated from retained snapshots after application deletion', async () => {
+  const paymentId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const receiptKey = `official-documents/${applicationId}/receipt-v2-${paymentId}.pdf`;
+  const payment = {
+    id: paymentId,
+    application_id: null,
+    application_reference: student.applicationNumber,
+    student_id: student.studentId,
+    student_name: student.fullName,
+    student_email: student.email,
+    student_mobile: student.mobile,
+    student_qualification: student.qualification,
+    student_qualification_category: 'Graduate',
+    student_parent_phone: null,
+    student_parent_email: null,
+    student_date_of_birth: student.dateOfBirth,
+    student_address: student.address,
+    student_school_name: null,
+    student_college_name: null,
+    student_occupation: null,
+    student_place: 'Davangere',
+    student_city: 'Davangere',
+    program_name: student.programName,
+    course_duration: selectedCourse.duration,
+    course_mode: null,
+    course_level: selectedCourse.level,
+    receipt_object_key: receiptKey,
+    amount: 12500,
+    payment_method: 'bank_transfer',
+    payment_stage: 'registration',
+    recorded_at: '2026-01-02T03:04:05.000Z',
+    reference_number: 'RETAINED-REF',
+    notes: null,
+  };
+  const uploaded: Array<{ key: string; bytes: Uint8Array }> = [];
+  const env = makeWorkerEnv({
+    APPLICATION_MEDIA: {
+      get: async () => null,
+      put: async (key: string, value: Uint8Array) => uploaded.push({ key, bytes: value }),
+      delete: async () => undefined,
+      list: async () => ({ objects: [] }),
+    },
+  });
+
+  await withAdminFetch('admin', async (_request, url) => {
+    if (url.pathname === '/rest/v1/application_payments') {
+      return Response.json(url.searchParams.has('id')
+        ? payment
+        : [{
+          id: payment.id,
+          amount: payment.amount,
+          payment_method: payment.payment_method,
+          payment_stage: payment.payment_stage,
+          recorded_at: payment.recorded_at,
+          reference_number: payment.reference_number,
+        }]);
+    }
+    if (url.pathname === '/rest/v1/official_document_settings') {
+      return Response.json({
+        setting_key: 'admission_approval',
+        document_data: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+      });
+    }
+    throw new Error(`Unexpected request: ${url.pathname}`);
+  }, async () => {
+    const response = await handleApiRequest(
+      authorizedRequest(`/api/admin/payments/${paymentId}/receipt`, 'POST'),
+      env,
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      success: true,
+      status: 'ready',
+      payment_id: paymentId,
+      receipt_url: `/api/admin/payments/${paymentId}/receipt/file`,
+    });
+  });
+
+  assert.equal(uploaded.length, 1);
+  assert.equal(uploaded[0]?.key, receiptKey);
+  const receiptText = decodePdfText(uploaded[0]!.bytes);
+  assert.match(receiptText, /Test Learner/);
+  assert.match(receiptText, /UEA-APP-2026-0001/);
+  assert.match(receiptText, /RETAINED-REF/);
+  assert.match(receiptText, /Total paid to date/);
+});
+
 const decodePdfText = (bytes: Uint8Array): string => {
   const source = Buffer.from(bytes).toString('latin1');
   const decodedStreams: string[] = [];
@@ -171,7 +258,15 @@ test('admission approval PDF contains real student details without fee or paymen
     },
     student,
     course: selectedCourse,
-    paymentSummary: summarizeOfficialPayments([]),
+    paymentSummary: summarizeOfficialPayments([{
+      id: 'private-payment-id',
+      amount: 98765,
+      paymentMethod: 'upi',
+      paymentStage: 'installment',
+      recordedAt: '2026-10-30T10:00:00Z',
+      referenceNumber: 'PRIVATE-REFERENCE',
+    }]),
+    includePaymentDetails: true,
   });
   const pdf = await PDFDocument.load(bytes);
   assert.equal(pdf.getPageCount(), 1);
@@ -183,6 +278,7 @@ test('admission approval PDF contains real student details without fee or paymen
   assert.match(text, /UEA-APP-2026-0001/);
   assert.doesNotMatch(text, /FEE BREAKDOWN|Course Fee|Net Payable Amount|TERMS & CONDITIONS|Fictional fee conditions/);
   assert.doesNotMatch(text, /PAYMENT PENDING|INR 0\.00|Net Payable Amount/);
+  assert.doesNotMatch(text, /Total paid to date|INR 98,765\.00|PRIVATE-REFERENCE|private-payment-id|upi/i);
   assert.doesNotMatch(text, /Spoken English|Business English|Other Course/);
 });
 
@@ -831,6 +927,8 @@ test('recorded payment creates and emails an immutable PDF version using snapsho
   assert.equal(paymentEmails[0]?.to, 'parent@example.com');
   assert.match(String(paymentEmails[0]?.subject), /Payment record updated/);
   assert.doesNotMatch(String(paymentEmails[0]?.subject), /Congratulations|approved/i);
+  assert.match(String(paymentEmails[0]?.html), /Total recorded/);
+  assert.match(String(paymentEmails[0]?.html), /INR 4,000\.00/);
   assert.doesNotMatch(String(paymentEmails[0]?.html), /outstanding|fully paid|partially paid|payment pending/i);
   const attachments = paymentEmails[0]?.attachments as Array<{ content: string }>;
   assert.equal(attachments.length, 1);
@@ -841,10 +939,7 @@ test('recorded payment creates and emails an immutable PDF version using snapsho
   assert.match(pdfText, /parent@example.com/);
   assert.doesNotMatch(pdfText, /HIDDEN-APPLICANT-MOBILE/);
   assert.match(pdfText, /Regular classroom/);
-  assert.match(pdfText, /UPI-7788/);
-  assert.match(pdfText, /BANK-REF-22/);
-  assert.match(pdfText, /Total paid to date/);
-  assert.match(pdfText, /INR 4,000.00/);
+  assert.doesNotMatch(pdfText, /UPI-7788|BANK-REF-22|Total paid to date|INR 4,000\.00/);
   assert.doesNotMatch(pdfText, /PARTIALLY PAID|Outstanding Balance|INR 6,000.00/);
   assert.doesNotMatch(pdfText, /FEE BREAKDOWN|Course Fee|Net Payable Amount|TERMS & CONDITIONS/);
   assert.match(pdfText, /Bring the admission confirmation slip/);
@@ -1074,14 +1169,14 @@ test('a PDF generation failure leaves the recorded payment saved without automat
   assert.equal(issuance.status, 'pending');
 });
 
-test('authorized admins can list sanitized history and download an older PDF version', async () => {
+test('authorized admins can list and download detached official-document history by application reference', async () => {
   const firstVersionKey = `official-documents/${applicationId}/v1-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.pdf`;
   const secondVersionKey = `official-documents/${applicationId}/v2-ffffffff-ffff-4fff-8fff-ffffffffffff.pdf`;
   const pdfBytes = await generateOfficialPdf({ settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS, student, course: selectedCourse });
   const versions = [
     {
       id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
-      application_id: applicationId,
+      application_id: null,
       application_reference: student.applicationNumber,
       student_id: student.studentId,
       version_number: 1,
@@ -1091,11 +1186,27 @@ test('authorized admins can list sanitized history and download an older PDF ver
       generated_at: '2026-10-30T10:00:00Z',
       created_at: '2026-10-30T09:00:00Z',
       pdf_object_key: firstVersionKey,
-      snapshot: { payment_summary: { status: 'pending', total_paid: 0, outstanding_balance: 13000 } },
+      snapshot: {
+        application: {
+          id: applicationId,
+          student_name: student.fullName,
+          student_id: student.studentId,
+          application_reference: student.applicationNumber,
+          qualification: student.qualification,
+          program_name: student.programName,
+          email: student.email,
+          mobile: student.mobile,
+          date_of_birth: student.dateOfBirth,
+          address: student.address,
+        },
+        program: { name: selectedCourse.name, duration: selectedCourse.duration },
+        payment_summary: { status: 'pending', total_paid: 98765, outstanding_balance: 13000 },
+        document_settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+      },
     },
     {
       id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
-      application_id: applicationId,
+      application_id: null,
       application_reference: student.applicationNumber,
       student_id: student.studentId,
       version_number: 2,
@@ -1135,7 +1246,7 @@ test('authorized admins can list sanitized history and download an older PDF ver
     return Response.json(versions);
   }, async () => {
     const historyResponse = await handleApiRequest(
-      authorizedRequest(`/api/admin/official-document/versions?application_id=${applicationId}`),
+      authorizedRequest(`/api/admin/official-document/versions?application_reference=${student.applicationNumber}`),
       env,
     );
     assert.equal(historyResponse.status, 200);
@@ -1146,16 +1257,17 @@ test('authorized admins can list sanitized history and download an older PDF ver
     assert.equal('pdf_object_key' in history[0]!, false);
     assert.equal('payment_status' in history[1]!, false);
     assert.equal('outstanding_balance' in history[1]!, false);
-    assert.equal(history[1]?.total_paid, 4000);
-    assert.equal(history[1]?.payment_count, 0);
+    assert.equal('total_paid' in history[1]!, false);
+    assert.equal('payment_count' in history[1]!, false);
 
     const downloadResponse = await handleApiRequest(
-      authorizedRequest(`/api/admin/official-document/issued?application_id=${applicationId}&version=1`),
+      authorizedRequest(`/api/admin/official-document/issued?application_reference=${student.applicationNumber}&version=1`),
       env,
     );
     assert.equal(downloadResponse.status, 200);
     assert.match(downloadResponse.headers.get('Content-Disposition') || '', /Issued_V1_/);
-    assert.deepEqual(new Uint8Array(await downloadResponse.arrayBuffer()), pdfBytes);
+    const issuedText = decodePdfText(new Uint8Array(await downloadResponse.arrayBuffer()));
+    assert.doesNotMatch(issuedText, /Total paid to date|UPI-7788|BANK-REF-22|INR 4,000\.00/);
   });
 
   assert.equal(retrievedKey, firstVersionKey);
@@ -1839,7 +1951,7 @@ test('ready issuances reject missing PDF object keys without regeneration or mut
   }
 });
 
-test('ready issuance reuses an existing R2 PDF without regeneration or mutation', async () => {
+test('ready issuance serves the immutable historical PDF from R2 without overwriting it', async () => {
   const key = `official-documents/${applicationId}/v1-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.pdf`;
   const storedPdf = Uint8Array.from(Buffer.from('%PDF-stored-immutable'));
   let r2Reads = 0;
@@ -1880,7 +1992,22 @@ test('ready issuance reuses an existing R2 PDF without regeneration or mutation'
       version_number: 1,
       status: 'ready',
       pdf_object_key: key,
-      snapshot: {},
+      snapshot: {
+        application: {
+          application_reference: student.applicationNumber,
+          student_id: student.studentId,
+          student_name: student.fullName,
+          qualification: student.qualification,
+          program_name: student.programName,
+          email: student.email,
+          mobile: student.mobile,
+          date_of_birth: student.dateOfBirth,
+          address: student.address,
+        },
+        program: { name: selectedCourse.name, duration: selectedCourse.duration },
+        payment_summary: { total_paid: 98765, payments: [{ amount: 98765, reference_number: 'PRIVATE-REF' }] },
+        document_settings: DEFAULT_OFFICIAL_DOCUMENT_SETTINGS,
+      },
     }]);
   }, async () => {
     const response = await handleApiRequest(
@@ -1888,12 +2015,54 @@ test('ready issuance reuses an existing R2 PDF without regeneration or mutation'
       env,
     );
     assert.equal(response.status, 200);
-    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), storedPdf);
+    const output = new Uint8Array(await response.arrayBuffer());
+    assert.deepEqual(output, storedPdf);
   });
 
   assert.equal(r2Reads, 1);
   assert.equal(r2Writes, 0);
   assert.equal(databaseUpdates, 0);
+});
+
+test('missing historical payment-update PDFs fail visibly instead of regenerating a different document', async () => {
+  const key = `official-documents/${applicationId}/v2-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.pdf`;
+  let r2Reads = 0;
+  const env = makeWorkerEnv({
+    APPLICATION_MEDIA: {
+      get: async () => {
+        r2Reads += 1;
+        return null;
+      },
+      put: async () => assert.fail('historical payment document must not be overwritten'),
+      delete: async () => undefined,
+      list: async () => ({ objects: [] }),
+    },
+  });
+
+  await withAdminFetch('admin', async (_request, url) => {
+    if (!url.pathname.endsWith('/official_document_issuances')) {
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    }
+    return Response.json([{
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      application_id: null,
+      application_reference: student.applicationNumber,
+      version_number: 2,
+      issuance_type: 'payment_update',
+      status: 'ready',
+      pdf_object_key: key,
+      snapshot: { application: { id: applicationId } },
+    }]);
+  }, async () => {
+    const response = await handleApiRequest(
+      authorizedRequest(`/api/admin/official-document/issued?application_reference=${student.applicationNumber}&issuance_type=payment_update&version=2`),
+      env,
+    );
+    assert.equal(response.status, 404);
+    assert.match(await response.text(), /private file was not found/i);
+  });
+
+  assert.equal(r2Reads, 1);
 });
 
 test('historical payment fixtures preserve approval-time totals and exclude deleted FCF5 payments', () => {
