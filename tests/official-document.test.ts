@@ -565,6 +565,14 @@ test('approval records a failed delivery without exposing an automatic retry end
   });
 
   await withAdminFetch('super_admin', async (request, url) => {
+    if (url.pathname.endsWith('/site_branding')) {
+      return Response.json({
+        academy_name: "Uptrend's English Academy",
+        logo_url: 'https://assets.example/branding/saved-logo.png',
+        primary_green: '#14532d',
+        primary_orange: '#ea580c',
+      });
+    }
     if (url.hostname === 'api.resend.com' && url.pathname === '/emails') {
       emailAttempts += 1;
       assert.equal(request.headers.get('Idempotency-Key'), `student-approval-${applicationId}`);
@@ -626,11 +634,16 @@ test('approval records a failed delivery without exposing an automatic retry end
   assert.equal(emailAttempts, 1);
   assert.equal(resendPayloads.length, 1);
   assert.equal(resendPayloads[0].to, student.email);
+  assert.match(String(resendPayloads[0].html), /src="https:\/\/assets\.example\/branding\/saved-logo\.png"/);
   assert.match(String(resendPayloads[0].html), /Test Learner/);
   assert.match(String(resendPayloads[0].html), /IELTS Preparation/);
   assert.match(String(resendPayloads[0].html), /official admission approval document attached/i);
   assert.doesNotMatch(String(resendPayloads[0].html), /fee|terms and conditions/i);
   assert.doesNotMatch(String(resendPayloads[0].html), /Editable Current Name|Current Editable Course|stale-notification/);
+  const approvalAttachments = resendPayloads[0].attachments as Array<{ filename: string; content: string }>;
+  assert.equal(approvalAttachments.length, 1);
+  assert.match(approvalAttachments[0].filename, /^Official_Document_/);
+  assert.ok(approvalAttachments[0].content.length > 0);
   assert.equal(notificationCount, 1);
   assert.deepEqual(uploadedPdfs, [`official-documents/${applicationId}/v1-${issuance.id}.pdf`]);
   assert.ok(assetReads.includes(logoKey));

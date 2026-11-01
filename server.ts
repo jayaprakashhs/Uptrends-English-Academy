@@ -15,6 +15,7 @@ import {
   normalizeContactEmail,
   normalizeIndianMobileNumber,
 } from './contact-validation';
+import { renderBrandedEmail, type EmailBranding } from './email-template';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1517,10 +1518,47 @@ app.post('/api/callback-request', async (req, res) => {
       memoryStore.callbacks.unshift(newRecord);
     }
 
+    let emailBranding: EmailBranding = { publicAssetBaseUrl: R2_PUBLIC_URL };
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('site_branding')
+          .select('academy_name,logo_url,primary_green,primary_orange')
+          .limit(1)
+          .maybeSingle();
+        if (error) {
+          console.error('[Email Branding Error]', { code: error.code || 'database_query_failed' });
+        } else if (data) {
+          emailBranding = {
+            academyName: data.academy_name,
+            logoUrl: data.logo_url,
+            primaryGreen: data.primary_green,
+            primaryOrange: data.primary_orange,
+            publicAssetBaseUrl: R2_PUBLIC_URL,
+          };
+        }
+      } catch (brandingError) {
+        console.error('[Email Branding Error]', brandingError);
+      }
+    }
+    const renderedEmail = renderBrandedEmail({
+      title: 'New Callback Request',
+      paragraphs: ['A new callback request has been received.'],
+      status: 'Pending',
+      details: [
+        { label: 'Applicant', value: String(full_name) },
+        { label: 'Mobile', value: String(normalizedMobile) },
+        { label: 'Email', value: normalizedEmail || 'Not provided' },
+        { label: 'Program', value: String(program_name || 'General Inquiry') },
+        { label: 'Preferred Time', value: String(preferred_contact_time) },
+        { label: 'Message', value: String(message || 'None') },
+      ],
+    }, emailBranding);
     await sendEmailViaResend({
       to: APPLICATION_NOTIFICATION_EMAIL,
       subject: `New Callback Request — ${full_name} (${preferred_contact_time})`,
-      html: `<p>New callback request received:</p><p><strong>Name:</strong> ${full_name}<br><strong>Mobile:</strong> ${mobile}<br><strong>Program:</strong> ${program_name}<br><strong>Preferred Time:</strong> ${preferred_contact_time}<br><strong>Message:</strong> ${message || 'None'}</p>`,
+      html: renderedEmail.html,
+      text: renderedEmail.text,
     });
 
     res.status(202).json(contactAcknowledgement);

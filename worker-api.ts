@@ -23,6 +23,7 @@ import {
   normalizeContactEmail,
   normalizeIndianMobileNumber,
 } from './contact-validation';
+import { renderBrandedEmail, type EmailBranding, type EmailContent } from './email-template';
 
 interface Env {
   SUPABASE_URL?: string;
@@ -506,10 +507,6 @@ const safeYouTube = (value: unknown): { url: string; id: string } | null => {
   return id ? { url: `https://www.youtube.com/watch?v=${id}`, id } : null;
 };
 
-const escapeHtml = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, (character) => ({
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-}[character] || character));
-
 interface EmailAttachment {
   filename: string;
   content: string;
@@ -518,7 +515,7 @@ interface EmailAttachment {
 interface ApprovalEmail {
   to: string;
   subject: string;
-  html: string;
+  content: EmailContent;
   attachments: EmailAttachment[];
 }
 
@@ -546,7 +543,20 @@ const buildApprovalEmail = (
   return {
     to: student.email,
     subject: "Congratulations! Your Application Has Been Approved — Uptrend's English Academy",
-    html: `<div><h2>Congratulations!</h2><p>Dear <strong>${escapeHtml(student.student_name)}</strong>,</p><p>Your application to Uptrend's English Academy for <strong>${escapeHtml(student.program_name)}</strong> has been approved.</p><p>Please find your official admission approval document attached.</p><p>Application Number: <strong>${escapeHtml(student.application_reference)}</strong><br>Student ID: <strong>${escapeHtml(student.student_id)}</strong></p></div>`,
+    content: {
+      title: 'Application Approved',
+      greeting: student.student_name,
+      paragraphs: [
+        `Your application to Uptrend's English Academy for ${student.program_name} has been approved.`,
+        'Please find your official admission approval document attached.',
+      ],
+      status: 'Approved',
+      details: [
+        { label: 'Application Number', value: student.application_reference },
+        { label: 'Student ID', value: student.student_id },
+        { label: 'Program', value: student.program_name },
+      ],
+    },
     attachments: [{
       filename: `Official_Document_${student.application_reference.replace(/[^A-Za-z0-9_-]/g, '_')}.pdf`,
       content: toBase64(pdfBytes),
@@ -583,7 +593,16 @@ const buildPaymentUpdateEmail = (
   return {
     to: student.email,
     subject: `Payment record updated — Uptrend's English Academy`,
-    html: `<div><h2>Payment record updated</h2><p>Dear <strong>${escapeHtml(student.student_name)}</strong>,</p><p>Your payment record for application <strong>${escapeHtml(student.application_reference)}</strong> has been updated.</p><p><strong>Total recorded:</strong> ${formattedTotalPaid}</p><p>The latest official document, Version ${versionNumber}, is attached.</p></div>`,
+    content: {
+      title: 'Payment Record Updated',
+      greeting: student.student_name,
+      paragraphs: [
+        `Your payment record for application ${student.application_reference} has been updated.`,
+        `Total recorded: ${formattedTotalPaid}.`,
+        `The latest official document, Version ${versionNumber}, is attached.`,
+      ],
+      details: [{ label: 'Application Number', value: student.application_reference }],
+    },
     attachments: [{
       filename: `Official_Document_V${versionNumber}_${reference}.pdf`,
       content: toBase64(pdfBytes),
@@ -605,8 +624,7 @@ const sendEmail = async (
   message: {
     to: string;
     subject: string;
-    html: string;
-    text?: string;
+    content: EmailContent;
     attachments?: EmailAttachment[];
     idempotencyKey?: string;
   },
@@ -614,6 +632,37 @@ const sendEmail = async (
   if (!env.RESEND_API_KEY) return { success: false, error: 'RESEND_API_KEY is not configured.', provider_message_id: null };
 
   try {
+    const brandingClient = getSupabaseClient(env, true, 'email.branding.read');
+    let branding: EmailBranding = { publicAssetBaseUrl: env.CLOUDFLARE_R2_PUBLIC_URL };
+    if (brandingClient) {
+      try {
+        const { data, error } = await brandingClient
+          .from('site_branding')
+          .select('academy_name,logo_url,primary_green,primary_orange')
+          .limit(1)
+          .maybeSingle();
+        if (error) {
+          console.error('Email branding could not be loaded; using the academy name fallback.', {
+            operation: 'email.branding.read',
+            error_code: error.code || 'database_query_failed',
+          });
+        } else if (data) {
+          branding = {
+            academyName: data.academy_name,
+            logoUrl: data.logo_url,
+            primaryGreen: data.primary_green,
+            primaryOrange: data.primary_orange,
+            publicAssetBaseUrl: env.CLOUDFLARE_R2_PUBLIC_URL,
+          };
+        }
+      } catch (error) {
+        console.error('Email branding could not be loaded; using the academy name fallback.', {
+          operation: 'email.branding.read',
+          error: messageOf(error),
+        });
+      }
+    }
+    const rendered = renderBrandedEmail(message.content, branding);
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -625,8 +674,8 @@ const sendEmail = async (
         from: env.RESEND_FROM_EMAIL || 'admissions@uptrendsacademy.com',
         to: message.to,
         subject: message.subject,
-        html: message.html,
-        text: message.text || message.html.replace(/<[^>]*>/g, ' '),
+        html: rendered.html,
+        text: rendered.text,
         ...(message.attachments?.length ? { attachments: message.attachments } : {}),
       }),
     });
@@ -644,8 +693,7 @@ interface RequestEmailMessage {
   notification_type: 'applicant_confirmation' | 'academy_notification';
   recipient_email: string;
   subject: string;
-  html: string;
-  text?: string;
+  content: EmailContent;
 }
 
 const sendRequestEmails = async (
@@ -656,8 +704,7 @@ const sendRequestEmails = async (
     const emailResult = await sendEmail(env, {
       to: message.recipient_email,
       subject: message.subject,
-      html: message.html,
-      text: message.text,
+      content: message.content,
     });
     if (!emailResult.success) {
       console.error('Request email delivery failed.', {
@@ -2113,11 +2160,7 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
     return errorResponse('Failed to record application in database. Please try again.', 500);
   }
 
-  const safeName = escapeHtml(fields.student_name);
-  const safeProgram = escapeHtml(fields.program_name);
   const applicationReference = insertedApplication.application_reference;
-  const studentHtml = `<div><h2>Uptrend's English Academy</h2><p>Dear <strong>${safeName}</strong>,</p><p>Thank you for applying to Uptrend's English Academy. Your application for <strong>${safeProgram}</strong> is waiting for staff review.</p><p>Application Reference: <strong>${applicationReference}</strong></p></div>`;
-  const staffHtml = `<div><h3>New Student Application Received</h3><p>Student: ${safeName}<br>Program: ${safeProgram}<br>Mobile: ${escapeHtml(fields.mobile)}<br>Email: ${escapeHtml(fields.email)}<br>Qualification: ${escapeHtml(fields.qualification)}<br>Reference: ${applicationReference}</p></div>`;
   const notificationRows = [
     {
       id: crypto.randomUUID(),
@@ -2155,12 +2198,33 @@ const submitApplication = async (request: Request, env: Env): Promise<Response> 
   const [studentEmail, academyEmail] = await Promise.all([sendEmail(env, {
     to: fields.email,
     subject: "Application Received — Uptrend's English Academy",
-    html: studentHtml,
+    content: {
+      title: 'Application Received',
+      greeting: fields.student_name,
+      paragraphs: [
+        `Thank you for applying to Uptrend's English Academy for ${fields.program_name}.`,
+        'Your application has been received and is awaiting review by our team.',
+      ],
+      status: 'Awaiting review',
+      details: [{ label: 'Application Reference', value: applicationReference }],
+    },
     idempotencyKey: `application-student-confirmation-${applicationId}`,
   }), sendEmail(env, {
     to: env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com',
     subject: `New Student Application — ${fields.student_name}`,
-    html: staffHtml,
+    content: {
+      title: 'New Student Application Received',
+      paragraphs: ['A new student application has been submitted for review.'],
+      status: 'Pending',
+      details: [
+        { label: 'Student', value: fields.student_name },
+        { label: 'Program', value: fields.program_name },
+        { label: 'Mobile', value: fields.mobile },
+        { label: 'Email', value: fields.email },
+        { label: 'Qualification', value: fields.qualification },
+        { label: 'Reference', value: applicationReference },
+      ],
+    },
     idempotencyKey: `application-staff-notification-${applicationId}`,
   })]);
 
@@ -2232,27 +2296,36 @@ const submitDemoClassRequest = async (request: Request, env: Env): Promise<Respo
   }
 
   const { full_name, email, mobile, qualification_category, educational_qualification, city } = requestRecord;
-  const name = escapeHtml(full_name);
-  const emailAddress = escapeHtml(email);
-  const escapedMobile = escapeHtml(mobile);
-  const escapedCategory = escapeHtml(qualification_category);
-  const escapedCourse = escapeHtml(educational_qualification);
-  const escapedCity = escapeHtml(city);
   const internalEmail = env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com';
   await sendRequestEmails(env, [
     {
       notification_type: 'applicant_confirmation',
       recipient_email: email,
       subject: "Demo Class Request Received — Uptrend's English Academy",
-      html: `<p>Dear ${name},</p><p>Thank you for requesting a free demo class at Uptrend's English Academy. Our team will contact you soon to discuss arrangements.</p><p>Regards,<br>Uptrend's English Academy</p>`,
-      text: `Dear ${full_name}, thank you for requesting a free demo class at Uptrend's English Academy. Our team will contact you soon to discuss arrangements.`,
+      content: {
+        title: 'Free Demo Class Request Received',
+        greeting: full_name,
+        paragraphs: ['Thank you for requesting a free demo class at Uptrend\'s English Academy. Our team will contact you soon to discuss arrangements.'],
+        status: 'Pending',
+      },
     },
     {
       notification_type: 'academy_notification',
       recipient_email: internalEmail,
       subject: `New Demo Class Request — ${full_name}`,
-      html: `<h2>New Free Demo Class Request</h2><ul><li>Name: ${name}</li><li>Mobile: ${escapedMobile}</li><li>Email: ${emailAddress}</li><li>Category: ${escapedCategory}</li><li>Qualification / Course: ${escapedCourse}</li><li>City: ${escapedCity}</li></ul><p>Status: Pending</p>`,
-      text: `New free demo class request from ${full_name}; mobile ${mobile}; email ${email}; category ${qualification_category}; course ${educational_qualification}; city ${city}.`,
+      content: {
+        title: 'New Free Demo Class Request',
+        paragraphs: ['A new free demo class request has been received.'],
+        status: 'Pending',
+        details: [
+          { label: 'Student', value: full_name },
+          { label: 'Mobile', value: mobile },
+          { label: 'Email', value: email },
+          { label: 'Category', value: qualification_category },
+          { label: 'Qualification / Course', value: educational_qualification },
+          { label: 'City', value: city },
+        ],
+      },
     },
   ]);
 
@@ -2311,7 +2384,19 @@ const submitCallback = async (request: Request, env: Env): Promise<Response> => 
     notification_type: 'academy_notification',
     recipient_email: env.APPLICATION_NOTIFICATION_EMAIL || 'uptrendsinstitute@gmail.com',
     subject: `New Callback Request — ${fullName} (${preferredTime})`,
-    html: `<p>New callback request received:</p><p><strong>Name:</strong> ${escapeHtml(fullName)}<br><strong>Mobile:</strong> ${escapeHtml(normalizedMobile)}<br><strong>Program:</strong> ${escapeHtml(programName || 'General Inquiry')}<br><strong>Preferred Time:</strong> ${escapeHtml(preferredTime)}<br><strong>Message:</strong> ${escapeHtml(message || 'None')}</p>`,
+    content: {
+      title: 'New Callback Request',
+      paragraphs: ['A new callback request has been received.'],
+      status: 'Pending',
+      details: [
+        { label: 'Applicant', value: fullName },
+        { label: 'Mobile', value: normalizedMobile },
+        { label: 'Email', value: normalizedEmail || 'Not provided' },
+        { label: 'Program', value: programName || 'General Inquiry' },
+        { label: 'Preferred Time', value: preferredTime },
+        { label: 'Message', value: message || 'None' },
+      ],
+    },
   }]);
   return contactAcknowledgement();
 };
@@ -3554,7 +3639,15 @@ const emailPaymentReceipt = async (
   const result = await sendEmail(env, {
     to: email,
     subject: `Payment receipt — ${receipt.context.application.application_reference}`,
-    html: `<div><h2>Payment receipt</h2><p>Dear ${escapeHtml(receipt.context.application.student_name)},</p><p>Please find your payment receipt for application <strong>${escapeHtml(receipt.context.application.application_reference)}</strong> attached.</p></div>`,
+    content: {
+      title: 'Payment Receipt',
+      greeting: receipt.context.application.student_name,
+      paragraphs: ['Please find your payment receipt attached.'],
+      details: [{
+        label: 'Application Reference',
+        value: receipt.context.application.application_reference,
+      }],
+    },
     attachments: [{ filename: `Payment_Receipt_${reference}.pdf`, content: toBase64(receipt.bytes) }],
     idempotencyKey: `payment-receipt-v2-${paymentId}`,
   });

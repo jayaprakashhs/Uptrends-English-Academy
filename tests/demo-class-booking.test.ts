@@ -123,7 +123,12 @@ test('request email outbox migration is private and does not delete request reco
 test('stores demo requests separately and sends independent applicant and academy emails', async () => {
   const previousFetch = globalThis.fetch;
   const databaseRequests: Array<{ url: string; method: string; body: unknown }> = [];
-  const emailMessages: Array<{ to: string | string[]; subject: string }> = [];
+  const emailMessages: Array<{
+    to: string | string[];
+    subject: string;
+    html: string;
+    text: string;
+  }> = [];
 
   globalThis.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -132,12 +137,25 @@ test('stores demo requests separately and sends independent applicant and academ
       databaseRequests.push({
         url,
         method: init?.method || 'GET',
-        body: JSON.parse(String(init?.body)) as unknown,
+        body: init?.body ? JSON.parse(String(init.body)) as unknown : null,
       });
+      if (url.includes('/rest/v1/site_branding?')) {
+        return Response.json({
+          academy_name: "Uptrend's English Academy",
+          logo_url: 'https://assets.example/branding/current-logo.png',
+          primary_green: '#14532d',
+          primary_orange: '#ea580c',
+        });
+      }
       return Response.json({ id: '550e8400-e29b-41d4-a716-446655440000' }, { status: 201 });
     }
     if (url === 'https://api.resend.com/emails') {
-      const email = JSON.parse(String(init?.body)) as { to: string | string[]; subject: string };
+      const email = JSON.parse(String(init?.body)) as {
+        to: string | string[];
+        subject: string;
+        html: string;
+        text: string;
+      };
       emailMessages.push(email);
       if (emailMessages.length === 1) {
         return Response.json({ message: 'temporary Resend failure' }, { status: 503 });
@@ -157,6 +175,7 @@ test('stores demo requests separately and sends independent applicant and academ
       SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
       RESEND_API_KEY: 'test-resend-key',
       APPLICATION_NOTIFICATION_EMAIL: 'academy@example.com',
+      CLOUDFLARE_R2_PUBLIC_URL: 'https://assets.example',
     });
 
     assert.equal(response.status, 202);
@@ -173,6 +192,18 @@ test('stores demo requests separately and sends independent applicant and academ
     assert.equal(emailMessages.length, 2);
     assert.equal(emailMessages[0].to, 'applicant@example.com');
     assert.equal(emailMessages[1].to, 'academy@example.com');
+    assert.equal(databaseRequests.filter(({ url }) => url.includes('/rest/v1/site_branding?')).length, 2);
+    for (const email of emailMessages) {
+      assert.match(email.html, /src="https:\/\/assets\.example\/branding\/current-logo\.png"/);
+      assert.match(email.html, /alt="Uptrend's English Academy"/);
+      assert.match(email.html, /Davangere, Karnataka, India/);
+      assert.ok(email.text.length > 0);
+    }
+    assert.match(emailMessages[0].html, /Free Demo Class Request Received/);
+    assert.match(emailMessages[0].html, /Pending/);
+    assert.match(emailMessages[0].html, /Test Applicant/);
+    assert.match(emailMessages[1].html, /New Free Demo Class Request/);
+    assert.match(emailMessages[1].html, /applicant@example\.com/);
     assert.equal(databaseRequests.some(({ url }) => /\/(?:applications|application_notifications)\b/.test(url)), false);
   } finally {
     globalThis.fetch = previousFetch;
